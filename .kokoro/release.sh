@@ -40,13 +40,16 @@
 
 set -eo pipefail
 
+# --- Resolve SCRIPT_DIR before cd so the relative BASH_SOURCE path is
+# resolved against the original working directory (the Kokoro workspace root).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # --- Determine project root ---
 if [[ -n "${KOKORO_ARTIFACTS_DIR}" ]]; then
   cd "${KOKORO_ARTIFACTS_DIR}/git/antigravity-sdk-py"
 fi
 
 PROJECT_DIR="$(pwd)"
-SCRIPT_DIR="$(dirname "${BASH_SOURCE[0]}")"
 
 # --- Python 3.13 via pyenv (pre-installed on the Kokoro image) ---
 echo "--- Setting up Python 3.13 ---"
