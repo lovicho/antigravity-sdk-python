@@ -19,6 +19,7 @@ session. It reacts to external events (cron, file changes, webhooks)
 and pushes messages back into the agent.
 """
 
+import inspect
 from typing import Awaitable, Callable
 
 from google.antigravity.connections import connection as connection_module
@@ -51,3 +52,27 @@ class TriggerContext:
 
 # A Trigger is any async function that accepts a TriggerContext.
 Trigger = Callable[[TriggerContext], Awaitable[None]]
+
+
+def trigger(func: Callable[[TriggerContext], Awaitable[None]]):
+  """Decorator for Triggers.
+
+  Validates that the function is async and accepts exactly one argument
+  (TriggerContext). Adds __is_trigger__ = True metadata.
+
+  Args:
+    func: The async function to wrap as a trigger.
+
+  Returns:
+    The original function with __is_trigger__ attribute set.
+  """
+  if not inspect.iscoroutinefunction(func):
+    raise ValueError("Trigger must be an async function")
+
+  sig = inspect.signature(func)
+  params = list(sig.parameters.values())
+  if len(params) != 1:
+    raise ValueError("Trigger must accept exactly one parameter")
+
+  func.__is_trigger__ = True
+  return func

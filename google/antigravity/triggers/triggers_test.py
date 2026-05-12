@@ -50,5 +50,44 @@ class TriggerTypeTest(unittest.TestCase):
     self.assertTrue(callable(trigger))
 
 
+class TriggerDecoratorTest(unittest.TestCase):
+
+  def test_valid_trigger_accepted(self):
+    @triggers.trigger
+    async def my_trigger(ctx: triggers.TriggerContext) -> None:
+      del ctx
+
+    self.assertTrue(getattr(my_trigger, "__is_trigger__", False))
+
+  def test_not_async_raises_value_error(self):
+    def sync_trigger(ctx: triggers.TriggerContext) -> None:
+      del ctx
+
+    with self.assertRaises(ValueError) as cm:
+      triggers.trigger(sync_trigger)
+    self.assertEqual(str(cm.exception), "Trigger must be an async function")
+
+  def test_wrong_signature_raises_value_error(self):
+    async def no_arg_trigger() -> None:
+      pass
+
+    with self.assertRaises(ValueError) as cm:
+      triggers.trigger(no_arg_trigger)
+    self.assertEqual(
+        str(cm.exception), "Trigger must accept exactly one parameter"
+    )
+
+    async def multi_arg_trigger(
+        ctx: triggers.TriggerContext, extra: int
+    ) -> None:
+      del ctx, extra
+
+    with self.assertRaises(ValueError) as cm:
+      triggers.trigger(multi_arg_trigger)
+    self.assertEqual(
+        str(cm.exception), "Trigger must accept exactly one parameter"
+    )
+
+
 if __name__ == "__main__":
   unittest.main()

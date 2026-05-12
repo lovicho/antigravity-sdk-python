@@ -26,7 +26,8 @@ from google.antigravity.triggers import trigger_runner
 from google.antigravity.triggers import helpers
 from google.antigravity import types
 
-# 1. Define a trigger (it's just an async function).
+# 1. Define a trigger using the @trigger decorator.
+@triggers.trigger
 async def health_check(ctx: triggers.TriggerContext) -> None:
   """Pings the agent every 5 minutes."""
   while True:
@@ -61,14 +62,16 @@ The handle provided to every trigger at startup. Provides:
 
 ### Trigger Type
 
-A `Trigger` is any `async def` that accepts a `TriggerContext`:
+A `Trigger` is any `async def` that accepts a `TriggerContext`. Use the
+`@trigger` decorator for better discovery and validation:
 
 ```python
+@triggers.trigger
 async def my_trigger(ctx: TriggerContext) -> None:
   ...
 ```
 
-No base class, no registration ceremony — just a function.
+The decorator validates the signature and marks the function as a trigger.
 
 ## Helper Factories
 
