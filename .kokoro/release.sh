@@ -198,7 +198,7 @@ fi
 # Prepublish Staging Flow (Default Mode)
 # ---------------------------------------------------------------------------
 # If PUBLISH is not "true" and we are not running in publish-prebuilt mode,
-# stage the wheels internally to GCS and Google Drive, then exit.
+# stage the wheels internally to GCS, then exit.
 if [[ "${PUBLISH:-}" != "true" && -z "${PUBLISH_PREBUILT_VERSION:-}" ]]; then
   echo ""
   echo "=== PREPUBLISH: Staging wheels internally (Default Mode) ==="
@@ -216,28 +216,9 @@ if [[ "${PUBLISH:-}" != "true" && -z "${PUBLISH_PREBUILT_VERSION:-}" ]]; then
   # Unset stager impersonation to return to default credentials
   gcloud config unset auth/impersonate_service_account
 
-  # 2. Upload wheels to Google Drive folder
-  DRIVE_PARENT_ID="1IKWv5h6lEtat454DiwZsTa3rkG1kEqxH"
-  GDRIVE_CLI="/google/bin/releases/gemini-agents-gdrive/gdrive"
-
-  # Create version subfolder under Drive parent (ignoring failures)
-  FOLDER_META=$("${GDRIVE_CLI}" mkdir "v${VERSION}" --parent "${DRIVE_PARENT_ID}" --json 2>/dev/null || true)
-
-  DRIVE_FOLDER_ID=""
-  if [[ -n "${FOLDER_META}" ]]; then
-    DRIVE_FOLDER_ID=$(echo "${FOLDER_META}" | grep -oP '"id":\s*"\K[^"]+' || true)
-  fi
-
-  if [[ -n "${DRIVE_FOLDER_ID}" ]]; then
-    for WHEEL in "${DIST_DIR}"/*.whl; do
-      "${GDRIVE_CLI}" upload "${WHEEL}" --parent "${DRIVE_FOLDER_ID}"
-    done
-    echo "  Uploaded wheels to Google Drive (Folder ID: ${DRIVE_FOLDER_ID})"
-  else
-    echo "WARNING: Failed to create Google Drive subfolder, skipping Drive upload."
-  fi
-
   echo "=== Prepublish staging complete ==="
+  echo ""
+  echo "  Staged wheels: ${GCS_DEST}/"
   exit 0
 fi
 
