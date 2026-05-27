@@ -74,38 +74,95 @@ async with Agent(config) as agent:
     print(await response.text())
 ```
 
-## Accessing Tools
+## Tool Filtering (Configuring Exposed Tools)
+
+By default, when you connect an MCP server, all of its tools are exposed to the
+agent. If you want to limit which tools the agent can see (to save context
+tokens or keep the agent focused), you can configure `enabled_tools` or
+`disabled_tools` directly on the server configuration. These fields are mutually
+exclusive.
+
+### Limit to a specific list of tools (Allowlist)
+
+```python
+stdio_server = types.McpStdioServer(
+    name="my_stdio_server",
+    command="python3",
+    args=["mcp_server.py"],
+    enabled_tools=["pirate_multiply"],  # Only this tool will be exposed
+)
+```
+
+### Hide a specific list of tools (Denylist)
+
+```python
+stdio_server = types.McpStdioServer(
+    name="my_stdio_server",
+    command="python3",
+    args=["mcp_server.py"],
+    disabled_tools=["pirate_divide"],  # All tools except pirate_divide will be exposed
+)
+```
+
+## Accessing Tools & Safety Policies
 
 Tools exposed by the MCP server are automatically registered with the agent. To
 allow the agent to use these tools, you must ensure your safety policy grants
 permission.
 
-### Permissions
+### Permissions and Overloaded Policies
 
 By default, the SDK's default policy (`confirm_run_command()`) is permissive and
 **allows all MCP tools** (it only blocks or asks for confirmation on
 `run_command`).
 
 However, if you configure a strict **deny-by-default** setup (using
-`policy.deny_all()`), you must explicitly allow your MCP tools by their exact
-namespaced names.
+`policy.deny_all()`), you must explicitly allow your MCP tools.
 
-To prevent name collisions across multiple MCP servers, the SDK automatically
-namespaces and prefixes all MCP tools with the pattern:
-`mcp_{sanitized_server_name}_{original_tool_name}`
+To make configuring safety policies simple and secure, the safety policy helpers
+(`policy.allow`, `policy.deny`, and `policy.ask_user`) are **overloaded** to
+accept the MCP server configuration object (`BaseMcpServerConfig`) and an
+optional sequence of tool names:
 
-For example, if a server is configured with `name="google-workspace"` and
-exposes a tool named `read_email`, it will be registered as
-`mcp_google-workspace_read_email`.
-
-To allowlist this tool in a deny-by-default setup, you must use this namespaced
-name:
+#### Allow all tools on a server
 
 ```python
-# In your safety policy configuration
+stdio_server = types.McpStdioServer(name="pirate_math", ...)
+
 policies = [
     policy.deny_all(),
-    policy.allow("mcp_google-workspace_read_email"),  # Must use the exact namespaced tool name
+    policy.allow(stdio_server),  # Allows all tools exposed by pirate_math
+]
+```
+
+#### Allow a specific list of tools on a server
+
+```python
+stdio_server = types.McpStdioServer(name="pirate_math", ...)
+
+policies = [
+    policy.deny_all(),
+    policy.allow(stdio_server, ["pirate_multiply"]),  # Allows only pirate_multiply
+]
+```
+
+#### Require user confirmation for specific tools
+
+```python
+async def my_handler(tool_call: types.ToolCall) -> bool:
+  # Custom logic to ask user or auto-approve
+  # Return True to allow, False to deny
+  return True
+
+
+stdio_server = types.McpStdioServer(name="pirate_math", ...)
+
+policies = [
+    policy.deny_all(),
+    policy.allow(stdio_server, ["pirate_multiply"]),
+    policy.ask_user(
+        stdio_server, ["pirate_divide"], handler=my_handler
+    ),  # Ask for divide
 ]
 ```
 

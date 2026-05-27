@@ -25,6 +25,8 @@ import asyncio
 import os
 
 from google.antigravity import types
+from google.antigravity.hooks import policy
+
 from google.antigravity import Agent, LocalAgentConfig
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -92,8 +94,76 @@ async def mcp_http() -> None:
       print(f"  Agent: {await response.text()}")
 
 
+async def mcp_filtering() -> None:
+  """Showcases MCP tool filtering (enabled_tools / disabled_tools)."""
+  print("\n  --- Showcasing MCP Tool Filtering (disabled_tools) ---")
+  mcp_server_path = os.path.join(
+      os.path.dirname(__file__), "..", "resources", "mcp_server.py"
+  )
+  stdio_server = types.McpStdioServer(
+      name="pirate_math",
+      command="python3",
+      args=[mcp_server_path, "--transport=stdio"],
+      disabled_tools=["pirate_divide"],
+  )
+
+  config = LocalAgentConfig(mcp_servers=[stdio_server])
+
+  async with Agent(config) as my_agent:
+    # The pirate_multiply tool should work
+    prompt1 = "Use the pirate_multiply tool to multiply 6 and 8."
+    print(f"  User: {prompt1}")
+    response1 = await my_agent.chat(prompt1)
+    print(f"  Agent: {await response1.text()}")
+
+    # The pirate_divide tool is disabled/removed from the model's context,
+    # so the model should fail or state it cannot divide.
+    prompt2 = "Use the pirate_divide tool to divide 10 by 2."
+    print(f"\n  User: {prompt2}")
+    response2 = await my_agent.chat(prompt2)
+    print(f"  Agent: {await response2.text()}")
+
+
+async def mcp_policies() -> None:
+  """Showcases safety policies for MCP tools using new overloads."""
+  print("\n  --- Showcasing MCP Safety Policies ---")
+  mcp_server_path = os.path.join(
+      os.path.dirname(__file__), "..", "resources", "mcp_server.py"
+  )
+  stdio_server = types.McpStdioServer(
+      name="pirate_math",
+      command="python3",
+      args=[mcp_server_path, "--transport=stdio"],
+  )
+
+  # Define safety policies. Note that we can now pass `stdio_server` (BaseMcpServerConfig)
+  # directly to the policy builders!
+  policies = [
+      policy.deny_all(),
+      policy.allow(stdio_server, ["pirate_multiply"]),  # Allow pirate_multiply
+      policy.deny(stdio_server, ["pirate_divide"]),  # Deny pirate_divide
+  ]
+
+  config = LocalAgentConfig(mcp_servers=[stdio_server], policies=policies)
+
+  async with Agent(config) as my_agent:
+    # Multiply is allowed
+    prompt1 = "Multiply 4 and 9 using the pirate_multiply tool."
+    print(f"  User: {prompt1}")
+    response1 = await my_agent.chat(prompt1)
+    print(f"  Agent: {await response1.text()}")
+
+    # Divide is denied by policy (visible to agent, but blocked at runtime)
+    prompt2 = "Divide 12 by 3 using the pirate_divide tool."
+    print(f"\n  User: {prompt2}")
+    response2 = await my_agent.chat(prompt2)
+    print(f"  Agent: {await response2.text()}")
+
+
 async def main() -> None:
   await mcp_stdio()
+  await mcp_filtering()
+  await mcp_policies()
   await mcp_sse()
   await mcp_http()
 
