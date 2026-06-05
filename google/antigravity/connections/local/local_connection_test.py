@@ -85,15 +85,17 @@ class LocalConnectionTest(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(steps[0].status, types.StepStatus.ACTIVE)
     self.assertEqual(steps[0].source, types.StepSource.MODEL)
 
-  async def test_receive_steps_terminal_error(self):
+  async def test_receive_steps_system_error(self):
     harness = self._make_harness()
     event = localharness_pb2.OutputEvent(
         step_update=localharness_pb2.StepUpdate(
             step_index=1,
-            text="Terminal failure",
-            state=localharness_pb2.StepUpdate.STATE_TERMINAL_ERROR,
+            error=localharness_pb2.ActionError(
+                error_message="Fatal system failure",
+                http_code=400,
+            ),
+            state=localharness_pb2.StepUpdate.STATE_ERROR,
             source=localharness_pb2.StepUpdate.SOURCE_SYSTEM,
-            error_message="System crashed",
         )
     )
 
@@ -101,18 +103,80 @@ class LocalConnectionTest(unittest.IsolatedAsyncioTestCase):
     await harness.close_from_harness_side()
     harness.conn._is_idle.clear()
 
+    # receive_steps should raise AntigravityConnectionError when it
+    # encounters the system error step.
+    with self.assertRaisesRegex(
+        types.AntigravityConnectionError, "Fatal system failure"
+    ):
+      async for _ in harness.conn.receive_steps():
+        pass
+
+  async def test_receive_steps_system_error_401(self):
+    harness = self._make_harness()
+    event = localharness_pb2.OutputEvent(
+        step_update=localharness_pb2.StepUpdate(
+            step_index=1,
+            error=localharness_pb2.ActionError(
+                error_message="Unauthorized access",
+                http_code=401,
+            ),
+            state=localharness_pb2.StepUpdate.STATE_ERROR,
+            source=localharness_pb2.StepUpdate.SOURCE_SYSTEM,
+        )
+    )
+
+    await harness.send_event(event)
+    await harness.close_from_harness_side()
+    harness.conn._is_idle.clear()
+
+    # receive_steps should raise AntigravityConnectionError when it
+    # encounters the system error step.
+    with self.assertRaisesRegex(
+        types.AntigravityConnectionError, "Unauthorized access"
+    ):
+      async for _ in harness.conn.receive_steps():
+        pass
+
+  async def test_receive_steps_trajectory_error(self):
+    harness = self._make_harness()
+
+    await harness.conn.send("Hello")
+    init_data = await harness.wait_for_response()
+    self.assertEqual(init_data.get("userInput"), "Hello")
+
+    # Set the cascade ID.
+    event1 = localharness_pb2.OutputEvent(
+        step_update=localharness_pb2.StepUpdate(
+            cascade_id="my_cascade",
+            trajectory_id="my_cascade",
+            step_index=1,
+            state=localharness_pb2.StepUpdate.STATE_ACTIVE,
+            source=localharness_pb2.StepUpdate.SOURCE_MODEL,
+            text="I'm working",
+        )
+    )
+    await harness.send_event(event1)
+
+    # Send an error.
+    event2 = localharness_pb2.OutputEvent(
+        trajectory_state_update=localharness_pb2.TrajectoryStateUpdate(
+            trajectory_id="my_cascade",
+            state=localharness_pb2.TrajectoryStateUpdate.STATE_IDLE,
+            error="Trajectory execution failed",
+        )
+    )
+    await harness.send_event(event2)
+    await harness.close_from_harness_side()
+
     steps = []
-    with self.assertRaises(types.AntigravityExecutionError) as ctx:
+    with self.assertRaisesRegex(
+        types.AntigravityExecutionError, "Trajectory execution failed"
+    ):
       async for step in harness.conn.receive_steps():
         steps.append(step)
 
-    # The terminal error step should still be yielded before the exception is raised
     self.assertEqual(len(steps), 1)
-    self.assertEqual(steps[0].content, "Terminal failure")
-    self.assertEqual(steps[0].status, types.StepStatus.TERMINAL_ERROR)
-    self.assertEqual(steps[0].error, "System crashed")
-
-    self.assertIn("System crashed", str(ctx.exception))
+    self.assertEqual(steps[0].content, "I'm working")
 
   def test_local_connection_step_from_dict(self):
     """Tests that LocalConnectionStep maps fields correctly."""
@@ -381,6 +445,87 @@ class LocalConnectionTest(unittest.IsolatedAsyncioTestCase):
     self.assertIn("toolConfirmation", sent_data)
     self.assertEqual(sent_data["toolConfirmation"]["trajectoryId"], "test_traj")
     self.assertFalse(sent_data["toolConfirmation"]["accepted"])
+
+  async def test_mcp_tool_confirmation_request_allowed(self):
+    hr = hook_runner.HookRunner()
+    captured_tool_calls = []
+
+    @hooks_base.pre_tool_call_decide
+    async def policy_hook(data: types.ToolCall) -> hooks_base.HookResult:
+      captured_tool_calls.append(data)
+      return hooks_base.HookResult(allow=True)
+
+    hr.register_hook(policy_hook)
+
+    harness = test_utils.TestLocalHarness(
+        test_case=self,
+        process=self.mock_process,
+        tool_runner=self.tool_runner,
+        hook_runner=hr,
+    )
+
+    allowed_event = localharness_pb2.OutputEvent(
+        step_update=localharness_pb2.StepUpdate(
+            step_index=1,
+            trajectory_id="test_traj",
+            state=localharness_pb2.StepUpdate.STATE_WAITING_FOR_USER,
+            tool_confirmation_request=localharness_pb2.ToolConfirmationRequest(),
+            mcp_tool=localharness_pb2.ActionMcpTool(
+                server_name="calc",
+                tool_name="math_add",
+                arguments_json='{"x": 10, "y": 20}',
+            ),
+        )
+    )
+    await harness.send_event(allowed_event)
+    sent_allowed = await harness.wait_for_response()
+    self.assertTrue(sent_allowed["toolConfirmation"]["accepted"])
+    self.assertEqual(len(captured_tool_calls), 1)
+    self.assertEqual(
+        captured_tool_calls[0].name,
+        local_connection._get_mcp_tool_name("calc", "math_add"),
+    )
+    self.assertEqual(captured_tool_calls[0].args, {"x": 10, "y": 20})
+
+  async def test_mcp_tool_confirmation_request_denied(self):
+    hr = hook_runner.HookRunner()
+    captured_tool_calls = []
+
+    @hooks_base.pre_tool_call_decide
+    async def policy_hook(data: types.ToolCall) -> hooks_base.HookResult:
+      captured_tool_calls.append(data)
+      return hooks_base.HookResult(allow=False)
+
+    hr.register_hook(policy_hook)
+
+    harness = test_utils.TestLocalHarness(
+        test_case=self,
+        process=self.mock_process,
+        tool_runner=self.tool_runner,
+        hook_runner=hr,
+    )
+
+    denied_event = localharness_pb2.OutputEvent(
+        step_update=localharness_pb2.StepUpdate(
+            step_index=2,
+            trajectory_id="test_traj",
+            state=localharness_pb2.StepUpdate.STATE_WAITING_FOR_USER,
+            tool_confirmation_request=localharness_pb2.ToolConfirmationRequest(),
+            mcp_tool=localharness_pb2.ActionMcpTool(
+                server_name="calc",
+                tool_name="math_multiply",
+                arguments_json='{"x": 5, "y": 4}',
+            ),
+        )
+    )
+    await harness.send_event(denied_event)
+    sent_denied = await harness.wait_for_response()
+    self.assertFalse(sent_denied["toolConfirmation"]["accepted"])
+    self.assertEqual(len(captured_tool_calls), 1)
+    self.assertEqual(
+        captured_tool_calls[0].name,
+        local_connection._get_mcp_tool_name("calc", "math_multiply"),
+    )
 
   async def test_tool_confirmation_request_has_id(self):
     hr = hook_runner.HookRunner()
@@ -832,18 +977,72 @@ class LocalConnectionTest(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(step_obj.status, types.StepStatus.WAITING_FOR_USER)
     self.assertEqual(step_obj.content, "Waiting for confirmation")
 
-  async def test_cancel(self):
-    """Verifies that cancel sends a halt request."""
+  async def test_cancel_e2e_raises_cancelled_error(self):
+    """Verifies programmatic cancel raises AntigravityCancelledError."""
     harness = test_utils.TestLocalHarness(
         test_case=self,
         process=self.mock_process,
         tool_runner=self.tool_runner,
     )
 
+    # Start the turn
+    await harness.conn.send("Hello")
+    init_data = await harness.wait_for_response()
+    self.assertEqual(init_data.get("userInput"), "Hello")
+
+    # Simulate an active generation step from the harness
+    event1 = localharness_pb2.OutputEvent(
+        step_update=localharness_pb2.StepUpdate(
+            cascade_id="my_cascade",
+            trajectory_id="my_cascade",
+            step_index=1,
+            state=localharness_pb2.StepUpdate.STATE_ACTIVE,
+            source=localharness_pb2.StepUpdate.SOURCE_MODEL,
+            text="I'm working",
+        )
+    )
+    await harness.send_event(event1)
+
+    # Consume the steps in a background task to capture yielded output
+    steps = []
+    receive_error = None
+
+    async def consume() -> None:
+      nonlocal receive_error
+      try:
+        async for step in harness.conn.receive_steps():
+          steps.append(step)
+      except asyncio.CancelledError as e:
+        receive_error = e
+
+    consume_task = asyncio.create_task(consume())
+
+    # Let the background consumer loop spin once
+    await asyncio.sleep(0.1)
+
+    # Programmatically cancel the turn
     await harness.conn.cancel()
 
+    # Verify that a halt_request was sent to the backend
     sent_data = await harness.wait_for_response()
     self.assertTrue(sent_data.get("haltRequest"))
+
+    # Simulate the harness transitioning to idle after halting
+    event2 = localharness_pb2.OutputEvent(
+        trajectory_state_update=localharness_pb2.TrajectoryStateUpdate(
+            trajectory_id="my_cascade",
+            state=localharness_pb2.TrajectoryStateUpdate.STATE_IDLE,
+        )
+    )
+    await harness.send_event(event2)
+
+    # Await background consumer task completion
+    await consume_task
+
+    # Verify yielded step and ensure AntigravityCancelledError propagates
+    self.assertEqual(len(steps), 1)
+    self.assertEqual(steps[0].content, "I'm working")
+    self.assertIsInstance(receive_error, types.AntigravityCancelledError)
 
   async def test_handle_tool_call_queues_step(self):
     """Tests ensuring _handle_tool_call manually queues the ToolCall step in _step_queue."""
@@ -1922,15 +2121,17 @@ class LocalConnectionStrategyApiKeyTest(unittest.IsolatedAsyncioTestCase):
         pass
 
 
+_get_default_binary_path = local_connection._get_default_binary_path
+
+
 class GetDefaultBinaryPathTest(unittest.TestCase):
 
   @mock.patch.dict("os.environ", {"ANTIGRAVITY_HARNESS_PATH": "/env/path"})
   def test_returns_env_path(self):
-    path = local_connection._get_default_binary_path()
+    path = _get_default_binary_path()
     self.assertEqual(path, "/env/path")
 
   @mock.patch.dict("os.environ", {}, clear=True)
-  @mock.patch.object(local_connection, "resources", None)
   @mock.patch("importlib.metadata.distribution")
   @mock.patch("os.path.exists")
   def test_returns_metadata_distribution_path(self, mock_exists, mock_dist):
@@ -1945,7 +2146,7 @@ class GetDefaultBinaryPathTest(unittest.TestCase):
     mock_dist.return_value = mock_distribution
     mock_exists.return_value = True
 
-    path = local_connection._get_default_binary_path()
+    path = _get_default_binary_path()
     self.assertEqual(path, "/site-packages/google/antigravity/bin/localharness")
     mock_dist.assert_called_once_with("google-antigravity")
     mock_file.locate.assert_called_once()
@@ -1980,11 +2181,10 @@ class GetDefaultBinaryPathTest(unittest.TestCase):
     mock_files.return_value = mock_path
     mock_exists.return_value = True
 
-    path = local_connection._get_default_binary_path()
+    path = _get_default_binary_path()
     self.assertEqual(path, "/wheel/path")
 
   @mock.patch.dict("os.environ", {}, clear=True)
-  @mock.patch.object(local_connection, "resources", None)
   @mock.patch("importlib.metadata.distribution")
   @mock.patch("importlib.resources.files")
   @mock.patch("shutil.which")
@@ -1993,12 +2193,11 @@ class GetDefaultBinaryPathTest(unittest.TestCase):
     mock_files.side_effect = ImportError
     mock_which.return_value = "/system/path"
 
-    path = local_connection._get_default_binary_path()
+    path = _get_default_binary_path()
     self.assertEqual(path, "/system/path")
     mock_which.assert_called_once_with("localharness")
 
   @mock.patch.dict("os.environ", {}, clear=True)
-  @mock.patch.object(local_connection, "resources", None)
   @mock.patch("importlib.metadata.distribution")
   @mock.patch("importlib.resources.files")
   @mock.patch("shutil.which")
@@ -2008,7 +2207,7 @@ class GetDefaultBinaryPathTest(unittest.TestCase):
     mock_which.return_value = None
 
     with self.assertRaises(RuntimeError) as ctx:
-      local_connection._get_default_binary_path()
+      _get_default_binary_path()
     self.assertIn(
         "Could not find default localharness binary", str(ctx.exception)
     )
@@ -3283,6 +3482,28 @@ class LocalConnectionSendTest(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(parts[1]["media"]["mimeType"], "application/pdf")
     self.assertEqual(parts[1]["media"]["data"], "ZmFrZV9wZGY=")  # b"fake_pdf"
 
+  async def test_send_slash_command_populates_complex_user_input(self):
+    """Verifies that a SlashCommand primitive maps to complex_user_input slash_command field."""
+    harness = test_utils.TestLocalHarness(
+        test_case=self,
+        process=self.mock_process,
+    )
+    slash_command = types.SlashCommand(
+        name=types.BuiltinSlashCommandName.PLAN,
+    )
+    await harness.conn.send(slash_command)
+
+    sent_data = await harness.wait_for_response()
+
+    self.assertNotIn("userInput", sent_data)
+    self.assertIn("complexUserInput", sent_data)
+
+    parts = sent_data["complexUserInput"]["parts"]
+    self.assertEqual(len(parts), 1)
+    self.assertIn("slashCommand", parts[0])
+    sc = parts[0]["slashCommand"]
+    self.assertEqual(sc["name"], "plan")
+
   async def test_concurrent_receive_steps_raises(self):
     """Verifies that a second concurrent receive_steps() call raises RuntimeError.
 
@@ -3498,6 +3719,48 @@ class LocalAgentConfigTest(unittest.TestCase):
           system_instructions="test",
           app_data_dir="relative/path",
       )
+
+  def test_create_strategy_with_mcp_servers(self):
+    stdio_cfg = types.McpStdioServer(
+        name="my-stdio",
+        command="npx",
+        args=["math"],
+        enabled_tools=["add", "sub"],
+    )
+    sse_cfg = types.McpStreamableHttpServer(
+        name="my-sse",
+        url="https://sse.example.com",
+    )
+    config = local_connection_config.LocalAgentConfig(
+        system_instructions="test",
+        mcp_servers=[stdio_cfg, sse_cfg],
+    )
+
+    mock_tool_runner = mock.create_autospec(
+        tool_runner.ToolRunner, instance=True
+    )
+    mock_hook_runner = mock.create_autospec(
+        hook_runner.HookRunner, instance=True
+    )
+
+    strategy = config.create_strategy(
+        tool_runner=mock_tool_runner,
+        hook_runner=mock_hook_runner,
+    )
+
+    harness_pb = strategy._build_harness_config()
+
+    self.assertEqual(len(harness_pb.mcp_servers), 2)
+
+    stdio_pb = harness_pb.mcp_servers[0]
+    self.assertEqual(stdio_pb.name, "my-stdio")
+    self.assertEqual(stdio_pb.enabled_tools, ["add", "sub"])
+    self.assertEqual(stdio_pb.stdio.command, "npx")
+    self.assertEqual(stdio_pb.stdio.args, ["math"])
+
+    sse_pb = harness_pb.mcp_servers[1]
+    self.assertEqual(sse_pb.name, "my-sse")
+    self.assertEqual(sse_pb.http.url, "https://sse.example.com")
 
 
 class LocalAgentConfigWorkspaceTest(

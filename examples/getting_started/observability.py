@@ -35,7 +35,8 @@ import logging
 import sys
 from typing import Any
 
-from google.antigravity import Agent, LocalAgentConfig
+from google.antigravity import Agent
+from google.antigravity import LocalAgentConfig
 from google.antigravity.hooks import hooks
 
 # Enable DEBUG logging for the SDK to show detailed execution info.

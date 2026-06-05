@@ -46,9 +46,6 @@ from google.antigravity.hooks import hook_runner as h_runner
 from google.antigravity.hooks import hooks
 from google.antigravity.tools import tool_runner as t_runner
 
-
-resources = None
-
 _ANY_ADAPTER = pydantic.TypeAdapter(Any)
 
 
@@ -97,7 +94,12 @@ _STATUS_MAP = {
     "STATE_DONE": types.StepStatus.DONE,
     "STATE_WAITING_FOR_USER": types.StepStatus.WAITING_FOR_USER,
     "STATE_ERROR": types.StepStatus.ERROR,
-    "STATE_TERMINAL_ERROR": types.StepStatus.TERMINAL_ERROR,
+}
+
+_TARGET_MAP = {
+    "TARGET_USER": types.StepTarget.USER,
+    "TARGET_ENVIRONMENT": types.StepTarget.ENVIRONMENT,
+    "TARGET_UNSPECIFIED": types.StepTarget.UNSPECIFIED,
 }
 
 # Map from BuiltinTools enum to the proto field name on StepUpdate.
@@ -120,6 +122,14 @@ _BUILTIN_TOOL_PROTO_FIELDS: dict[types.BuiltinTools, str] = {
 # known BuiltinTools proto field. This represents a pre-request notification
 # from the Connection for a host-side tool whose specific call will follow.
 DEFAULT_HOST_TOOL_NAME = "pre_request_host_tool_request"
+
+# Constants for MCP tool confirmation mapping.
+_MCP_TOOL_PROTO_FIELD = "mcp_tool"
+_MCP_TOOL_PREFIX = "mcp_"
+
+
+def _get_mcp_tool_name(server_name: str, tool_name: str) -> str:
+  return f"{_MCP_TOOL_PREFIX}{server_name}_{tool_name}"
 
 
 _IDLE_SENTINEL = object()
@@ -228,7 +238,6 @@ class LocalConnectionStep(types.Step):
 
   cascade_id: str = ""
   trajectory_id: str = ""
-  target: str = ""
   http_code: int = 0
 
   @classmethod
@@ -259,6 +268,17 @@ class LocalConnectionStep(types.Step):
     )
     active_tool_name, sub_msg = active_tool_pair
     active_tool_args = sub_msg if isinstance(sub_msg, dict) else {}
+
+    # Reconstruct the step's tool name and arguments from the Go-native McpTool
+    # proto format to maintain Python-side trajectory parity.
+    if not active_tool_name and _MCP_TOOL_PROTO_FIELD in step_dict:
+      mcp_dict = step_dict[_MCP_TOOL_PROTO_FIELD]
+      if isinstance(mcp_dict, dict):
+        server_name = mcp_dict.get("server_name", "")
+        tool_name = mcp_dict.get("tool_name", "")
+        active_tool_name = _get_mcp_tool_name(server_name, tool_name)
+        arguments_json = mcp_dict.get("arguments_json") or "{}"
+        active_tool_args = json.loads(arguments_json)
 
     if active_tool_name:
       canonical_path = None
@@ -295,10 +315,18 @@ class LocalConnectionStep(types.Step):
       step_type = types.StepType.TEXT_RESPONSE
 
     source_str = step_dict.get("source")
-    source = _SOURCE_MAP.get(source_str, types.StepSource.UNKNOWN)
+    source = (
+        _SOURCE_MAP.get(source_str, types.StepSource.UNKNOWN)
+        if isinstance(source_str, str)
+        else types.StepSource.UNKNOWN
+    )
 
     status_str = step_dict.get("state")
-    status = _STATUS_MAP.get(status_str, types.StepStatus.UNKNOWN)
+    status = (
+        _STATUS_MAP.get(status_str, types.StepStatus.UNKNOWN)
+        if isinstance(status_str, str)
+        else types.StepStatus.UNKNOWN
+    )
 
     is_from_model = source == types.StepSource.MODEL
     is_done = status == types.StepStatus.DONE
@@ -327,9 +355,7 @@ class LocalConnectionStep(types.Step):
           )
 
     error_field = step_dict.get("error", {})
-    error_msg = error_field.get("error_message")
-    if not error_msg:
-      error_msg = step_dict.get("error_message", "")
+    error_msg = error_field.get("error_message", "")
     http_code = error_field.get("http_code", 0)
 
     return cls(
@@ -348,7 +374,9 @@ class LocalConnectionStep(types.Step):
         error=error_msg,
         http_code=http_code,
         is_complete_response=is_complete_response,
-        target=step_dict.get("target", ""),
+        target=_TARGET_MAP.get(
+            step_dict.get("target", ""), types.StepTarget.UNKNOWN
+        ),
         structured_output=structured_output,
     )
 
@@ -445,6 +473,7 @@ class LocalConnection(connection.Connection):
     self._reader_task = asyncio.create_task(self._ws_reader_loop())
     self._current_turn_context = None
     self._cancelled = False
+    self._client_cancelled = False
     self._cancelled_message = ""
     self._is_idle = asyncio.Event()
     self._is_idle.set()
@@ -494,13 +523,15 @@ class LocalConnection(connection.Connection):
     """Returns the conversation identifier, if one exists."""
     return self._cascade_id or ""
 
-  async def send(self, prompt: types.Content | None) -> None:
+  async def send(self, prompt: types.Content | None, **kwargs: Any) -> None:
     """Sends a prompt to the agent.
 
     Args:
       prompt: The user prompt or content to send.
+      **kwargs: Strategy-specific options.
     """
     self._cancelled = False
+    self._client_cancelled = False
     self._is_idle.clear()
     self._parent_idle = False
     self._active_subagent_ids.clear()
@@ -522,7 +553,12 @@ class LocalConnection(connection.Connection):
     elif isinstance(prompt, str):
       event = localharness_pb2.InputEvent(user_input=prompt)
     else:
-      content_list = prompt if isinstance(prompt, list) else [prompt]
+      if isinstance(prompt, collections.abc.Sequence) and not isinstance(
+          prompt, (str, bytes)
+      ):
+        content_list = prompt
+      else:
+        content_list = [prompt]
       user_input_pb = localharness_pb2.UserInput(
           parts=[_to_proto_input_content(c) for c in content_list]
       )
@@ -549,6 +585,8 @@ class LocalConnection(connection.Connection):
         return
 
       if self._is_idle.is_set() and self._step_queue.empty():
+        if self._client_cancelled:
+          raise types.AntigravityCancelledError()
         return
 
       # The server sends a STATE_IDLE signal when the trajectory is finalized,
@@ -557,13 +595,20 @@ class LocalConnection(connection.Connection):
       # the exit condition and block on get() otherwise.
       while True:
         if self._is_idle.is_set() and self._step_queue.empty():
+          if self._client_cancelled:
+            raise types.AntigravityCancelledError()
           return
 
         step_obj = await self._step_queue.get()
 
+        if isinstance(step_obj, Exception):
+          raise step_obj
+
         if step_obj is _IDLE_SENTINEL:
           continue
         if step_obj is None:
+          if self._client_cancelled:
+            raise types.AntigravityCancelledError()
           return
         if isinstance(step_obj, Exception):
           raise step_obj
@@ -598,7 +643,6 @@ class LocalConnection(connection.Connection):
         is_terminal = is_done or step_obj.status in (
             types.StepStatus.ERROR,
             types.StepStatus.CANCELED,
-            types.StepStatus.TERMINAL_ERROR,
         )
         is_target_user = getattr(step_obj, "target", None) == "TARGET_USER"
 
@@ -612,11 +656,6 @@ class LocalConnection(connection.Connection):
           # Don't force idle here — wait for the TrajectoryStateUpdate
           # path to confirm that the parent and all subagent trajectories
           # have completed.
-
-        if step_obj.status == types.StepStatus.TERMINAL_ERROR:
-          raise types.AntigravityExecutionError(
-              step_obj.error or "Terminal error occurred during execution"
-          )
     finally:
       self._is_receiving = False
 
@@ -735,6 +774,7 @@ class LocalConnection(connection.Connection):
 
   async def cancel(self) -> None:
     """Cancels the current turn."""
+    self._client_cancelled = True
     event = localharness_pb2.InputEvent(halt_request=True)
     await self._ws.send(json_format.MessageToJson(event))
 
@@ -821,9 +861,7 @@ class LocalConnection(connection.Connection):
               and step_obj.source == types.StepSource.MODEL
               and step_obj.content
           ):
-            self._subagent_responses[step_obj.trajectory_id] = (
-                step_obj.content
-            )
+            self._subagent_responses[step_obj.trajectory_id] = step_obj.content
 
           # Dispatch post-tool-call or on-tool-error hooks for built-in tools
           # that were approved via ToolConfirmation. The harness executes them
@@ -908,16 +946,12 @@ class LocalConnection(connection.Connection):
               self._active_subagent_ids.discard(tsu.trajectory_id)
               if self._hook_runner:
                 op_ctx = hooks.OperationContext(self._get_turn_context())
-                response = self._subagent_responses.pop(
-                    tsu.trajectory_id, ""
-                )
+                response = self._subagent_responses.pop(tsu.trajectory_id, "")
                 result = types.ToolResult(
                     name=types.BuiltinTools.START_SUBAGENT.value,
                     result=response or tsu.trajectory_id,
                 )
-                await self._hook_runner.dispatch_post_tool_call(
-                    op_ctx, result
-                )
+                await self._hook_runner.dispatch_post_tool_call(op_ctx, result)
             else:
               # Parent trajectory went idle.
               self._parent_idle = True
@@ -928,6 +962,20 @@ class LocalConnection(connection.Connection):
               if not self._is_idle.is_set():
                 self._is_idle.set()
                 await self._step_queue.put(_IDLE_SENTINEL)
+
+            if tsu.HasField("error"):
+              if is_subagent:
+                # Subagent failures are only logged. If an issue is serious
+                # enough to be worth raising an exception then it should
+                # affect the main trajectory too.
+                logging.info(
+                    "Subagent trajectory failed with error: %s", tsu.error
+                )
+              else:
+                await self._step_queue.put(
+                    types.AntigravityExecutionError(tsu.error)
+                )
+
         elif event.HasField("tool_call"):
           self._run_in_background(self._handle_tool_call(event.tool_call))
     except websockets.ConnectionClosed as e:
@@ -1024,13 +1072,12 @@ class LocalConnection(connection.Connection):
       logging.exception("_handle_question_request failed; sending error")
       error_answer = localharness_pb2.UserQuestionAnswer(
           multiple_choice_answer=localharness_pb2.MultipleChoiceAnswer(
-              freeform_response=(
-                  f"SDK error processing question: {e!r}"
-              ),
+              freeform_response=f"SDK error processing question: {e!r}",
           ),
       )
       await self._send_question_response(
-          step_update, [error_answer],
+          step_update,
+          [error_answer],
       )
 
   async def _send_question_response(
@@ -1067,6 +1114,12 @@ class LocalConnection(connection.Connection):
               sub_msg, preserving_proto_field_name=True
           )
           break
+
+      if not found_action and step_update.HasField(_MCP_TOOL_PROTO_FIELD):
+        mcp_pb = getattr(step_update, _MCP_TOOL_PROTO_FIELD)
+        action_str = _get_mcp_tool_name(mcp_pb.server_name, mcp_pb.tool_name)
+        found_action = True
+        args = json.loads(mcp_pb.arguments_json or "{}")
 
       if not found_action:
         action_str = DEFAULT_HOST_TOOL_NAME
@@ -1127,9 +1180,7 @@ class LocalConnection(connection.Connection):
       # ToolConfirmation only has a bool field (no error/reason field), so
       # rejecting is the only option. The harness transitions the step to
       # STATE_ERROR, which the model does see.
-      logging.exception(
-          "_handle_tool_confirmation_request failed; rejecting"
-      )
+      logging.exception("_handle_tool_confirmation_request failed; rejecting")
       await self._send_tool_confirmation(step_update, False)
 
   async def _send_tool_confirmation(
@@ -1303,6 +1354,12 @@ def _to_proto_input_content(
   if isinstance(content, str):
     return localharness_pb2.UserInput.Part(text=content)
 
+  if isinstance(content, types.SlashCommand):
+    sc_pb = localharness_pb2.UserInput.SlashCommand(
+        name=content.name,
+    )
+    return localharness_pb2.UserInput.Part(slash_command=sc_pb)
+
   is_semantic_media = isinstance(
       content, (types.Image, types.Document, types.Audio, types.Video)
   )
@@ -1326,11 +1383,11 @@ def _get_sdk_version() -> str:
     return "0.0.0-dev"
 
 
-def _get_default_binary_path() -> str:
-  """Finds the default binary path, supporting both internal and external wheels."""
+def _get_default_binary_path_external() -> str:
+  """Returns the default localharness binary path."""
   # 1. Check environment variable first
-  if env_path := os.environ.get("ANTIGRAVITY_HARNESS_PATH"):
-    return env_path
+  if harness_path := os.environ.get("ANTIGRAVITY_HARNESS_PATH"):
+    return harness_path
 
   # 2. Try importlib.metadata (Robust wheel discovery)
   # This is immune to sys.path shadowing by a local repository directory.
@@ -1339,12 +1396,10 @@ def _get_default_binary_path() -> str:
     if dist.files:
       for f in dist.files:
         normalized_path = str(f).replace("\\", "/")
-        if normalized_path.endswith(
-            (
-                "google/antigravity/bin/localharness",
-                "google/antigravity/bin/localharness.exe",
-            )
-        ):
+        if normalized_path.endswith((
+            "google/antigravity/bin/localharness",
+            "google/antigravity/bin/localharness.exe",
+        )):
           binary_path = os.path.abspath(str(f.locate()))
           if os.path.exists(binary_path):
             return binary_path
@@ -1383,8 +1438,37 @@ def _get_default_binary_path() -> str:
   )
 
 
+_get_default_binary_path = _get_default_binary_path_external
+
+
+def _to_mcp_server_proto(
+    server_cfg: types.McpServerConfig,
+) -> localharness_pb2.McpServerConfig:
+  """Converts an McpServerConfig to a McpServerConfig proto."""
+  kwargs = {
+      "name": server_cfg.name,
+      "enabled_tools": server_cfg.enabled_tools or [],
+      "disabled_tools": server_cfg.disabled_tools or [],
+  }
+  if isinstance(server_cfg, types.McpStdioServer):
+    kwargs["stdio"] = localharness_pb2.McpStdioTransport(
+        command=server_cfg.command,
+        args=server_cfg.args,
+    )
+  elif isinstance(server_cfg, types.McpStreamableHttpServer):
+    kwargs["http"] = localharness_pb2.McpHttpTransport(
+        url=server_cfg.url,
+        headers=server_cfg.headers or {},
+    )
+  return localharness_pb2.McpServerConfig(**kwargs)
+
+
 class LocalConnectionStrategy(connection.ConnectionStrategy):
   """Strategy for establishing a LocalConnection."""
+
+  _gemini_config: types.GeminiConfig | None
+  _system_instructions: types.SystemInstructions | None
+  _connection: LocalConnection | None
 
   def __init__(
       self,
@@ -1399,12 +1483,31 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
       save_dir: str | None = None,
       workspaces: list[str] | None = None,
       app_data_dir: str | None = None,
+      mcp_servers: Sequence[types.McpServerConfig] | None = None,
   ):
+    """Initializes the instance.
+
+    Args:
+      tool_runner: Optional ToolRunner for custom tools.
+      hook_runner: Optional HookRunner for custom hooks.
+      gemini_config: Optional GeminiConfig or model name shorthand.
+      skills_paths: Optional list of paths to search for skills.
+      system_instructions: Optional SystemInstructions or string shorthand.
+      capabilities_config: Optional CapabilitiesConfig to configure tools.
+      conversation_id: Optional conversation identifier.
+      save_dir: Optional directory to save trajectories.
+      workspaces: Optional list of workspace paths.
+      app_data_dir: Optional directory for harness app data.
+      mcp_servers: Optional sequence of MCP server configurations.
+    """
     self._binary_path = _get_default_binary_path()
     self._tool_runner = tool_runner
     self._hook_runner = hook_runner
+    self._connection: LocalConnection | None = None
+    self._mcp_servers = mcp_servers or []
 
     # Normalize str shorthand to GeminiConfig model.
+    self._gemini_config: types.GeminiConfig | None = None
     if isinstance(gemini_config, str):
       self._gemini_config = types.GeminiConfig(
           models=types.ModelConfig(default=types.ModelEntry(name=gemini_config))
@@ -1414,6 +1517,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
     self._skills_paths = skills_paths
 
     # Normalize str shorthand to SystemInstructions model.
+    self._system_instructions: types.SystemInstructions | None = None
     if isinstance(system_instructions, str):
       self._system_instructions = types.TemplatedSystemInstructions(
           sections=[types.SystemInstructionSection(content=system_instructions)]
@@ -1541,7 +1645,11 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
         ),
     )
 
-    harness_config = localharness_pb2.HarnessConfig(
+    mcp_server_protos = [
+        _to_mcp_server_proto(s) for s in self._mcp_servers or []
+    ]
+
+    return localharness_pb2.HarnessConfig(
         tools=tool_protos,
         system_instructions=system_instructions_proto,
         cascade_id=self._conversation_id or "",
@@ -1553,9 +1661,8 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
         compaction_threshold=cfg.compaction_threshold or 0,
         finish_tool_schema_json=cfg.finish_tool_schema_json or "",
         app_data_dir=self._app_data_dir or "",
+        mcp_servers=mcp_server_protos,
     )
-
-    return harness_config
 
   def connect(self) -> connection.Connection:
     """Returns the established Connection."""
@@ -1565,8 +1672,8 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
       )
     return self._connection
 
-  async def __aenter__(self) -> None:
-    """Starts the backend."""
+  def _validate_connection(self) -> None:
+    """Validates that all required configurations (like API keys) are present."""
     # Fail fast if no API key is available. The localharness binary requires
     # a Gemini API key to call the Gemini API; without one it silently returns
     # empty responses.
@@ -1588,6 +1695,10 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
             "For Vertex AI, either a GCP project and location, or an API key"
             " (Express Mode) must be set."
         )
+
+  async def __aenter__(self) -> None:
+    """Starts the backend."""
+    self._validate_connection()
 
     harness_config = self._build_harness_config()
     sdk_version = _get_sdk_version()
@@ -1645,7 +1756,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
               f"Failed to connect to WebSocket at {ws_url} after"
               f" {max_retries} attempts. Stderr: {stderr_output}"
           ) from e
-        await asyncio.sleep(0.1 * (2 ** attempt))
+        await asyncio.sleep(0.1 * (2**attempt))
 
     assert ws is not None
     try:

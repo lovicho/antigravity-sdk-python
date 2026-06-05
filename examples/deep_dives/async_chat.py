@@ -44,7 +44,8 @@ Criteria for correct script performance:
 import asyncio
 import logging
 
-from google.antigravity import Agent, LocalAgentConfig
+from google.antigravity import Agent
+from google.antigravity import LocalAgentConfig
 
 _PASS_TOKEN = "[PASS]"
 _MAX_CONSECUTIVE_PASSES = 2  # agent exits after N passes in a row

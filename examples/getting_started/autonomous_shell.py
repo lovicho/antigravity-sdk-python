@@ -35,7 +35,8 @@ Criteria for correct script performance:
 
 import asyncio
 
-from google.antigravity import Agent, LocalAgentConfig
+from google.antigravity import Agent
+from google.antigravity import LocalAgentConfig
 from google.antigravity.hooks import policy
 
 

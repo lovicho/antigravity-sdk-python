@@ -5,6 +5,11 @@ In the `LocalAgentConfig` (used for local development), all built-in tools are
 `confirm_run_command()` policy — all other tools are allowed. See
 [Safety Policies](safety_policies.md) to customize this behavior.
 
+To override a built-in tool with a custom implementation, you can define a
+custom tool with the same name. See
+[Custom Tool Example](../examples/getting_started/custom_tool.md#overriding-built-in-tools)
+for details.
+
 The following table lists all built-in tools available in the SDK and their
 descriptions.
 

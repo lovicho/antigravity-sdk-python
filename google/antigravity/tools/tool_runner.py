@@ -95,7 +95,7 @@ def _make_public_callable(
   def _proxy(**kwargs):
     return target(**kwargs)
 
-  _proxy.__signature__ = public_sig
+  setattr(_proxy, "__signature__", public_sig)
   return _proxy
 
 

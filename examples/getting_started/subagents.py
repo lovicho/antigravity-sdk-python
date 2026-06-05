@@ -36,8 +36,9 @@ Criteria for correct script performance:
 import asyncio
 from typing import Any
 
+from google.antigravity import Agent
+from google.antigravity import LocalAgentConfig
 from google.antigravity import types
-from google.antigravity import Agent, LocalAgentConfig
 from google.antigravity.hooks import hooks
 
 _subagent_active = False

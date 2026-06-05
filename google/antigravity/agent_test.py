@@ -16,6 +16,7 @@
 
 import contextlib
 import os
+from typing import Any, cast
 import unittest
 from unittest import mock
 
@@ -271,12 +272,15 @@ class AgentTest(unittest.IsolatedAsyncioTestCase):
     mock_strategy_class.return_value = mock.MagicMock(stop=mock.AsyncMock())
     config = local_connection.LocalAgentConfig(
         system_instructions="test",
-        mcp_servers=[{
-            "type": "stdio",
-            "name": "test_server",
-            "command": "node",
-            "args": ["index.js"],
-        }],
+        mcp_servers=cast(
+            Any,
+            [{
+                "type": "stdio",
+                "name": "test_server",
+                "command": "node",
+                "args": ["index.js"],
+            }],
+        ),
         policies=[],
         workspaces=[],
     )
@@ -289,23 +293,23 @@ class AgentTest(unittest.IsolatedAsyncioTestCase):
       "local.local_connection.LocalConnectionStrategy"
   )
   @mock.patch.object(conversation.Conversation, "create")
-  @mock.patch(
-      "google.antigravity.agent.bridge.McpBridge.connect_stdio"
-  )
   async def test_policy_guard_mcp_server_with_policy_passes(
-      self, mock_connect_stdio, mock_conv_create, mock_strategy_class
+      self, mock_conv_create, mock_strategy_class
   ):
     """No guard when MCP servers are present AND policies are provided."""
     del mock_conv_create
     mock_strategy_class.return_value = mock.MagicMock(stop=mock.AsyncMock())
     config = local_connection.LocalAgentConfig(
         system_instructions="test",
-        mcp_servers=[{
-            "type": "stdio",
-            "name": "test_server",
-            "command": "node",
-            "args": ["index.js"],
-        }],
+        mcp_servers=cast(
+            Any,
+            [{
+                "type": "stdio",
+                "name": "test_server",
+                "command": "node",
+                "args": ["index.js"],
+            }],
+        ),
         policies=[policy.deny("*")],
     )
     async with agent.Agent(config):
@@ -316,11 +320,8 @@ class AgentTest(unittest.IsolatedAsyncioTestCase):
       "local.local_connection.LocalConnectionStrategy"
   )
   @mock.patch.object(conversation.Conversation, "create")
-  @mock.patch(
-      "google.antigravity.agent.bridge.McpBridge.connect_stdio"
-  )
   async def test_policy_guard_mcp_server_with_hook_passes(
-      self, mock_connect_stdio, mock_conv_create, mock_strategy_class
+      self, mock_conv_create, mock_strategy_class
   ):
     """No guard when MCP servers are present AND a decide hook is provided."""
     del mock_conv_create
@@ -333,12 +334,15 @@ class AgentTest(unittest.IsolatedAsyncioTestCase):
 
     config = local_connection.LocalAgentConfig(
         system_instructions="test",
-        mcp_servers=[{
-            "type": "stdio",
-            "name": "test_server",
-            "command": "node",
-            "args": ["index.js"],
-        }],
+        mcp_servers=cast(
+            Any,
+            [{
+                "type": "stdio",
+                "name": "test_server",
+                "command": "node",
+                "args": ["index.js"],
+            }],
+        ),
         hooks=[MyPreToolCallDecideHook()],
     )
     async with agent.Agent(config):
@@ -370,12 +374,14 @@ class AgentTest(unittest.IsolatedAsyncioTestCase):
         system_instructions="test", hooks=[my_hook]
     )
     async with agent.Agent(config) as ag:
+      self.assertIsNotNone(ag._hook_runner)
       self.assertIn(my_hook, ag._hook_runner.pre_turn_hooks)
 
     # Test dynamic registration
     config = local_connection.LocalAgentConfig(system_instructions="test")
     async with agent.Agent(config) as ag:
       ag.register_hook(my_hook)
+      self.assertIsNotNone(ag._hook_runner)
       self.assertIn(my_hook, ag._hook_runner.pre_turn_hooks)
 
   @mock.patch(
@@ -478,6 +484,7 @@ class AgentTest(unittest.IsolatedAsyncioTestCase):
     self.assertIn(my_hook, ag._pending_hooks)
 
     async with ag:
+      self.assertIsNotNone(ag._hook_runner)
       self.assertIn(my_hook, ag._hook_runner.pre_turn_hooks)
       self.assertEqual(len(ag._pending_hooks), 0)
 
@@ -572,7 +579,7 @@ class AgentTest(unittest.IsolatedAsyncioTestCase):
     mock_strategy_instance.stop = mock.AsyncMock()
     mock_strategy_class.return_value = mock_strategy_instance
 
-    mcp_servers = [{"type": "unknown_type"}]
+    mcp_servers = cast(Any, [{"type": "unknown_type"}])
 
     with self.assertRaises(ValueError):
       config = local_connection.LocalAgentConfig(
@@ -733,65 +740,6 @@ class AgentTest(unittest.IsolatedAsyncioTestCase):
       _, kwargs = mock_strategy_class.call_args
       sp = kwargs.get("skills_paths")
       self.assertEqual(sp, skills_paths)
-
-  @mock.patch(
-      "google.antigravity.connections."
-      "local.local_connection.LocalConnectionStrategy"
-  )
-  @mock.patch.object(conversation.Conversation, "create")
-  @mock.patch("google.antigravity.agent.bridge.McpBridge")
-  async def test_agent_mcp_servers(
-      self,
-      mock_mcp_bridge,
-      mock_conv_create,
-      mock_strategy_class,
-  ):
-    del mock_conv_create  # Unused.
-
-    mock_strategy_instance = mock.MagicMock()
-    mock_strategy_instance.stop = mock.AsyncMock()
-    mock_strategy_class.return_value = mock_strategy_instance
-
-    mock_bridge_instance = mock.MagicMock()
-    mock_bridge_instance.connect = mock.AsyncMock()
-    mock_bridge_instance.stop = mock.AsyncMock()
-    mock_mcp_bridge.return_value = mock_bridge_instance
-
-    mock_tool = mock.MagicMock()
-    mock_tool.__name__ = "mock_tool"
-    mock_bridge_instance.tools = [mock_tool]
-
-    mcp_servers = [
-        types.McpStdioServer(
-            name="stdio_server", command="python3", args=["server.py"]
-        ),
-        types.McpSseServer(name="sse_server", url="http://localhost:8000/sse"),
-        types.McpStreamableHttpServer(
-            name="http_server", url="http://localhost:8000/http"
-        ),
-    ]
-
-    config = local_connection.LocalAgentConfig(
-        system_instructions="test",
-        mcp_servers=mcp_servers,
-        policies=[policy.deny("*")],
-    )
-    async with agent.Agent(config) as ag:
-      mock_mcp_bridge.assert_called_once_with()
-      self.assertEqual(mock_bridge_instance.connect.call_count, 3)
-      mock_bridge_instance.connect.assert_has_calls([
-          mock.call(mcp_servers[0]),
-          mock.call(mcp_servers[1]),
-          mock.call(mcp_servers[2]),
-      ])
-
-      _, kwargs = mock_strategy_class.call_args
-      tool_runner_instance = kwargs.get("tool_runner")
-      self.assertIsNotNone(tool_runner_instance)
-      self.assertIn("mock_tool", tool_runner_instance.tools)
-      self.assertEqual(tool_runner_instance.tools["mock_tool"], mock_tool)
-
-    mock_bridge_instance.stop.assert_called_once()
 
   @mock.patch(
       "google.antigravity.connections."

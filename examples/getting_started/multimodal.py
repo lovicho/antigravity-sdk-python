@@ -31,8 +31,9 @@ Criteria for correct script performance:
 import asyncio
 import os
 
+from google.antigravity import Agent
+from google.antigravity import LocalAgentConfig
 from google.antigravity import types
-from google.antigravity import Agent, LocalAgentConfig
 
 
 async def main() -> None:

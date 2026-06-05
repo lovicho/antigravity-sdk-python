@@ -74,5 +74,5 @@ def trigger(func: Callable[[TriggerContext], Awaitable[None]]):
   if len(params) != 1:
     raise ValueError("Trigger must accept exactly one parameter")
 
-  func.__is_trigger__ = True
+  setattr(func, "__is_trigger__", True)
   return func

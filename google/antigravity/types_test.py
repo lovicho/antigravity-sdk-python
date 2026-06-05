@@ -19,8 +19,10 @@ and the AntigravityValidationError wrapper.
 """
 
 import asyncio
+from collections.abc import AsyncIterator
 import pathlib
 import tempfile
+from typing import Any, cast
 import unittest
 from unittest import mock
 
@@ -87,7 +89,7 @@ class ToolCallTest(unittest.TestCase):
     Why: Forward compatibility — newer backends may add fields.
     How: Constructs a ToolCall with an unknown field and asserts it's absent.
     """
-    tc = types.ToolCall(name="tool", unknown_field="value")
+    tc = types.ToolCall(name="tool", **cast(Any, {"unknown_field": "value"}))
     self.assertFalse(hasattr(tc, "unknown_field"))
 
   def test_missing_name_raises(self):
@@ -161,7 +163,7 @@ class ToolResultTest(unittest.TestCase):
     Why: Consistent extra field handling across all models.
     How: Passes an unknown field and asserts it's not present.
     """
-    tr = types.ToolResult(name="tool", unknown="value")
+    tr = types.ToolResult(name="tool", **cast(Any, {"unknown": "value"}))
     self.assertFalse(hasattr(tr, "unknown"))
 
 
@@ -1268,6 +1270,55 @@ class ChatResponseStreamTest(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(usage.candidates_token_count, 20)
     self.assertEqual(usage.total_token_count, 30)
 
+  async def test_cancel_delegates_to_conversation(self):
+    """Verifies that cancel() delegates to conversation.cancel() if not done."""
+    async def mock_stream() -> AsyncIterator[types.StreamChunk]:
+      yield types.Text(step_index=1, text="hello")
+      # Keep it open by not ending or throwing yet
+
+    mock_conv = mock.AsyncMock(spec=conversation.Conversation)
+    response = types.ChatResponse(mock_stream(), conversation=mock_conv)
+
+    self.assertFalse(response._is_done)
+
+    await response.cancel()
+    mock_conv.cancel.assert_called_once()
+
+  async def test_cancel_completed_stream_is_noop(self):
+    """Verifies that cancel() is a safe no-op on a completed stream."""
+    async def mock_stream() -> AsyncIterator[types.StreamChunk]:
+      yield types.Text(step_index=1, text="hello")
+
+    mock_conv = mock.AsyncMock(spec=conversation.Conversation)
+    response = types.ChatResponse(mock_stream(), conversation=mock_conv)
+
+    # Resolve the stream to complete it
+    await response.resolve()
+    self.assertTrue(response._is_done)
+
+    await response.cancel()
+    mock_conv.cancel.assert_not_called()
+
+  async def test_stream_cancellation_sets_is_done(self):
+    """Verifies that if stream raises CancelledError, _is_done becomes True."""
+    async def mock_cancelled_stream() -> AsyncIterator[types.StreamChunk]:
+      yield types.Text(step_index=1, text="hello")
+      raise asyncio.CancelledError("Cancelled natively")
+
+    mock_conv = mock.AsyncMock(spec=conversation.Conversation)
+    response = types.ChatResponse(
+        mock_cancelled_stream(), conversation=mock_conv
+    )
+
+    chunks = []
+    with self.assertRaisesRegex(asyncio.CancelledError, "Cancelled natively"):
+      async for chunk in response.chunks:
+        chunks.append(chunk)
+
+    self.assertEqual(len(chunks), 1)
+    self.assertTrue(response._is_done)
+    self.assertIsInstance(response._stream_error, asyncio.CancelledError)
+
   def test_thought_chunk_validation(self):
     """Verifies that the Thought subclass validates Pydantic schemas correctly."""
     thought = types.Thought(step_index=1, text="reasoning", signature=b"sig")
@@ -1306,12 +1357,6 @@ class McpServerConfigTest(parameterized.TestCase):
           {"name": "stdio_server", "command": "node", "args": ["index.js"]},
       ),
       (
-          "sse",
-          types.McpSseServer,
-          {"name": "sse_server", "url": "http://localhost/sse"},
-          {"name": "sse_server", "url": "http://localhost/sse"},
-      ),
-      (
           "http",
           types.McpStreamableHttpServer,
           {"name": "http_server", "url": "http://localhost/http"},
@@ -1338,7 +1383,6 @@ class McpServerConfigTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       ("stdio", types.McpStdioServer, {"command": "node"}),
-      ("sse", types.McpSseServer, {"url": "http://localhost/sse"}),
       ("http", types.McpStreamableHttpServer, {"url": "http://localhost/http"}),
   )
   def test_server_missing_name_raises(self, server_cls, init_kwargs):
@@ -1378,28 +1422,6 @@ class McpServerConfigTest(parameterized.TestCase):
           "disabled_tools",
           ["tool2"],
       ),
-      (
-          "sse_enabled",
-          types.McpSseServer,
-          {
-              "name": "sse_server",
-              "url": "http://localhost/sse",
-              "enabled_tools": ["tool1"],
-          },
-          "enabled_tools",
-          ["tool1"],
-      ),
-      (
-          "sse_disabled",
-          types.McpSseServer,
-          {
-              "name": "sse_server",
-              "url": "http://localhost/sse",
-              "disabled_tools": ["tool2"],
-          },
-          "disabled_tools",
-          ["tool2"],
-      ),
   )
   def test_server_construction_with_filtering(
       self, server_cls, init_kwargs, expected_attr, expected_val
@@ -1425,26 +1447,6 @@ class McpServerConfigTest(parameterized.TestCase):
           {
               "name": "stdio_server",
               "command": "node",
-              "enabled_tools": ["tool1"],
-              "disabled_tools": ["tool1"],
-          },
-      ),
-      (
-          "sse_different_tools",
-          types.McpSseServer,
-          {
-              "name": "sse_server",
-              "url": "http://localhost/sse",
-              "enabled_tools": ["tool1"],
-              "disabled_tools": ["tool2"],
-          },
-      ),
-      (
-          "sse_same_tool",
-          types.McpSseServer,
-          {
-              "name": "sse_server",
-              "url": "http://localhost/sse",
               "enabled_tools": ["tool1"],
               "disabled_tools": ["tool1"],
           },

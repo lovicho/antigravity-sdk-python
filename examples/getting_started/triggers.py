@@ -36,8 +36,11 @@ Criteria for correct script performance:
 
 import asyncio
 
-from google.antigravity import Agent, LocalAgentConfig
-from google.antigravity.triggers import every, trigger, TriggerContext
+from google.antigravity import Agent
+from google.antigravity import LocalAgentConfig
+from google.antigravity.triggers import every
+from google.antigravity.triggers import trigger
+from google.antigravity.triggers import TriggerContext
 
 # ==============================================================================
 # 1. PERIODIC TRIGGER EXAMPLE: Customer Support Ticket Queue

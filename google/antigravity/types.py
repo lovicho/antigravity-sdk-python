@@ -21,12 +21,15 @@ types. They are pure Python Pydantic V2 models with no proto dependencies.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 import enum
 import mimetypes
 import pathlib
-from typing import Annotated, Any, AsyncIterator, Callable, Literal
+from typing import Annotated, Any, AsyncIterator, Callable, Literal, TypeVar, cast
 
 import pydantic
+
+_BaseMediaT = TypeVar("_BaseMediaT", bound="_BaseMedia")
 
 __all__ = [
     "ThinkingLevel",
@@ -42,7 +45,6 @@ __all__ = [
     "CapabilitiesConfig",
     "BaseMcpServerConfig",
     "McpStdioServer",
-    "McpSseServer",
     "McpStreamableHttpServer",
     "McpServerConfig",
     "ToolCall",
@@ -61,6 +63,7 @@ __all__ = [
     "AskQuestionEntry",
     "AskQuestionInteractionSpec",
     "AntigravityConnectionError",
+    "AntigravityCancelledError",
     "AntigravityValidationError",
     "AntigravityExecutionError",
     "TriggerDelivery",
@@ -70,6 +73,13 @@ __all__ = [
     "Thought",
     "Text",
     "ChatResponse",
+    "Image",
+    "Document",
+    "Audio",
+    "Video",
+    "Content",
+    "SlashCommand",
+    "BuiltinSlashCommandName",
 ]
 
 # =============================================================================
@@ -422,31 +432,6 @@ class McpStdioServer(BaseMcpServerConfig):
   disabled_tools: list[str] | None = None
 
 
-class McpSseServer(BaseMcpServerConfig):
-  """Configuration for an MCP server connected via SSE.
-
-  Attributes:
-    url: The URL of the SSE endpoint.
-    name: Unique identifier for this MCP server.
-    type: The type of connection, always "sse".
-    headers: Optional headers to send with the connection request.
-    enabled_tools: Explicit allowlist of tools to enable. Mutually exclusive
-      with disabled_tools. When None, all tools from the server are enabled.
-      Only enabled tools are exposed to the model; others are hidden entirely
-      from the model's context, saving tokens.
-    disabled_tools: Explicit denylist of tools to disable. Mutually exclusive
-      with enabled_tools. When None, all tools from the server are enabled.
-      Disabled tools are removed from the model's context entirely, saving
-      tokens and preventing the model from even considering them.
-  """
-
-  url: str
-  type: Literal["sse"] = "sse"
-  headers: dict[str, str] | None = None
-  enabled_tools: list[str] | None = None
-  disabled_tools: list[str] | None = None
-
-
 class McpStreamableHttpServer(BaseMcpServerConfig):
   """Configuration for an MCP server connected via Streamable HTTP.
 
@@ -478,7 +463,7 @@ class McpStreamableHttpServer(BaseMcpServerConfig):
   disabled_tools: list[str] | None = None
 
 
-McpServerConfig = McpStdioServer | McpSseServer | McpStreamableHttpServer
+McpServerConfig = McpStdioServer | McpStreamableHttpServer
 
 
 # =============================================================================
@@ -601,7 +586,6 @@ class StepStatus(str, enum.Enum):
   WAITING_FOR_USER = "WAITING_FOR_USER"
   ERROR = "ERROR"
   CANCELED = "CANCELED"
-  TERMINAL_ERROR = "TERMINAL_ERROR"
   UNKNOWN = "UNKNOWN"
 
 
@@ -736,6 +720,14 @@ class AntigravityConnectionError(Exception):
   """
 
 
+class AntigravityCancelledError(asyncio.CancelledError):
+  """Raised when an active turn is cancelled programmatically."""
+
+  def __init__(self, message: str = "The request was cancelled by the client."):
+    """Initializes the cancellation error with a default message."""
+    super().__init__(message)
+
+
 class AntigravityExecutionError(Exception):
   """Raised when the agent execution encounters a terminal error.
 
@@ -776,7 +768,7 @@ class AntigravityValidationError(Exception):
     Returns:
       An AntigravityValidationError wrapping the Pydantic error.
     """
-    return cls(message=str(exc), errors=exc.errors())
+    return cls(message=str(exc), errors=cast(Any, exc.errors()))
 
 
 class TriggerDelivery(str, enum.Enum):
@@ -896,13 +888,14 @@ class ChatResponse:
               continue
             try:
               chunk = await self._chunk_stream.__anext__()
-              self._buffered_chunks.append(chunk)
             except StopAsyncIteration:
               self._is_done = True
-            except Exception as e:
+            except (asyncio.CancelledError, Exception) as e:
               self._is_done = True
               self._stream_error = e
               raise
+            else:
+              self._buffered_chunks.append(chunk)
 
     return _chunks_gen()
 
@@ -965,6 +958,15 @@ class ChatResponse:
   def usage_metadata(self) -> UsageMetadata | None:
     """Accumulated token usage across all model invocations in this turn."""
     return self._conversation.last_turn_usage
+
+  async def cancel(self) -> None:
+    """Cancels the active execution turn and halts generation.
+
+    This cleanly aborts the active stream on the backend. If the stream is
+    already completed, this method acts as a safe no-op.
+    """
+    if not self._is_done:
+      await self._conversation.cancel()
 
 
 # =============================================================================
@@ -1056,8 +1058,10 @@ class _BaseMedia(pydantic.BaseModel):
 
   @classmethod
   def from_file(
-      cls, path: str | pathlib.Path, description: str | None = None
-  ) -> _BaseMedia:
+      cls: type[_BaseMediaT],
+      path: str | pathlib.Path,
+      description: str | None = None,
+  ) -> _BaseMediaT:
     """Instantiates a media content primitive from a local file path.
 
     Args:
@@ -1127,8 +1131,31 @@ class Video(_BaseMedia):
     return v
 
 
-ContentPrimitive = str | Image | Document | Audio | Video
-Content = ContentPrimitive | list[ContentPrimitive]
+class BuiltinSlashCommandName(str, enum.Enum):
+  """Supported system slash commands.
+
+  Attributes:
+    PLAN: Plan carefully before executing a task (generates an implementation
+      plan artifact and awaits user approval).
+  """
+
+  PLAN = "plan"
+
+
+class SlashCommand(pydantic.BaseModel):
+  """Slash command context primitive.
+
+  Attributes:
+    name: The strict BuiltinSlashCommandName enum.
+  """
+
+  model_config = pydantic.ConfigDict(frozen=True)
+
+  name: BuiltinSlashCommandName
+
+
+ContentPrimitive = str | Image | Document | Audio | Video | SlashCommand
+Content = ContentPrimitive | Sequence[ContentPrimitive]
 
 # Registry mapping each supported MIME type to its media class.
 # Built once at import time from the per-category frozensets.
@@ -1175,4 +1202,7 @@ def from_file(
         f"Unsupported MIME type: '{mime_guess}'. "
         f"Supported file formats in the SDK are: {sorted(_MIME_TO_MEDIA_CLASS)}"
     )
-  return media_cls(data=data, mime_type=mime_guess, description=description)  # pytype: disable=bad-return-type
+  return cast(
+      Image | Document | Audio | Video,
+      media_cls(data=data, mime_type=mime_guess, description=description),
+  )

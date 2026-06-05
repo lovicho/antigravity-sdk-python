@@ -19,10 +19,12 @@ import asyncio
 import logging
 import os
 import sys
+from google.antigravity import Agent
+from google.antigravity import LocalAgentConfig
 from google.antigravity import types
-from google.antigravity import Agent, LocalAgentConfig
+from google.antigravity.hooks import HookContext
 from google.antigravity.hooks import policy
-from google.antigravity.hooks import HookContext, PreToolCallDecideHook
+from google.antigravity.hooks import PreToolCallDecideHook
 
 _TOOL_NAME_MAPPING = {
     "view_file": "Viewing Files",

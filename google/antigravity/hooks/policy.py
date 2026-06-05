@@ -210,7 +210,7 @@ def allow(
 
 @overload
 def allow(
-    mcp_config: types.BaseMcpServerConfig,
+    tool: types.BaseMcpServerConfig,
     mcp_tools: Sequence[str] | None = None,
     *,
     when: Predicate | None = None,
@@ -220,7 +220,7 @@ def allow(
 
 
 def allow(
-    tool_or_mcp: str | types.BaseMcpServerConfig,
+    tool: str | types.BaseMcpServerConfig,
     mcp_tools: Sequence[str] | None = None,
     *,
     when: Predicate | None = None,
@@ -229,7 +229,7 @@ def allow(
   """Creates an APPROVE policy.
 
   Args:
-    tool_or_mcp: Tool name, "*" for all tools, or BaseMcpServerConfig.
+    tool: Tool name, "*" for all tools, or BaseMcpServerConfig.
     mcp_tools: Optional list of tool names if BaseMcpServerConfig is provided.
     when: Optional argument predicate.
     name: Human-readable label.
@@ -237,12 +237,12 @@ def allow(
   Returns:
     A Policy or a list of Policies.
   """
-  if isinstance(tool_or_mcp, str):
+  if isinstance(tool, str):
     if mcp_tools is not None:
       raise ValueError("mcp_tools cannot be specified when tool is a string.")
-    return Policy(tool=tool_or_mcp, decision=Decision.APPROVE, when=when, name=name)  # pytype: disable=bad-return-type  # False positive: pytype fails to narrow overloaded types in implementation body.
+    return Policy(tool=tool, decision=Decision.APPROVE, when=when, name=name)  # pytype: disable=bad-return-type  # False positive: pytype fails to narrow overloaded types in implementation body.
 
-  return _mcp_policies(Decision.APPROVE, tool_or_mcp, mcp_tools, when=when, name=name)  # pytype: disable=bad-return-type  # False positive: pytype fails to narrow overloaded types in implementation body.
+  return _mcp_policies(Decision.APPROVE, tool, mcp_tools, when=when, name=name)  # pytype: disable=bad-return-type  # False positive: pytype fails to narrow overloaded types in implementation body.
 
 
 @overload
@@ -257,7 +257,7 @@ def deny(
 
 @overload
 def deny(
-    mcp_config: types.BaseMcpServerConfig,
+    tool: types.BaseMcpServerConfig,
     mcp_tools: Sequence[str] | None = None,
     *,
     when: Predicate | None = None,
@@ -267,7 +267,7 @@ def deny(
 
 
 def deny(
-    tool_or_mcp: str | types.BaseMcpServerConfig,
+    tool: str | types.BaseMcpServerConfig,
     mcp_tools: Sequence[str] | None = None,
     *,
     when: Predicate | None = None,
@@ -276,7 +276,7 @@ def deny(
   """Creates a DENY policy.
 
   Args:
-    tool_or_mcp: Tool name, "*" for all tools, or BaseMcpServerConfig.
+    tool: Tool name, "*" for all tools, or BaseMcpServerConfig.
     mcp_tools: Optional list of tool names if BaseMcpServerConfig is provided.
     when: Optional argument predicate.
     name: Human-readable label.
@@ -284,12 +284,12 @@ def deny(
   Returns:
     A Policy or a list of Policies.
   """
-  if isinstance(tool_or_mcp, str):
+  if isinstance(tool, str):
     if mcp_tools is not None:
       raise ValueError("mcp_tools cannot be specified when tool is a string.")
-    return Policy(tool=tool_or_mcp, decision=Decision.DENY, when=when, name=name)  # pytype: disable=bad-return-type  # False positive: pytype fails to narrow overloaded types in implementation body.
+    return Policy(tool=tool, decision=Decision.DENY, when=when, name=name)  # pytype: disable=bad-return-type  # False positive: pytype fails to narrow overloaded types in implementation body.
 
-  return _mcp_policies(Decision.DENY, tool_or_mcp, mcp_tools, when=when, name=name)  # pytype: disable=bad-return-type  # False positive: pytype fails to narrow overloaded types in implementation body.
+  return _mcp_policies(Decision.DENY, tool, mcp_tools, when=when, name=name)  # pytype: disable=bad-return-type  # False positive: pytype fails to narrow overloaded types in implementation body.
 
 
 @overload
@@ -305,7 +305,7 @@ def ask_user(
 
 @overload
 def ask_user(
-    mcp_config: types.BaseMcpServerConfig,
+    tool: types.BaseMcpServerConfig,
     mcp_tools: Sequence[str] | None = None,
     *,
     handler: AskUserHandler,
@@ -316,7 +316,7 @@ def ask_user(
 
 
 def ask_user(
-    tool_or_mcp: str | types.BaseMcpServerConfig,
+    tool: str | types.BaseMcpServerConfig,
     mcp_tools: Sequence[str] | None = None,
     *,
     handler: AskUserHandler,
@@ -326,7 +326,7 @@ def ask_user(
   """Creates an ASK_USER policy.
 
   Args:
-    tool_or_mcp: Tool name, "*" for all tools, or BaseMcpServerConfig.
+    tool: Tool name, "*" for all tools, or BaseMcpServerConfig.
     mcp_tools: Optional list of tool names if BaseMcpServerConfig is provided.
     handler: Callable invoked to obtain user approval.
     when: Optional argument predicate.
@@ -335,11 +335,11 @@ def ask_user(
   Returns:
     A Policy or a list of Policies.
   """
-  if isinstance(tool_or_mcp, str):
+  if isinstance(tool, str):
     if mcp_tools is not None:
       raise ValueError("mcp_tools cannot be specified when tool is a string.")
     return Policy(  # pytype: disable=bad-return-type  # False positive: pytype fails to narrow overloaded types in implementation body.
-        tool=tool_or_mcp,
+        tool=tool,
         decision=Decision.ASK_USER,
         when=when,
         ask_user=handler,
@@ -348,7 +348,7 @@ def ask_user(
 
   return _mcp_policies(  # pytype: disable=bad-return-type  # False positive: pytype fails to narrow overloaded types in implementation body.
       Decision.ASK_USER,
-      tool_or_mcp,
+      tool,
       mcp_tools,
       when=when,
       name=name,

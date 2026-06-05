@@ -91,3 +91,27 @@ async with Agent(config) as agent:
         print(chunk, end="", flush=True)
     print()
 ```
+
+## Overriding Built-in Tools
+
+You can override any built-in tool (e.g., `view_file`, `run_command`) by
+registering a custom tool with the **exact same name** as the built-in tool.
+
+When you register a custom tool with a conflicting name, the SDK will
+automatically prioritize your custom implementation. You do not need to
+explicitly disable the built-in tool in the `disabled_tools` configuration.
+
+The local harness will log an info message confirming the override: `Custom tool
+"view_file" successfully overrides built-in tool.`
+
+Example:
+
+```python
+def view_file(AbsolutePath: str) -> str:
+    """Custom implementation of view_file."""
+    return f"[Custom View] {AbsolutePath}"
+
+config = LocalAgentConfig(
+    tools=[view_file], # Overrides built-in view_file
+)
+```

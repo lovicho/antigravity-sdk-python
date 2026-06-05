@@ -51,6 +51,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # --- Determine project root ---
 if [[ -n "${KOKORO_ARTIFACTS_DIR}" ]]; then
   cd "${KOKORO_ARTIFACTS_DIR}/git/antigravity-sdk-py"
+  # Avoid fatal: detected dubious ownership errors in the Kokoro RBE sandbox environment
+  git config --global --add safe.directory "$(pwd)"
 fi
 
 # If a specific GoB commit was requested (via GOB_COMMIT build param),
@@ -59,6 +61,7 @@ fi
 if [[ -n "${GOB_COMMIT:-}" ]]; then
   echo "--- Pinning SDK source to GoB commit: ${GOB_COMMIT} ---"
   git checkout "${GOB_COMMIT}"
+  git checkout HEAD -- .kokoro/
 fi
 
 PROJECT_DIR="$(pwd)"
@@ -144,9 +147,6 @@ if [[ -z "${PUBLISH_PREBUILT_VERSION:-}" ]]; then
     if [[ ! -f "${LOCAL_BIN}" ]]; then
       MPM_SUBDIR="${MPM_DIRS[$PLATFORM]:-}"
       MPM_BIN="${MPM_DIR}/${MPM_SUBDIR}/localharness_external"
-      if [[ "${PLATFORM}" == windows-* ]]; then
-        MPM_BIN="${MPM_BIN}.exe"
-      fi
       if [[ -n "${MPM_SUBDIR}" && -f "${MPM_BIN}" ]]; then
         echo "--- Copying ${PLATFORM} binary from MPM ---"
         mkdir -p "${BINARIES_DIR}/${PLATFORM}"
@@ -192,6 +192,8 @@ if [[ -z "${PUBLISH_PREBUILT_VERSION:-}" ]]; then
     # discovers it via package-data.
     touch "${BIN_DEST}/__init__.py"
 
+    # Clean setuptools build directory to prevent binary accumulation across platforms.
+    rm -rf build/
     # Build the wheel, then re-tag with the correct platform.
     # --no-isolation: use the setuptools/wheel already installed via
     # requirements-release.txt rather than creating a fresh venv that

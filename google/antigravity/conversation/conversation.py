@@ -49,11 +49,21 @@ def _add_usage(
     target: types.UsageMetadata, source: types.UsageMetadata
 ) -> None:
   """Adds source usage counts into target, treating None as zero."""
-  target.prompt_token_count += source.prompt_token_count or 0
-  target.cached_content_token_count += source.cached_content_token_count or 0
-  target.candidates_token_count += source.candidates_token_count or 0
-  target.thoughts_token_count += source.thoughts_token_count or 0
-  target.total_token_count += source.total_token_count or 0
+  target.prompt_token_count = (target.prompt_token_count or 0) + (
+      source.prompt_token_count or 0
+  )
+  target.cached_content_token_count = (
+      target.cached_content_token_count or 0
+  ) + (source.cached_content_token_count or 0)
+  target.candidates_token_count = (target.candidates_token_count or 0) + (
+      source.candidates_token_count or 0
+  )
+  target.thoughts_token_count = (target.thoughts_token_count or 0) + (
+      source.thoughts_token_count or 0
+  )
+  target.total_token_count = (target.total_token_count or 0) + (
+      source.total_token_count or 0
+  )
 
 
 class Conversation:

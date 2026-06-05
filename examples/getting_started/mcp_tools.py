@@ -24,10 +24,11 @@ To run:
 import asyncio
 import os
 
+from google.antigravity import Agent
+from google.antigravity import LocalAgentConfig
 from google.antigravity import types
 from google.antigravity.hooks import policy
 
-from google.antigravity import Agent, LocalAgentConfig
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from resources import mcp_server
@@ -54,24 +55,7 @@ async def mcp_stdio() -> None:
     print(f"  Agent: {await response.text()}")
 
 
-async def mcp_sse() -> None:
-  """Showcases the SSE transport."""
-  print("\n  --- Showcasing SSE Transport ---")
-  async with mcp_server.run("sse") as port:
-    config = LocalAgentConfig(
-        mcp_servers=[
-            types.McpSseServer(
-                name="pirate_math",
-                url=f"http://localhost:{port}/sse",
-            )
-        ]
-    )
 
-    async with Agent(config) as my_agent:
-      prompt = "Use the pirate_multiply tool to multiply 5 and 7."
-      print(f"  User: {prompt}")
-      response = await my_agent.chat(prompt)
-      print(f"  Agent: {await response.text()}")
 
 
 async def mcp_http() -> None:
@@ -164,7 +148,6 @@ async def main() -> None:
   await mcp_stdio()
   await mcp_filtering()
   await mcp_policies()
-  await mcp_sse()
   await mcp_http()
 
 

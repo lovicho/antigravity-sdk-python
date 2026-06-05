@@ -65,6 +65,7 @@ Extending agent capabilities and orchestrating multi-agent workflows.
 ### ⚙️ Lifecycle, Proactivity, & Observability
 Controlling execution flow, reacting to background events, auditing performance, and maintaining session state.
 * [hooks.py](hooks.py): Intercepting session and turn lifecycle events (`pre_turn`, `post_turn`).
+* [cancellation.py](cancellation.py): Programmatic turn aborts (`response.cancel()`) and clean async task cancellation handling.
 * [triggers.py](triggers.py): Running background checks and periodic tasks during active conversations.
 * [observability.py](observability.py): Auditing execution, tracking token costs (including thinking tokens), and configuring logging.
 * [error_handler.py](error_handler.py): Gracefully recovering from tool execution failures via `@hooks.on_tool_error`.

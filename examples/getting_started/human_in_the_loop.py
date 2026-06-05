@@ -24,7 +24,8 @@ To run:
 import asyncio
 import sys
 
-from google.antigravity import Agent, LocalAgentConfig
+from google.antigravity import Agent
+from google.antigravity import LocalAgentConfig
 from google.antigravity.utils import interactive
 
 
