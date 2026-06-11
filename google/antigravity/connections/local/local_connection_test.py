@@ -1377,6 +1377,31 @@ class LocalConnectionStepFromDictTest(unittest.TestCase):
         "/dev/shm/workspace/foo.py",
     )
 
+  def test_step_from_dict_normalizes_cns_uri_arguments(self):
+    """Verifies that LocalConnectionStep.from_dict normalizes cns:// URIs.
+
+    Why: The CNS-backed filesystem uses cns:// URIs as path representations.
+    The workspace_only policy compares canonical_path against /cns/... paths
+    provided by the user, so cns:// must be translated to /cns/... for
+    policy matching to work correctly.
+    """
+    step = local_connection.LocalConnectionStep.from_dict({
+        "step_index": 1,
+        "trajectory_id": "traj_1",
+        "state": "STATE_WAITING_FOR_USER",
+        "create_file": {"path": "cns://el-d/home/user/workspace/kittens.md"},
+    })
+    self.assertEqual(len(step.tool_calls), 1)
+    self.assertEqual(
+        step.tool_calls[0].args.get("path"),
+        "/cns/el-d/home/user/workspace/kittens.md",
+    )
+    self.assertNotIn("canonical_path", step.tool_calls[0].args)
+    self.assertEqual(
+        step.tool_calls[0].canonical_path,
+        "/cns/el-d/home/user/workspace/kittens.md",
+    )
+
 
 class LocalConnectionToolCallNoRunnerTest(unittest.IsolatedAsyncioTestCase):
   """Tests for tool call handling when no ToolRunner is configured."""

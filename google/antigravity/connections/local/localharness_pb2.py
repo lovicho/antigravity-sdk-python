@@ -233,13 +233,14 @@ DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(
     b' \x01(\x04\x12\x1e\n\x16\x63\x61ndidates_token_count\x18\x02'
     b' \x01(\x04\x12\x1c\n\x14thoughts_token_count\x18\x04'
     b' \x01(\x04\x12\x19\n\x11total_token_count\x18\x03'
-    b' \x01(\x04"\x90\x03\n\x0fMcpServerConfig\x12\x0c\n\x04name\x18\x01'
+    b' \x01(\x04"\xa9\x03\n\x0fMcpServerConfig\x12\x0c\n\x04name\x18\x01'
     b' \x01(\t\x12<\n\x05stdio\x18\x02'
     b' \x01(\x0b\x32+.antigravity.localharness.McpStdioTransportH\x00\x12:\n\x04http\x18\x03'
     b' \x01(\x0b\x32*.antigravity.localharness.McpHttpTransportH\x00\x12\x15\n\renabled_tools\x18\x04'
     b' \x03(\t\x12\x16\n\x0e\x64isabled_tools\x18\x05'
     b' \x03(\t\x12V\n\x12\x61uth_provider_type\x18\x06'
-    b' \x01(\x0e\x32:.antigravity.localharness.McpServerConfig.AuthProviderType"a\n\x10\x41uthProviderType\x12"\n\x1e\x41UTH_PROVIDER_TYPE_UNSPECIFIED\x10\x00\x12)\n%AUTH_PROVIDER_TYPE_GOOGLE_CREDENTIALS\x10\x01\x42\x0b\n\ttransport"\xa1\x01\n\x11McpStdioTransport\x12\x0f\n\x07\x63ommand\x18\x01'
+    b' \x01(\x0e\x32:.antigravity.localharness.McpServerConfig.AuthProviderType\x12\x17\n\x0ftimeout_seconds\x18\x07'
+    b' \x01(\x05"a\n\x10\x41uthProviderType\x12"\n\x1e\x41UTH_PROVIDER_TYPE_UNSPECIFIED\x10\x00\x12)\n%AUTH_PROVIDER_TYPE_GOOGLE_CREDENTIALS\x10\x01\x42\x0b\n\ttransport"\xa1\x01\n\x11McpStdioTransport\x12\x0f\n\x07\x63ommand\x18\x01'
     b' \x01(\t\x12\x0c\n\x04\x61rgs\x18\x02 \x03(\t\x12\x41\n\x03\x65nv\x18\x03'
     b' \x03(\x0b\x32\x34.antigravity.localharness.McpStdioTransport.EnvEntry\x1a*\n\x08\x45nvEntry\x12\x0b\n\x03key\x18\x01'
     b' \x01(\t\x12\r\n\x05value\x18\x02'
@@ -264,8 +265,8 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_MCPSTDIOTRANSPORT_ENVENTRY']._serialized_options = b'8\001'
   _globals['_MCPHTTPTRANSPORT_HEADERSENTRY']._loaded_options = None
   _globals['_MCPHTTPTRANSPORT_HEADERSENTRY']._serialized_options = b'8\001'
-  _globals['_NULLVALUE']._serialized_start = 10400
-  _globals['_NULLVALUE']._serialized_end = 10427
+  _globals['_NULLVALUE']._serialized_start = 10425
+  _globals['_NULLVALUE']._serialized_end = 10452
   _globals['_INPUTCONFIG']._serialized_start = 49
   _globals['_INPUTCONFIG']._serialized_end = 195
   _globals['_INITIALIZECONVERSATIONEVENT']._serialized_start = 197
@@ -413,17 +414,17 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_USAGEMETADATA']._serialized_start = 9426
   _globals['_USAGEMETADATA']._serialized_end = 9594
   _globals['_MCPSERVERCONFIG']._serialized_start = 9597
-  _globals['_MCPSERVERCONFIG']._serialized_end = 9997
-  _globals['_MCPSERVERCONFIG_AUTHPROVIDERTYPE']._serialized_start = 9887
-  _globals['_MCPSERVERCONFIG_AUTHPROVIDERTYPE']._serialized_end = 9984
-  _globals['_MCPSTDIOTRANSPORT']._serialized_start = 10000
-  _globals['_MCPSTDIOTRANSPORT']._serialized_end = 10161
-  _globals['_MCPSTDIOTRANSPORT_ENVENTRY']._serialized_start = 10119
-  _globals['_MCPSTDIOTRANSPORT_ENVENTRY']._serialized_end = 10161
-  _globals['_MCPHTTPTRANSPORT']._serialized_start = 10164
-  _globals['_MCPHTTPTRANSPORT']._serialized_end = 10317
-  _globals['_MCPHTTPTRANSPORT_HEADERSENTRY']._serialized_start = 10271
-  _globals['_MCPHTTPTRANSPORT_HEADERSENTRY']._serialized_end = 10317
-  _globals['_ACTIONMCPTOOL']._serialized_start = 10319
-  _globals['_ACTIONMCPTOOL']._serialized_end = 10398
+  _globals['_MCPSERVERCONFIG']._serialized_end = 10022
+  _globals['_MCPSERVERCONFIG_AUTHPROVIDERTYPE']._serialized_start = 9912
+  _globals['_MCPSERVERCONFIG_AUTHPROVIDERTYPE']._serialized_end = 10009
+  _globals['_MCPSTDIOTRANSPORT']._serialized_start = 10025
+  _globals['_MCPSTDIOTRANSPORT']._serialized_end = 10186
+  _globals['_MCPSTDIOTRANSPORT_ENVENTRY']._serialized_start = 10144
+  _globals['_MCPSTDIOTRANSPORT_ENVENTRY']._serialized_end = 10186
+  _globals['_MCPHTTPTRANSPORT']._serialized_start = 10189
+  _globals['_MCPHTTPTRANSPORT']._serialized_end = 10342
+  _globals['_MCPHTTPTRANSPORT_HEADERSENTRY']._serialized_start = 10296
+  _globals['_MCPHTTPTRANSPORT_HEADERSENTRY']._serialized_end = 10342
+  _globals['_ACTIONMCPTOOL']._serialized_start = 10344
+  _globals['_ACTIONMCPTOOL']._serialized_end = 10423
 # @@protoc_insertion_point(module_scope)

@@ -230,6 +230,11 @@ def normalize_wire_path(path: str) -> str:
     # urlparse("file:///abs/path").path == "/abs/path"
     # url2pathname converts URL path to platform-native path
     return urllib.request.url2pathname(parsed.path)
+  if parsed.scheme == "cns":
+    # urlparse("cns://el-d/home/user/...").netloc == "el-d"
+    # urlparse("cns://el-d/home/user/...").path == "/home/user/..."
+    # Convert to the canonical /cns/<cell>/... absolute path format.
+    return "/cns/" + parsed.netloc + parsed.path
   return path
 
 
@@ -1449,6 +1454,7 @@ def _to_mcp_server_proto(
       "name": server_cfg.name,
       "enabled_tools": server_cfg.enabled_tools or [],
       "disabled_tools": server_cfg.disabled_tools or [],
+      "timeout_seconds": server_cfg.timeout_seconds or 0,
   }
   if isinstance(server_cfg, types.McpStdioServer):
     kwargs["stdio"] = localharness_pb2.McpStdioTransport(

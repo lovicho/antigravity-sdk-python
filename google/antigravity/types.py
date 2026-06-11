@@ -390,9 +390,12 @@ class BaseMcpServerConfig(pydantic.BaseModel):
       ^[a-zA-Z0-9_-]+$, which aligns with the naming constraints of the Gemini
       API tool naming specification (only alphanumeric characters, hyphens, and
       underscores are permitted).
+    timeout_seconds: Optional timeout in seconds for connecting to the server
+      and listing tools.
   """
 
   name: Annotated[str, pydantic.Field(pattern=r"^[a-zA-Z0-9_-]+$")]
+  timeout_seconds: int | None = None
 
   @pydantic.model_validator(mode="after")
   def _check_mutually_exclusive(self) -> "BaseMcpServerConfig":
