@@ -100,15 +100,14 @@ By default, `Agent` runs in **read-only mode** for safety. Pass
 ### Interactive Loop
 
 ```python
-from google.antigravity import Agent, LocalAgentConfig, CapabilitiesConfig
+from google.antigravity import LocalAgentConfig, CapabilitiesConfig
 from google.antigravity.utils.interactive import run_interactive_loop
 
 config = LocalAgentConfig(
     # api_key="your_api_key_here",
     capabilities=CapabilitiesConfig(),
 )
-async with Agent(config) as agent:
-    await run_interactive_loop(agent)
+await run_interactive_loop(config)
 ```
 
 ### Advanced Usage with Conversation
@@ -222,7 +221,7 @@ async with Agent(config) as agent:
 Control agent behavior with a declarative policy system:
 
 ```python
-from google.antigravity import Agent, LocalAgentConfig, CapabilitiesConfig
+from google.antigravity import LocalAgentConfig, CapabilitiesConfig
 from google.antigravity.hooks.policy import deny, allow, ask_user, enforce
 from google.antigravity.utils.interactive import run_interactive_loop
 
@@ -236,8 +235,7 @@ config = LocalAgentConfig(
     capabilities=CapabilitiesConfig(),
     policies=policies,
 )
-async with Agent(config) as agent:
-    await run_interactive_loop(agent)
+await run_interactive_loop(config)
 ```
 
 ### Triggers
@@ -246,7 +244,7 @@ Run background tasks that react to external events and push messages into the
 agent:
 
 ```python
-from google.antigravity import Agent, LocalAgentConfig
+from google.antigravity import LocalAgentConfig
 from google.antigravity.triggers import every
 from google.antigravity.utils.interactive import run_interactive_loop
 
@@ -256,8 +254,7 @@ async def check_status(ctx):
 config = LocalAgentConfig(
     triggers=[every(60, check_status)],
 )
-async with Agent(config) as agent:
-    await run_interactive_loop(agent)
+await run_interactive_loop(config)
 ```
 
 ## Architecture

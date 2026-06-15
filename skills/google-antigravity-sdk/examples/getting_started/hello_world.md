@@ -56,7 +56,7 @@ async with Agent(LocalAgentConfig()) as agent:
 
 ### Mechanics of the Interactive Loop
 
-When you call `await agent.run_interactive_loop()`, the following mechanics
+When you call `await run_interactive_loop(config)`, the following mechanics
 apply:
 
 -   **Prompts**:
@@ -72,9 +72,9 @@ apply:
     -   Use `Ctrl+C` or `Ctrl+D` to interrupt.
 
 ```python
-from google.antigravity import Agent, LocalAgentConfig
+from google.antigravity import LocalAgentConfig
+from google.antigravity.utils.interactive import run_interactive_loop
 
-async with Agent(LocalAgentConfig()) as agent:
-    # Starts a full interactive loop in the terminal
-    await agent.run_interactive_loop()
+# Starts a full interactive loop in the terminal
+await run_interactive_loop(LocalAgentConfig())
 ```

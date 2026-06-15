@@ -22,12 +22,10 @@ from google.antigravity import types
 from google.antigravity.connections import connection as connection_module
 from google.antigravity.conversation import conversation
 from google.antigravity.hooks import hook_runner
-from google.antigravity.hooks import hooks
 from google.antigravity.hooks import policy
 from google.antigravity.tools import tool_context
 from google.antigravity.tools import tool_runner
 from google.antigravity.triggers import trigger_runner
-from google.antigravity.triggers import triggers as triggers_lib
 
 
 __all__ = ["Agent"]
@@ -60,34 +58,6 @@ class Agent:
     self._pending_hooks = list(config.hooks)
     self._pending_triggers = list(config.triggers)
     self._exit_stack = contextlib.AsyncExitStack()
-
-  def register_hook(self, hook: hooks.Hook):
-    """Registers a hook by inferring its type.
-
-    Args:
-        hook: The hook to register.
-    """
-    if not self._hook_runner:
-      self._pending_hooks.append(hook)
-      return
-    self._hook_runner.register_hook(hook)
-
-  def register_trigger(self, trigger: triggers_lib.Trigger):
-    """Registers a trigger.
-
-    Cannot be called after the agent has started.
-
-    Args:
-      trigger: The trigger function to register.
-
-    Raises:
-      RuntimeError: If the agent has already started.
-    """
-    if self._trigger_runner:
-      raise RuntimeError(
-          "Cannot register triggers after the agent has started."
-      )
-    self._pending_triggers.append(trigger)
 
   async def __aenter__(self) -> "Agent":
     """Starts the agent session.

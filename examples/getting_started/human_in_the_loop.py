@@ -41,12 +41,11 @@ async def main() -> None:
           "When you need clarification or more information from the user to "
           "fulfill a request, you should use the `ask_question` tool to "
           "prompt them."
-      )
+      ),
+      hooks=[interactive.AskQuestionHook()],
   )
 
   async with Agent(config) as my_agent:
-    # Register the hook to handle questions from the agent.
-    my_agent.register_hook(interactive.AskQuestionHook())
 
     # We give the agent an ambiguous prompt to encourage it to ask for
     # clarification.

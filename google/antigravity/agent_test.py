@@ -377,13 +377,6 @@ class AgentTest(unittest.IsolatedAsyncioTestCase):
       self.assertIsNotNone(ag._hook_runner)
       self.assertIn(my_hook, ag._hook_runner.pre_turn_hooks)
 
-    # Test dynamic registration
-    config = local_connection.LocalAgentConfig(system_instructions="test")
-    async with agent.Agent(config) as ag:
-      ag.register_hook(my_hook)
-      self.assertIsNotNone(ag._hook_runner)
-      self.assertIn(my_hook, ag._hook_runner.pre_turn_hooks)
-
   @mock.patch(
       "google.antigravity.connections."
       "local.local_connection.LocalConnectionStrategy"
@@ -443,74 +436,6 @@ class AgentTest(unittest.IsolatedAsyncioTestCase):
 
     # TriggerRunner.stop() called during __aexit__.
     mock_runner_instance.stop.assert_called_once()
-
-    mock_trigger_runner_class.reset_mock()
-    mock_runner_instance.reset_mock()
-
-    # Test dynamic registration before start.
-    config = local_connection.LocalAgentConfig(system_instructions="test")
-    ag = agent.Agent(config)
-    ag.register_trigger(my_trigger)
-    async with ag:
-      mock_trigger_runner_class.assert_called_once()
-      call_kwargs = mock_trigger_runner_class.call_args[1]
-      self.assertEqual(call_kwargs["triggers"], [my_trigger])
-      mock_runner_instance.start.assert_called_once()
-
-  @mock.patch(
-      "google.antigravity.connections."
-      "local.local_connection.LocalConnectionStrategy"
-  )
-  @mock.patch.object(conversation.Conversation, "create")
-  async def test_agent_register_hook_before_start(
-      self, mock_conv_create, mock_strategy_class
-  ):
-    del mock_conv_create  # Unused.
-
-    mock_strategy_instance = mock.MagicMock()
-    mock_strategy_instance.stop = mock.AsyncMock()
-    mock_strategy_class.return_value = mock_strategy_instance
-
-    class MyPreTurnHook(hooks.PreTurnHook):
-
-      async def run(self, context, data):
-        return types.HookResult(allow=True)
-
-    my_hook = MyPreTurnHook()
-
-    config = local_connection.LocalAgentConfig(system_instructions="test")
-    ag = agent.Agent(config)
-    ag.register_hook(my_hook)
-    self.assertIn(my_hook, ag._pending_hooks)
-
-    async with ag:
-      self.assertIsNotNone(ag._hook_runner)
-      self.assertIn(my_hook, ag._hook_runner.pre_turn_hooks)
-      self.assertEqual(len(ag._pending_hooks), 0)
-
-  @mock.patch(
-      "google.antigravity.connections."
-      "local.local_connection.LocalConnectionStrategy"
-  )
-  @mock.patch.object(conversation.Conversation, "create")
-  async def test_agent_register_trigger_after_start(
-      self, mock_conv_create, mock_strategy_class
-  ):
-    del mock_conv_create  # Unused.
-
-    mock_strategy_instance = mock.MagicMock()
-    mock_strategy_instance.stop = mock.AsyncMock()
-    mock_strategy_class.return_value = mock_strategy_instance
-
-    async def my_trigger(_):
-      pass
-
-    config = local_connection.LocalAgentConfig(
-        system_instructions="test", triggers=[my_trigger]
-    )
-    async with agent.Agent(config) as ag:
-      with self.assertRaises(RuntimeError):
-        ag.register_trigger(my_trigger)
 
   @mock.patch(
       "google.antigravity.connections."
