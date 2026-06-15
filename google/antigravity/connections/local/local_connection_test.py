@@ -4404,12 +4404,14 @@ class LocalConnectionBuiltinToolHooksTest(unittest.IsolatedAsyncioTestCase):
             generate_image=localharness_pb2.ActionGenerateImage(
                 prompt="sunset photo",
                 image_name="sunset_photo",
+                aspect_ratio="16:9",
             ),
         ),
         expected_name=types.BuiltinTools.GENERATE_IMAGE.value,
         expected_type=local_types.GenerateImageResult,
-        assertions_fn=lambda r: self.assertEqual(
-            r.result.image_name, "sunset_photo"
+        assertions_fn=lambda r: (
+            self.assertEqual(r.result.image_name, "sunset_photo"),
+            self.assertEqual(r.result.aspect_ratio, "16:9"),
         ),
     )
 

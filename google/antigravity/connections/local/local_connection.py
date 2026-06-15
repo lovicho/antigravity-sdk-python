@@ -215,7 +215,9 @@ def _extract_tool_result(
   elif step_update.HasField(_gen_image):
     gi = step_update.generate_image
     if gi.image_name:
-      return local_types.GenerateImageResult(image_name=gi.image_name)
+      return local_types.GenerateImageResult(
+          image_name=gi.image_name, aspect_ratio=gi.aspect_ratio
+      )
   return None
 
 

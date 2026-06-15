@@ -81,6 +81,7 @@ class GenerateImageResult(pydantic.BaseModel):
   """Structured result from a generate_image tool execution."""
 
   image_name: str = ""
+  aspect_ratio: str = ""
 
   def __str__(self) -> str:
     return self.image_name
