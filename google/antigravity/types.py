@@ -1026,7 +1026,7 @@ class Image(_BaseMedia):
 
   @pydantic.field_validator("mime_type")
   @classmethod
-  def validate_mime_type(cls, v: str) -> str:
+  def _validate_mime_type(cls, v: str) -> str:
     """Validates that the MIME type is supported for Image content."""
     if v not in SUPPORTED_IMAGE_MIMES:
       raise ValueError(f"Unsupported Image MIME type: '{v}'")
@@ -1038,7 +1038,7 @@ class Document(_BaseMedia):
 
   @pydantic.field_validator("mime_type")
   @classmethod
-  def validate_mime_type(cls, v: str) -> str:
+  def _validate_mime_type(cls, v: str) -> str:
     """Validates that the MIME type is supported for Document content."""
     if v not in SUPPORTED_DOCUMENT_MIMES:
       raise ValueError(f"Unsupported Document MIME type: '{v}'")
@@ -1050,7 +1050,7 @@ class Audio(_BaseMedia):
 
   @pydantic.field_validator("mime_type")
   @classmethod
-  def validate_mime_type(cls, v: str) -> str:
+  def _validate_mime_type(cls, v: str) -> str:
     """Validates that the MIME type is supported for Audio content."""
     if v not in SUPPORTED_AUDIO_MIMES:
       raise ValueError(f"Unsupported Audio MIME type: '{v}'")
@@ -1062,7 +1062,7 @@ class Video(_BaseMedia):
 
   @pydantic.field_validator("mime_type")
   @classmethod
-  def validate_mime_type(cls, v: str) -> str:
+  def _validate_mime_type(cls, v: str) -> str:
     """Validates that the MIME type is supported for Video content."""
     if v not in SUPPORTED_VIDEO_MIMES:
       raise ValueError(f"Unsupported Video MIME type: '{v}'")
