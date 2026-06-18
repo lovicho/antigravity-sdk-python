@@ -19,10 +19,19 @@ session. It reacts to external events (cron, file changes, webhooks)
 and pushes messages back into the agent.
 """
 
-import inspect
-from typing import Awaitable, Callable
+from __future__ import annotations
 
-from google.antigravity.connections import connection as connection_module
+import enum
+import inspect
+from typing import Awaitable, Callable, Protocol
+
+import pydantic
+
+
+class TriggerConnection(Protocol):
+
+  async def send_trigger_notification(self, content: str) -> None:
+    ...
 
 
 class TriggerContext:
@@ -34,7 +43,7 @@ class TriggerContext:
 
   def __init__(
       self,
-      connection: connection_module.Connection,
+      connection: TriggerConnection,
   ) -> None:
     self._connection = connection
 
@@ -76,3 +85,25 @@ def trigger(func: Callable[[TriggerContext], Awaitable[None]]):
 
   setattr(func, "__is_trigger__", True)
   return func
+
+
+class FileChangeKind(str, enum.Enum):
+  """Kind of filesystem change detected by a file-watching trigger."""
+
+  ADDED = "added"
+  MODIFIED = "modified"
+  DELETED = "deleted"
+
+
+class FileChange(pydantic.BaseModel):
+  """A single filesystem change detected by a file-watching trigger.
+
+  Attributes:
+    kind: The type of change (added, modified, deleted).
+    path: Absolute path to the changed file.
+  """
+
+  model_config = pydantic.ConfigDict(frozen=True)
+
+  kind: FileChangeKind
+  path: str

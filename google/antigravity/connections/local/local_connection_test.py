@@ -40,6 +40,7 @@ from google.antigravity.connections.local import test_utils
 from google.antigravity.hooks import hook_runner
 from google.antigravity.hooks import hooks as hooks_base
 from google.antigravity.hooks import policy
+from google.antigravity.models import DEFAULT_MODEL
 from google.antigravity.tools import tool_runner
 from google.antigravity.types import QuestionResponse
 
@@ -51,12 +52,32 @@ class LocalConnectionTest(unittest.IsolatedAsyncioTestCase):
     self.mock_process = mock.MagicMock(spec=subprocess.Popen)
     self.tool_runner = tool_runner.ToolRunner()
 
-  def _make_harness(self, hook_runner=None):
+  def _make_harness(self, hook_runner=None, initial_history=None):
     return test_utils.TestLocalHarness(
         test_case=self,
         process=self.mock_process,
         tool_runner=self.tool_runner,
         hook_runner=hook_runner,
+        initial_history=initial_history,
+    )
+
+  async def test_initial_handshake_synchronization(self):
+    """Verifies that L2 connections receive restored historical steps synchronously during initialization and start fully idle."""
+    hist_step = local_connection.LocalConnectionStep(
+        step_index=1,
+        content="Historical text",
+        status=types.StepStatus.DONE,
+        source=types.StepSource.MODEL,
+    )
+    harness = self._make_harness(initial_history=[hist_step])
+
+    # 1. Confirm connection starts 100% fully idle by default
+    self.assertTrue(harness.conn.is_idle)
+
+    # 2. Confirm historical steps are exposed immediately on _initial_history
+    self.assertEqual(len(harness.conn._initial_history), 1)
+    self.assertEqual(
+        harness.conn._initial_history[0].content, "Historical text"
     )
 
   async def test_receive_steps_basic(self):
@@ -136,6 +157,53 @@ class LocalConnectionTest(unittest.IsolatedAsyncioTestCase):
     ):
       async for _ in harness.conn.receive_steps():
         pass
+
+  async def test_receive_steps_system_error_429(self):
+    harness = self._make_harness()
+    mock_trajectory_id = "my_cascade"
+
+    await harness.conn.send("Hello")
+    init_data = await harness.wait_for_response()
+    self.assertEqual(init_data.get("userInput"), "Hello")
+
+    # Set the cascade ID and send the 429 error step.
+    event1 = localharness_pb2.OutputEvent(
+        step_update=localharness_pb2.StepUpdate(
+            cascade_id=mock_trajectory_id,
+            trajectory_id=mock_trajectory_id,
+            step_index=1,
+            error=localharness_pb2.ActionError(
+                error_message="Resource exhausted",
+                http_code=429,
+            ),
+            state=localharness_pb2.StepUpdate.STATE_ERROR,
+            source=localharness_pb2.StepUpdate.SOURCE_SYSTEM,
+        )
+    )
+    await harness.send_event(event1)
+
+    # Send idle update with error.
+    event2 = localharness_pb2.OutputEvent(
+        trajectory_state_update=localharness_pb2.TrajectoryStateUpdate(
+            trajectory_id=mock_trajectory_id,
+            state=localharness_pb2.TrajectoryStateUpdate.STATE_IDLE,
+            error="executor run failed: Resource exhausted",
+        )
+    )
+    await harness.send_event(event2)
+    await harness.close_from_harness_side()
+
+    steps = []
+    with self.assertRaisesRegex(
+        types.AntigravityExecutionError,
+        "executor run failed: Resource exhausted",
+    ):
+      async for step in harness.conn.receive_steps():
+        steps.append(step)
+
+    self.assertEqual(len(steps), 1)
+    self.assertEqual(steps[0].error, "Resource exhausted")
+    self.assertEqual(steps[0].status, types.StepStatus.ERROR)
 
   async def test_receive_steps_trajectory_error(self):
     harness = self._make_harness()
@@ -1481,11 +1549,47 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
     self.assertTrue(config.harness_side_tools.run_command.enabled)
     self.assertTrue(config.harness_side_tools.find.enabled)
     self.assertTrue(config.harness_side_tools.generate_image.enabled)
-    # No gemini config, system instructions, workspaces, or skills by default.
-    self.assertFalse(config.HasField("gemini_config"))
+    # No models, system instructions, workspaces, or skills by default.
+    self.assertEmpty(config.models)
     self.assertFalse(config.HasField("system_instructions"))
     self.assertEqual(len(config.workspaces), 0)
     self.assertEqual(len(config.skills_paths), 0)
+
+  def test_legacy_shorthands_api_key_produces_valid_proto(self):
+    """Verifies that the legacy api_key shorthand translates to the models proto."""
+    cfg = local_connection_config.LocalAgentConfig(
+        model="gemini-2.5-flash",
+        api_key="shorthand-key",
+    )
+    strategy = self._make_strategy(
+        models=cfg.models,
+    )
+    config = strategy._build_harness_config()
+    self.assertLen(config.models, 2)
+    self.assertEqual(config.models[0].name, "gemini-2.5-flash")
+    self.assertTrue(config.models[0].HasField("gemini_api_endpoint"))
+    self.assertEqual(
+        config.models[0].gemini_api_endpoint.api_key, "shorthand-key"
+    )
+    self.assertEqual(config.models[0].types, [localharness_pb2.MODEL_TYPE_TEXT])
+
+  def test_legacy_shorthands_vertex_produces_valid_proto(self):
+    """Verifies that the legacy vertex shorthands translate to the models proto."""
+    cfg = local_connection_config.LocalAgentConfig(
+        model="gemini-2.5-flash",
+        vertex=True,
+        project="vertex-project",
+        location="us-east4",
+    )
+    strategy = self._make_strategy(
+        models=cfg.models,
+    )
+    config = strategy._build_harness_config()
+    self.assertLen(config.models, 2)
+    self.assertEqual(config.models[0].name, "gemini-2.5-flash")
+    self.assertTrue(config.models[0].HasField("vertex_endpoint"))
+    self.assertEqual(config.models[0].vertex_endpoint.project, "vertex-project")
+    self.assertEqual(config.models[0].vertex_endpoint.location, "us-east4")
 
   def test_capabilities_config_finish_tool_schema_json_to_proto(self):
     """Verifies capabilities config propagates finish tool schema to the proto config.
@@ -1509,49 +1613,45 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
     How: Set all GeminiConfig fields and assert proto field values.
     """
     strategy = self._make_strategy(
-        gemini_config=types.GeminiConfig(
-            api_key="test-key",
-            models=types.ModelConfig(
-                default=types.ModelEntry(name="gemini-2.5-pro"),
-            ),
-        )
+        models=[
+            types.ModelTarget(
+                name="gemini-2.5-pro",
+                types=[types.ModelType.TEXT],
+                endpoint=types.GeminiAPIEndpoint(api_key="test-key"),
+            )
+        ]
     )
     config = strategy._build_harness_config()
-    self.assertEqual(config.gemini_config.api_key, "test-key")
-    self.assertEqual(config.gemini_config.model_name, "gemini-2.5-pro")
+    self.assertEqual(config.models[0].gemini_api_endpoint.api_key, "test-key")
+    self.assertEqual(config.models[0].name, "gemini-2.5-pro")
 
   def test_gemini_config_none_fields_omitted(self):
-    """Verifies that None fields on GeminiConfig are not set on the proto.
-
-    Why: The Go harness uses proto field presence to determine whether to
-    apply overrides. Setting empty strings would be semantically wrong.
-    How: Create a GeminiConfig with defaults (api_key=None), build proto,
-    and assert api_key is not populated.
-    """
-    strategy = self._make_strategy(gemini_config=types.GeminiConfig())
+    """Verifies that None fields on ModelConfig are not set on the proto."""
+    models = [
+        types.ModelTarget(
+            name="gemini-3.5-flash",
+            types=[types.ModelType.TEXT],
+            endpoint=types.GeminiAPIEndpoint(),
+        )
+    ]
+    strategy = self._make_strategy(models=models)
     config = strategy._build_harness_config()
-    self.assertEqual(config.gemini_config.model_name, "gemini-3.5-flash")
+    self.assertEqual(config.models[0].name, "gemini-3.5-flash")
     # api_key should not be set (proto default empty string).
-    self.assertEqual(config.gemini_config.api_key, "")
+    self.assertEqual(config.models[0].gemini_api_endpoint.api_key, "")
 
-  def test_gemini_config_default_model_name(self):
-    """Verifies the default model name propagates correctly.
-
-    Why: The default model name is a critical fallback; if it changes
-    unintentionally, agents would use the wrong model.
-    How: Create default GeminiConfig and check model_name in proto.
-    """
-    strategy = self._make_strategy(gemini_config=types.GeminiConfig())
+  def test_models_default_model_name(self):
+    """Verifies the default model name propagates correctly."""
+    models = [
+        types.ModelTarget(
+            name=None,
+            types=[types.ModelType.TEXT],
+            endpoint=types.GeminiAPIEndpoint(),
+        )
+    ]
+    strategy = self._make_strategy(models=models)
     config = strategy._build_harness_config()
-    self.assertEqual(config.gemini_config.model_name, "gemini-3.5-flash")
-
-  def test_gemini_config_string_shorthand(self):
-    """Verifies that a bare model name string creates a proper GeminiConfig."""
-    strategy = self._make_strategy(gemini_config="custom-model-name")
-    config = strategy._build_harness_config()
-    self.assertEqual(config.gemini_config.model_name, "custom-model-name")
-    # No API key set in shorthand path.
-    self.assertEqual(config.gemini_config.api_key, "")
+    self.assertEqual(config.models[0].name, "")
 
   def test_system_instructions_string_shorthand(self):
     """Verifies that a plain string normalizes to AppendedSystemInstructions.
@@ -1733,6 +1833,7 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
     self.assertTrue(config.harness_side_tools.write_to_file.enabled)
     self.assertTrue(config.harness_side_tools.grep_search.enabled)
     self.assertTrue(config.harness_side_tools.list_dir.enabled)
+    self.assertTrue(config.harness_side_tools.search_web.enabled)
 
   def test_capabilities_config_enabled_tools(self):
     """Verifies that enabled_tools allowlist excludes non-listed tools.
@@ -1747,7 +1848,6 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
         )
     )
     config = strategy._build_harness_config()
-    config.harness_side_tools.generate_image.ClearField("model_name")
 
     expected_harness_side_tools = localharness_pb2.HarnessSideTools(
         view_file=localharness_pb2.ViewFileToolConfig(enabled=True),
@@ -1760,6 +1860,7 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
         write_to_file=localharness_pb2.WriteToFileToolConfig(enabled=False),
         grep_search=localharness_pb2.GrepSearchToolConfig(enabled=False),
         list_dir=localharness_pb2.ListDirToolConfig(enabled=False),
+        search_web=localharness_pb2.SearchWebToolConfig(enabled=False),
     )
 
     self.assertEqual(config.harness_side_tools, expected_harness_side_tools)
@@ -1846,94 +1947,164 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
     config = strategy._build_harness_config()
     self.assertEqual(len(config.workspaces), 0)
 
-  def test_gemini_config_thinking_level_set(self):
-    """Verifies that thinking_level on ModelEntry maps to the proto field."""
+  def test_models_thinking_level_set(self):
+    """Verifies that thinking_level on ModelTarget maps to the proto field."""
     strategy = self._make_strategy(
-        gemini_config=types.GeminiConfig(
-            models=types.ModelConfig(
-                default=types.ModelEntry(
-                    name=types.DEFAULT_MODEL,
-                    generation=types.GenerationConfig(
+        models=[
+            types.ModelTarget(
+                name=DEFAULT_MODEL,
+                types=[types.ModelType.TEXT],
+                endpoint=types.GeminiAPIEndpoint(
+                    options=types.GeminiModelOptions(
                         thinking_level=types.ThinkingLevel.HIGH,
                     ),
                 ),
-            ),
-        )
+            )
+        ]
     )
     config = strategy._build_harness_config()
-    self.assertEqual(config.gemini_config.thinking_level, "high")
+    self.assertEqual(
+        config.models[0].gemini_api_endpoint.options.thinking_level, "high"
+    )
 
-  def test_gemini_config_thinking_level_none_omitted(self):
+  def test_models_thinking_level_none_omitted(self):
     """Verifies that thinking_level=None leaves the proto field at its default."""
-    strategy = self._make_strategy(gemini_config=types.GeminiConfig())
+    strategy = self._make_strategy(
+        models=[
+            types.ModelTarget(
+                name=DEFAULT_MODEL,
+                types=[types.ModelType.TEXT],
+                endpoint=types.GeminiAPIEndpoint(
+                    options=types.GeminiModelOptions(thinking_level=None),
+                ),
+            )
+        ]
+    )
     config = strategy._build_harness_config()
-    self.assertEqual(config.gemini_config.thinking_level, "")
+    self.assertFalse(
+        config.models[0].gemini_api_endpoint.HasField("options")
+    )
 
-  def test_gemini_config_thinking_level_all_values(self):
+  def test_models_thinking_level_all_values(self):
     """Verifies all ThinkingLevel enum values produce correct proto strings."""
     for level in types.ThinkingLevel:
       strategy = self._make_strategy(
-          gemini_config=types.GeminiConfig(
-              models=types.ModelConfig(
-                  default=types.ModelEntry(
-                      name=types.DEFAULT_MODEL,
-                      generation=types.GenerationConfig(
-                          thinking_level=level,
-                      ),
+          models=[
+              types.ModelTarget(
+                  name=DEFAULT_MODEL,
+                  types=[types.ModelType.TEXT],
+                  endpoint=types.GeminiAPIEndpoint(
+                      options=types.GeminiModelOptions(thinking_level=level),
                   ),
-              ),
-          )
+              )
+          ]
       )
       config = strategy._build_harness_config()
       self.assertEqual(
-          config.gemini_config.thinking_level,
+          config.models[0].gemini_api_endpoint.options.thinking_level,
           level.value,
           f"ThinkingLevel.{level.name} should produce proto string"
           f" '{level.value}'",
       )
 
-  def test_per_model_api_key_takes_priority(self):
-    """Verifies that a per-model API key overrides the shared GeminiConfig key."""
-    strategy = self._make_strategy(
-        gemini_config=types.GeminiConfig(
-            api_key="shared-key",
-            models=types.ModelConfig(
-                default=types.ModelEntry(
-                    name=types.DEFAULT_MODEL,
-                    api_key="per-model-key",
-                ),
-            ),
-        )
-    )
-    config = strategy._build_harness_config()
-    self.assertEqual(config.gemini_config.api_key, "per-model-key")
-
-  def test_shared_api_key_used_when_per_model_is_none(self):
-    """Verifies that the shared GeminiConfig api_key is used as fallback."""
-    strategy = self._make_strategy(
-        gemini_config=types.GeminiConfig(
-            api_key="shared-key",
-            models=types.ModelConfig(
-                default=types.ModelEntry(name=types.DEFAULT_MODEL),
-            ),
-        )
-    )
-    config = strategy._build_harness_config()
-    self.assertEqual(config.gemini_config.api_key, "shared-key")
-
   def test_vertex_config_propagates(self):
     """Verifies that Vertex configuration fields propagate to proto."""
-    strategy = self._make_strategy(
-        gemini_config=types.GeminiConfig(
-            vertex=True,
-            project="my-project",
-            location="us-central1",
+    models = [
+        types.ModelTarget(
+            name="gemini-3.5-flash",
+            types=[types.ModelType.TEXT],
+            endpoint=types.VertexEndpoint(
+                project="my-project",
+                location="us-central1",
+            ),
         )
-    )
+    ]
+    strategy = self._make_strategy(models=models)
     config = strategy._build_harness_config()
-    self.assertTrue(config.gemini_config.use_vertex)
-    self.assertEqual(config.gemini_config.project, "my-project")
-    self.assertEqual(config.gemini_config.location, "us-central1")
+    self.assertTrue(config.models[0].HasField("vertex_endpoint"))
+    self.assertEqual(config.models[0].vertex_endpoint.project, "my-project")
+    self.assertEqual(config.models[0].vertex_endpoint.location, "us-central1")
+
+  def test_models_list_propagates(self):
+    """Verifies that the new models list propagates to HarnessConfig."""
+    models = [
+        types.ModelTarget(
+            name="gemini-2.5-pro",
+            types=[types.ModelType.TEXT],
+            endpoint=types.GeminiAPIEndpoint(
+                options=types.GeminiModelOptions(
+                    thinking_level=types.ThinkingLevel.HIGH
+                )
+            ),
+        ),
+        types.ModelTarget(
+            name="imagen-3-custom",
+            types=[types.ModelType.IMAGE],
+            endpoint=types.GeminiAPIEndpoint(),
+        ),
+    ]
+    strategy = self._make_strategy(models=models)
+    config = strategy._build_harness_config()
+
+    # Text model assertions
+    self.assertEqual(config.models[0].name, "gemini-2.5-pro")
+    self.assertEqual(
+        config.models[0].gemini_api_endpoint.options.thinking_level, "high"
+    )
+
+    # Image model assertions
+    self.assertEqual(config.models[1].name, "imagen-3-custom")
+    self.assertEqual(
+        config.models[1].types, [localharness_pb2.MODEL_TYPE_IMAGE]
+    )
+
+  def test_models_list_custom_endpoints_propagate(self):
+    """Verifies that custom endpoints in the models list propagate to proto."""
+    # Test VertexEndpoint
+    vertex_endpoint = types.VertexEndpoint(
+        project="vertex-proj", location="europe-west1"
+    )
+    models_vertex = [
+        types.ModelTarget(
+            name="gemini-ultra",
+            types=[types.ModelType.TEXT],
+            endpoint=vertex_endpoint,
+        )
+    ]
+    strategy = self._make_strategy(models=models_vertex)
+    config = strategy._build_harness_config()
+    self.assertTrue(config.models[0].HasField("vertex_endpoint"))
+    self.assertEqual(config.models[0].vertex_endpoint.project, "vertex-proj")
+    self.assertEqual(config.models[0].vertex_endpoint.location, "europe-west1")
+
+    # Test GeminiAPIEndpoint
+    api_endpoint = types.GeminiAPIEndpoint(api_key="api-key-xyz")
+    models_api = [
+        types.ModelTarget(
+            name="gemini-flash",
+            types=[types.ModelType.TEXT],
+            endpoint=api_endpoint,
+        )
+    ]
+    strategy = self._make_strategy(models=models_api)
+    config = strategy._build_harness_config()
+    self.assertTrue(config.models[0].HasField("gemini_api_endpoint"))
+    self.assertEqual(
+        config.models[0].gemini_api_endpoint.api_key, "api-key-xyz"
+    )
+
+  def test_models_stored_directly_on_strategy(self):
+    """Verifies that the models list is stored as self._models."""
+    models = [
+        types.ModelTarget(
+            name="gemini-2.5-pro",
+            types=[types.ModelType.TEXT],
+        ),
+    ]
+    strategy = self._make_strategy(models=models)
+    self.assertIsNotNone(strategy._models)
+    self.assertLen(strategy._models, 1)
+    self.assertEqual(strategy._models[0].name, "gemini-2.5-pro")
 
   def test_session_config_save_dir_stored(self):
     """Verifies that session_config.save_dir is preserved on the strategy.
@@ -2040,33 +2211,51 @@ class LocalConnectionStrategyApiKeyTest(unittest.IsolatedAsyncioTestCase):
 
     Why: The Go localharness binary silently returns empty responses when no
     API key is provided. An explicit error at startup is much more actionable.
-    How: Create a strategy with no api_key and no GEMINI_API_KEY env var and
-    assert AntigravityValidationError is raised.
+    How: Create a strategy with a model target and assert
+    AntigravityValidationError.
     """
-    strategy = self._make_strategy()
+    models = [
+        types.ModelTarget(
+            name="gemini-3.5-flash",
+            types=[types.ModelType.TEXT],
+        )
+    ]
+    strategy = self._make_strategy(models=models)
     with self.assertRaises(types.AntigravityValidationError) as ctx:
       async with strategy:
         pass
-    self.assertIn("API key", str(ctx.exception))
+    self.assertIn("must have an endpoint configured", str(ctx.exception))
 
   @mock.patch.dict("os.environ", {}, clear=True)
-  async def test_raises_with_empty_gemini_config(self):
-    """Verifies entry raises when GeminiConfig has no api_key and env is unset.
+  async def test_raises_with_empty_endpoint_api_key(self):
+    """Verifies entry raises when GeminiAPIEndpoint has no api_key and env is unset.
 
-    Why: GeminiConfig() defaults api_key to None. The check must not be
-    fooled by the presence of a GeminiConfig object with no key.
+    Why: GeminiAPIEndpoint(api_key=None) must not be fooled by empty values.
     """
-    strategy = self._make_strategy(gemini_config=types.GeminiConfig())
-    with self.assertRaises(types.AntigravityValidationError):
+    models = [
+        types.ModelTarget(
+            name="gemini-3.5-flash",
+            types=[types.ModelType.TEXT],
+            endpoint=types.GeminiAPIEndpoint(api_key=None),
+        )
+    ]
+    strategy = self._make_strategy(models=models)
+    with self.assertRaises(types.AntigravityValidationError) as ctx:
       async with strategy:
         pass
+    self.assertIn("A Gemini API key is required", str(ctx.exception))
 
   @mock.patch.dict("os.environ", {}, clear=True)
   async def test_raises_without_auth_in_vertex_mode(self):
     """Verifies strategy raises validation error when Vertex is set but no project/location or api_key provided."""
-    strategy = self._make_strategy(
-        gemini_config=types.GeminiConfig(vertex=True)
-    )
+    models = [
+        types.ModelTarget(
+            name="gemini-3.5-flash",
+            types=[types.ModelType.TEXT],
+            endpoint=types.VertexEndpoint(project=None, location=None),
+        )
+    ]
+    strategy = self._make_strategy(models=models)
     with self.assertRaises(types.AntigravityValidationError) as ctx:
       async with strategy:
         pass
@@ -2083,13 +2272,17 @@ class LocalConnectionStrategyApiKeyTest(unittest.IsolatedAsyncioTestCase):
     mock_proc.stdout.read.return_value = b""
     mock_popen.return_value = mock_proc
 
-    strategy = self._make_strategy(
-        gemini_config=types.GeminiConfig(
-            vertex=True,
-            project="my-project",
-            location="us-central1",
+    models = [
+        types.ModelTarget(
+            name="gemini-3.5-flash",
+            types=[types.ModelType.TEXT],
+            endpoint=types.VertexEndpoint(
+                project="my-project",
+                location="us-central1",
+            ),
         )
-    )
+    ]
+    strategy = self._make_strategy(models=models)
     with self.assertRaises(RuntimeError):
       async with strategy:
         pass
@@ -2122,12 +2315,11 @@ class LocalConnectionStrategyApiKeyTest(unittest.IsolatedAsyncioTestCase):
 
   @mock.patch.dict("os.environ", {}, clear=True)
   @mock.patch("subprocess.Popen")
-  async def test_accepts_gemini_config_api_key(self, mock_popen):
-    """Verifies entry does not raise when GeminiConfig.api_key is set.
+  async def test_accepts_models_api_key(self, mock_popen):
+    """Verifies entry does not raise when model endpoint api_key is set.
 
     Why: Explicit API key in config is the recommended path.
-    How: Set api_key in GeminiConfig, enter the context manager, and verify
-    it proceeds past the validation check.
+    How: Set api_key in GeminiAPIEndpoint, enter context manager.
 
     Args:
       mock_popen: Mocked subprocess.Popen to prevent actual process launch.
@@ -2138,9 +2330,14 @@ class LocalConnectionStrategyApiKeyTest(unittest.IsolatedAsyncioTestCase):
     mock_proc.stderr = mock.MagicMock()
     mock_proc.stdout.read.return_value = b""
     mock_popen.return_value = mock_proc
-    strategy = self._make_strategy(
-        gemini_config=types.GeminiConfig(api_key="explicit-key")
-    )
+    models = [
+        types.ModelTarget(
+            name="gemini-3.5-flash",
+            types=[types.ModelType.TEXT],
+            endpoint=types.GeminiAPIEndpoint(api_key="explicit-key"),
+        )
+    ]
+    strategy = self._make_strategy(models=models)
     with self.assertRaises(RuntimeError):
       async with strategy:
         pass
@@ -2246,69 +2443,39 @@ class LocalConnectionSessionHooksTest(unittest.IsolatedAsyncioTestCase):
     self.mock_process = mock.MagicMock()
     self.tool_runner = tool_runner.ToolRunner()
 
-  @mock.patch.dict("os.environ", {"GEMINI_API_KEY": "test-key"}, clear=True)
-  @mock.patch(
-      "google.antigravity.connections.local"
-      ".local_connection._get_default_binary_path",
-      return_value="/fake/binary",
-  )
-  @mock.patch(
-      "google.antigravity.connections.local"
-      ".local_connection.websockets.connect",
-      new_callable=mock.AsyncMock,
-  )
-  @mock.patch("subprocess.Popen")
-  async def test_strategy_dispatches_session_start(
-      self, mock_popen, mock_ws_connect, mock_binary_path  # pylint: disable=unused-argument
-  ):
-    """Verifies the strategy dispatches session-start hooks during __aenter__.
-
-    Why: The session-start hook must be dispatched by the SDK automatically,
-    not manually by the caller. If dispatch_session_start is removed from
-    the strategy, this test fails.
-    How: Go through LocalConnectionStrategy.__aenter__ with mocked
-    subprocess/websocket, spy on dispatch_session_start via mock.patch.object,
-    and assert it was called exactly once.
-    """
-    # Set up mock process to return a valid OutputConfig.
-    output_config = localharness_pb2.OutputConfig(port=12345, api_key="k")
-    serialized = output_config.SerializeToString()
-    length_prefix = struct.pack("<I", len(serialized))
-
-    mock_proc = mock.MagicMock()
-    mock_proc.stdin = mock.MagicMock()
-    mock_proc.stdout = mock.MagicMock()
-    mock_proc.stderr = mock.MagicMock()
-    mock_proc.stdout.read.side_effect = [length_prefix, serialized]
-    mock_popen.return_value = mock_proc
-
-    # Set up mock websocket.
-    mock_ws = mock.AsyncMock()
-    mock_ws.__aiter__ = mock.MagicMock(return_value=mock.AsyncMock())
-    mock_ws_connect.return_value = mock_ws
-
+  async def test_strategy_dispatches_session_start(self):
+    """Verifies the connection correctly delegates OnSessionStart hook execution to the HookRunner whenever requested by the harness engine."""
     called = []
+    event = asyncio.Event()
 
     class SessionStartHook(hooks_base.OnSessionStartHook):
 
       async def run(self, context, data):  # pylint: disable=unused-argument
         called.append("started")
+        event.set()
 
-    hr = hook_runner.HookRunner()
-    hr.register_hook(SessionStartHook())
+    hr = hook_runner.HookRunner(on_session_start_hooks=[SessionStartHook()])
 
-    strategy = local_connection.LocalConnectionStrategy(
+    harness = test_utils.TestLocalHarness(
+        test_case=self,
+        process=self.mock_process,
+        tool_runner=self.tool_runner,
         hook_runner=hr,
     )
 
-    await strategy.__aenter__()
-    try:
-      self.assertEqual(called, ["started"])
-    finally:
-      await strategy.__aexit__(None, None, None)
+    req = localharness_pb2.CallHookRequest(
+        request_id="req_1",
+        name="OnSessionStart",
+        type=localharness_pb2.LIFECYCLE_HOOK_ON_SESSION_START,
+    )
+    await harness.send_event(
+        localharness_pb2.OutputEvent(call_hook_request=req)
+    )
+    await asyncio.wait_for(event.wait(), timeout=1.0)
+    self.assertEqual(called, ["started"])
 
   async def test_session_end_hook_dispatched_on_disconnect(self):
-    """Verifies OnSessionEndHook fires when disconnect() is called."""
+    """Verifies OnSessionEndHook fires via LSP handshake when disconnect() is called."""
     called = []
     event = asyncio.Event()
 
@@ -2328,8 +2495,33 @@ class LocalConnectionSessionHooksTest(unittest.IsolatedAsyncioTestCase):
         hook_runner=hr,
     )
 
-    await harness.conn.disconnect()
-    await asyncio.wait_for(event.wait(), timeout=1.0)
+    disconnect_task = asyncio.create_task(harness.conn.disconnect())
+
+    # 1. SDK emits session_end_request
+    resp = await harness.wait_for_response()
+    self.assertTrue(resp.get("sessionEndRequest"))
+
+    # 2. Simulate Go harness sending CallHookRequest(OnSessionEnd)
+    req = localharness_pb2.CallHookRequest(
+        request_id="req_end",
+        name="OnSessionEnd",
+        type=localharness_pb2.LIFECYCLE_HOOK_ON_SESSION_END,
+    )
+    await harness.send_event(
+        localharness_pb2.OutputEvent(call_hook_request=req)
+    )
+
+    # 3. SDK routes request and replies CallHookResponse
+    hook_resp = await harness.wait_for_response()
+    self.assertIn("callHookResponse", hook_resp)
+    self.assertEqual(hook_resp["callHookResponse"]["requestId"], "req_end")
+
+    # 4. Simulate Go harness sending SessionEndResponse
+    await harness.send_event(
+        localharness_pb2.OutputEvent(session_end_response=True)
+    )
+
+    await asyncio.wait_for(disconnect_task, timeout=1.0)
     self.assertEqual(called, ["ended"])
 
 
@@ -3601,7 +3793,7 @@ class LocalConnectionSendTest(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(followup_msg.get("userInput"), "follow-up prompt")
 
 
-class LocalAgentConfigTest(unittest.TestCase):
+class LocalAgentConfigTest(absltest.TestCase):
 
   def test_create_strategy(self):
     config = local_connection_config.LocalAgentConfig(
@@ -3622,9 +3814,58 @@ class LocalAgentConfigTest(unittest.TestCase):
     )
 
     self.assertIsInstance(strategy, local_connection.LocalConnectionStrategy)
+    self.assertIsNotNone(strategy._models)
+    text_models = [
+        m for m in strategy._models if types.ModelType.TEXT in m.types
+    ]
+    self.assertLen(text_models, 1)
+    self.assertEqual(text_models[0].name, "gemini-2.5-pro")
+
+  def test_merge_models_only_defaults(self):
+    config = local_connection_config.LocalAgentConfig()
+    self.assertLen(config.models, 2)
+    self.assertEqual(config.models[0].name, DEFAULT_MODEL)
+    self.assertEqual(config.models[0].types, [types.ModelType.TEXT])
     self.assertEqual(
-        strategy._gemini_config.models.default.name, "gemini-2.5-pro"
+        config.models[1].name,
+        local_connection_config.DEFAULT_IMAGE_GENERATION_MODEL,
     )
+    self.assertEqual(config.models[1].types, [types.ModelType.IMAGE])
+
+  def test_merge_models_shorthand_only(self):
+    config = local_connection_config.LocalAgentConfig(model="custom-text-model")
+    self.assertLen(config.models, 2)
+    self.assertEqual(config.models[0].name, "custom-text-model")
+    self.assertEqual(config.models[0].types, [types.ModelType.TEXT])
+    self.assertEqual(
+        config.models[1].name,
+        local_connection_config.DEFAULT_IMAGE_GENERATION_MODEL,
+    )
+    self.assertEqual(config.models[1].types, [types.ModelType.IMAGE])
+
+  def test_merge_models_explicit_only(self):
+    custom_image = types.ModelTarget(
+        name="custom-image-model", types=[types.ModelType.IMAGE]
+    )
+    config = local_connection_config.LocalAgentConfig(models=[custom_image])
+    self.assertLen(config.models, 2)
+    self.assertEqual(config.models[0].name, "custom-image-model")
+    self.assertEqual(config.models[0].types, [types.ModelType.IMAGE])
+    self.assertEqual(config.models[1].name, DEFAULT_MODEL)
+    self.assertEqual(config.models[1].types, [types.ModelType.TEXT])
+
+  def test_merge_models_explicit_and_shorthand(self):
+    custom_image = types.ModelTarget(
+        name="custom-image-model", types=[types.ModelType.IMAGE]
+    )
+    config = local_connection_config.LocalAgentConfig(
+        model="custom-text-model", models=[custom_image]
+    )
+    self.assertLen(config.models, 2)
+    self.assertEqual(config.models[0].name, "custom-image-model")
+    self.assertEqual(config.models[0].types, [types.ModelType.IMAGE])
+    self.assertEqual(config.models[1].name, "custom-text-model")
+    self.assertEqual(config.models[1].types, [types.ModelType.TEXT])
 
   def test_constructor_parameters_fully_typed(self):
     """Verifies all subclass fields are accepted by the constructor under pytype."""
@@ -3642,7 +3883,7 @@ class LocalAgentConfigTest(unittest.TestCase):
         app_data_dir="/tmp/app",
         response_schema="{}",
         skills_paths=["/tmp/skills"],
-        gemini_config=types.GeminiConfig(),
+
         model="gemini-2.5-pro",
         api_key="fake_api_key",
         vertex=True,
@@ -3665,7 +3906,7 @@ class LocalAgentConfigTest(unittest.TestCase):
     self.assertIsNone(config.capabilities.enabled_tools)
     self.assertIsNone(config.capabilities.disabled_tools)
     # confirm_run_command() produces 2 policies: deny(run_command) + allow(*)
-    self.assertEqual(len(config.policies), 2)
+    self.assertLen(config.policies, 2)
     deny_policy = config.policies[0]
     self.assertEqual(deny_policy.tool, "run_command")
     self.assertEqual(deny_policy.decision, policy.Decision.DENY)
@@ -3682,7 +3923,7 @@ class LocalAgentConfigTest(unittest.TestCase):
     self.assertEqual(config.workspaces, [os.getcwd()])
     # workspace_only produces 3 deny policies (view_file, create_file,
     # edit_file), followed by the 2 confirm_run_command policies.
-    self.assertEqual(len(config.policies), 5)
+    self.assertLen(config.policies, 5)
     for i in range(3):
       self.assertEqual(config.policies[i].decision, policy.Decision.DENY)
       self.assertEqual(config.policies[i].name, "workspace_only")
@@ -3697,7 +3938,7 @@ class LocalAgentConfigTest(unittest.TestCase):
     )
     # workspace_only produces 3 deny policies (view_file, create_file,
     # edit_file), followed by the 2 confirm_run_command policies.
-    self.assertEqual(len(config.policies), 5)
+    self.assertLen(config.policies, 5)
     # First 3 should be workspace_only deny policies for file tools.
     for i in range(3):
       self.assertEqual(config.policies[i].decision, policy.Decision.DENY)
@@ -3713,7 +3954,7 @@ class LocalAgentConfigTest(unittest.TestCase):
         policies=[policy.allow_all()],
         workspaces=[],
     )
-    self.assertEqual(len(config.policies), 1)
+    self.assertLen(config.policies, 1)
     self.assertEqual(config.policies[0].tool, "*")
     self.assertEqual(config.policies[0].decision, policy.Decision.APPROVE)
 
@@ -3750,6 +3991,7 @@ class LocalAgentConfigTest(unittest.TestCase):
         name="my-stdio",
         command="npx",
         args=["math"],
+        env={"FOO": "bar"},
         enabled_tools=["add", "sub"],
     )
     sse_cfg = types.McpStreamableHttpServer(
@@ -3759,6 +4001,7 @@ class LocalAgentConfigTest(unittest.TestCase):
     config = local_connection_config.LocalAgentConfig(
         system_instructions="test",
         mcp_servers=[stdio_cfg, sse_cfg],
+        api_key="fake",
     )
 
     mock_tool_runner = mock.create_autospec(
@@ -3775,13 +4018,14 @@ class LocalAgentConfigTest(unittest.TestCase):
 
     harness_pb = strategy._build_harness_config()
 
-    self.assertEqual(len(harness_pb.mcp_servers), 2)
+    self.assertLen(harness_pb.mcp_servers, 2)
 
     stdio_pb = harness_pb.mcp_servers[0]
     self.assertEqual(stdio_pb.name, "my-stdio")
     self.assertEqual(stdio_pb.enabled_tools, ["add", "sub"])
     self.assertEqual(stdio_pb.stdio.command, "npx")
     self.assertEqual(stdio_pb.stdio.args, ["math"])
+    self.assertEqual(dict(stdio_pb.stdio.env), {"FOO": "bar"})
 
     sse_pb = harness_pb.mcp_servers[1]
     self.assertEqual(sse_pb.name, "my-sse")
@@ -4230,12 +4474,46 @@ class LocalConnectionBuiltinToolHooksTest(unittest.IsolatedAsyncioTestCase):
             generate_image=localharness_pb2.ActionGenerateImage(
                 prompt="sunset photo",
                 image_name="sunset_photo",
+                aspect_ratio="16:9",
             ),
         ),
         expected_name=types.BuiltinTools.GENERATE_IMAGE.value,
         expected_type=local_types.GenerateImageResult,
-        assertions_fn=lambda r: self.assertEqual(
-            r.result.image_name, "sunset_photo"
+        assertions_fn=lambda r: (
+            self.assertEqual(r.result.image_name, "sunset_photo"),
+            self.assertEqual(r.result.aspect_ratio, "16:9"),
+        ),
+    )
+
+  async def test_tool_result_for_search_web(self):
+    """Verifies PostToolCallHook receives SearchWebResult for search_web.
+
+    What: PostToolCallHook receives a SearchWebResult with summary.
+    Why: search_web returns a summary of web search results. Hooks
+         may use this for logging or auditing search queries.
+    How: Simulate approval + STATE_DONE with summary set; assert the hook
+         receives SearchWebResult with the correct summary and verify string
+         representation.
+    """
+    from google.antigravity.connections.local import types as local_types  # pylint: disable=g-import-not-at-top
+
+    await self._run_post_hook_test(
+        confirm_kwargs=dict(
+            search_web=localharness_pb2.ActionSearchWeb(
+                query="google news",
+            ),
+        ),
+        done_kwargs=dict(
+            search_web=localharness_pb2.ActionSearchWeb(
+                query="google news",
+                summary="google news search results",
+            ),
+        ),
+        expected_name=types.BuiltinTools.SEARCH_WEB.value,
+        expected_type=local_types.SearchWebResult,
+        assertions_fn=lambda r: (
+            self.assertEqual(r.result.summary, "google news search results"),
+            self.assertEqual(str(r.result), "google news search results"),
         ),
     )
 
@@ -4614,6 +4892,166 @@ class LocalConnectionSerializationTest(unittest.IsolatedAsyncioTestCase):
 
     res_dict = conn._tool_result_to_dict(tr)
     self.assertEqual(res_dict["secret"], "xxxx")
+
+
+class LocalConnectionSubagentsTest(unittest.IsolatedAsyncioTestCase):
+  """Tests verifying that static subagent configs are built into HarnessConfig."""
+
+  def setUp(self):
+    super().setUp()
+    self.temp_dir = self.enterContext(tempfile.TemporaryDirectory())
+    self.workspace = pathlib.Path(self.temp_dir) / "workspace"
+    self.workspace.mkdir()
+
+  def test_builds_subagents_proto_correctly(self):
+    def my_custom_tool():
+      """A test tool."""
+      pass
+
+    def another_one():
+      """Another test tool."""
+      pass
+
+    subagent = types.SubagentConfig(
+        name="test_helper",
+        description="A helpful subagent for testing",
+        system_instructions="Always say hello.",
+        capabilities=types.SubagentCapabilities(
+            enabled_tools=[
+                types.BuiltinTools.EDIT_FILE,
+            ],
+        ),
+        # Test mixing callable tools and string tools
+        tools=[my_custom_tool, "another_one"],
+    )
+
+    tr = tool_runner.ToolRunner(tools=[my_custom_tool, another_one])
+
+    strategy = local_connection.LocalConnectionStrategy(
+        subagents=[subagent],
+        workspaces=[str(self.workspace)],
+        tool_runner=tr,
+    )
+
+    harness_config = strategy._build_harness_config()
+
+    self.assertEqual(len(harness_config.custom_subagents), 1)
+    custom_agent = harness_config.custom_subagents[0]
+    self.assertEqual(custom_agent.name, "test_helper")
+    self.assertEqual(custom_agent.description, "A helpful subagent for testing")
+    self.assertTrue(custom_agent.harness_side_tools.file_edit.enabled)
+    self.assertFalse(custom_agent.harness_side_tools.view_file.enabled)
+    self.assertFalse(custom_agent.harness_side_tools.subagents.enabled)
+    self.assertEqual(
+        [t.name for t in custom_agent.tools],
+        ["my_custom_tool", "another_one"],
+    )
+    sections = custom_agent.system_instructions.appended.appended_sections
+    self.assertEqual(sections[0].title, "System")
+    self.assertEqual(sections[0].content, "Always say hello.")
+
+  def test_builds_subagents_proto_with_sections(self):
+    subagent = types.SubagentConfig(
+        name="test_helper",
+        description="A helpful subagent for testing",
+        system_instructions=[
+            types.SystemInstructionSection(
+                title="Identity", content="You are a helper agent."
+            ),
+            types.SystemInstructionSection(
+                title="Guidelines", content="Keep responses short."
+            ),
+        ],
+    )
+
+    strategy = local_connection.LocalConnectionStrategy(
+        subagents=[subagent],
+        workspaces=[str(self.workspace)],
+    )
+
+    harness_config = strategy._build_harness_config()
+
+    self.assertEqual(len(harness_config.custom_subagents), 1)
+    custom_agent = harness_config.custom_subagents[0]
+    self.assertEqual(custom_agent.name, "test_helper")
+    sections = custom_agent.system_instructions.appended.appended_sections
+    self.assertEqual(len(sections), 2)
+    self.assertEqual(sections[0].title, "Identity")
+    self.assertEqual(sections[0].content, "You are a helper agent.")
+    self.assertEqual(sections[1].title, "Guidelines")
+    self.assertEqual(sections[1].content, "Keep responses short.")
+
+  def test_subagent_tool_not_registered_raises(self):
+    def unregistered_tool():
+      """Not added to parent."""
+      pass
+
+    subagent = types.SubagentConfig(
+        name="test_helper",
+        description="A helpful subagent",
+        tools=[unregistered_tool],
+    )
+
+    strategy = local_connection.LocalConnectionStrategy(
+        subagents=[subagent],
+        workspaces=[str(self.workspace)],
+    )
+
+    with self.assertRaisesRegex(
+        ValueError,
+        "Subagent tool 'unregistered_tool' is not registered on the main agent"
+        " config",
+    ):
+      strategy._build_harness_config()
+
+  def test_subagent_harness_tools_as_strings_raise_if_not_registered(self):
+    subagent = types.SubagentConfig(
+        name="test_helper",
+        description="A helpful subagent",
+        tools=["view_file", "code_search"],
+    )
+
+    strategy = local_connection.LocalConnectionStrategy(
+        subagents=[subagent],
+        workspaces=[str(self.workspace)],
+    )
+
+    with self.assertRaisesRegex(
+        ValueError,
+        "Subagent tool 'view_file' is not registered on the main agent config",
+    ):
+      strategy._build_harness_config()
+
+  def test_subagent_tools_stripped_and_warned(self):
+    subagent = types.SubagentConfig(
+        name="nested_helper",
+        description="A subagent trying to use subagents",
+        system_instructions="Spawn subagents.",
+        capabilities=types.SubagentCapabilities(
+            enabled_tools=[types.BuiltinTools.START_SUBAGENT],
+        ),
+    )
+
+    strategy = local_connection.LocalConnectionStrategy(
+        subagents=[subagent],
+        workspaces=[str(self.workspace)],
+    )
+
+    with self.assertLogs(level="WARNING") as log_capture:
+      harness_config = strategy._build_harness_config()
+
+    # Verify warning was logged
+    self.assertTrue(
+        any(
+            "Nested subagents are currently not supported" in msg
+            for msg in log_capture.output
+        )
+    )
+
+    self.assertEqual(len(harness_config.custom_subagents), 1)
+    custom_agent = harness_config.custom_subagents[0]
+    self.assertFalse(custom_agent.harness_side_tools.subagents.enabled)
+    self.assertFalse(custom_agent.harness_side_tools.file_edit.enabled)
 
 
 if __name__ == "__main__":

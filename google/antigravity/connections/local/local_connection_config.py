@@ -18,13 +18,17 @@ import logging
 import os
 import pathlib
 import tempfile
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 import pydantic
 
 from google.antigravity import types
 from google.antigravity.connections import connection
+from google.antigravity.hooks import hooks as hooks_mod
 from google.antigravity.hooks import policy
+from google.antigravity.models import DEFAULT_IMAGE_GENERATION_MODEL
+from google.antigravity.models import DEFAULT_MODEL
+from google.antigravity.triggers import triggers as triggers_mod
 
 DEFAULT_APP_DATA_DIR = (
     (pathlib.Path("~") / ".gemini" / "antigravity").expanduser().resolve()
@@ -45,20 +49,21 @@ class LocalAgentConfig(connection.AgentConfig):
   restricted to those directories via ``policy.workspace_only()``.
   """
 
+  model_config = pydantic.ConfigDict(
+      arbitrary_types_allowed=True, validate_assignment=True
+  )
+
   capabilities: types.CapabilitiesConfig = pydantic.Field(
       default_factory=types.CapabilitiesConfig
   )
-  policies: list[Any] = pydantic.Field(
+  policies: list[policy.Policy] = pydantic.Field(
       default_factory=policy.confirm_run_command
   )
   workspaces: list[str] = pydantic.Field(default_factory=lambda: [os.getcwd()])
 
-  gemini_config: types.GeminiConfig = pydantic.Field(
-      default_factory=types.GeminiConfig
-  )
-
-  # Top-level shorthand fields — flow into gemini_config.
-  model: str | None = None
+  # Top-level shorthand fields — flow into models.
+  model: str | types.ModelTarget | None = None
+  models: list[types.ModelTarget] | None = None
   api_key: str | None = None
   vertex: bool | None = None
   project: str | None = None
@@ -70,9 +75,9 @@ class LocalAgentConfig(connection.AgentConfig):
       system_instructions: str | types.SystemInstructions | None = None,
       capabilities: types.CapabilitiesConfig | None = None,
       tools: list[Callable[..., Any]] | None = None,
-      policies: list[Any] | None = None,
-      hooks: list[Any] | None = None,
-      triggers: list[Any] | None = None,
+      policies: Sequence[policy.Policy | Sequence[policy.Policy]] | None = None,
+      hooks: list[hooks_mod.Hook] | None = None,
+      triggers: list[triggers_mod.Trigger] | None = None,
       mcp_servers: list[types.McpServerConfig] | None = None,
       workspaces: list[str] | None = None,
       conversation_id: str | None = None,
@@ -82,16 +87,19 @@ class LocalAgentConfig(connection.AgentConfig):
           dict[str, Any] | type[pydantic.BaseModel] | str | None
       ) = None,
       skills_paths: list[str] | None = None,
-      gemini_config: types.GeminiConfig | None = None,
-      model: str | None = None,
+      model: str | types.ModelTarget | None = None,
+      models: list[types.ModelTarget] | None = None,
       api_key: str | None = None,
       vertex: bool | None = None,
       project: str | None = None,
       location: str | None = None,
       **kwargs: Any,
   ):
+
     init_data = {
-        k: v for k, v in locals().items() if k != "self" and v is not None
+        k: v
+        for k, v in locals().items()
+        if k not in ("self", "init_data") and v is not None
     }
     if "kwargs" in init_data:
       kwargs_dict = init_data.pop("kwargs")
@@ -105,32 +113,81 @@ class LocalAgentConfig(connection.AgentConfig):
       raise ValueError(f"app_data_dir must be an absolute path, got '{v}'")
     return v
 
+  def _build_shorthand_endpoint(self) -> types.ModelEndpoint | None:
+    """Builds the custom endpoint from connection shorthand fields."""
+    if self.vertex:
+      return types.VertexEndpoint(
+          project=self.project,
+          location=self.location,
+      )
+    return types.GeminiAPIEndpoint(api_key=self.api_key)
+
+  def _build_shorthand_models(
+      self, endpoint: types.ModelEndpoint | None
+  ) -> list[types.ModelTarget]:
+    """Builds the explicitly-specified shorthand models."""
+    if self.model is None:
+      return []
+
+    if isinstance(self.model, types.ModelTarget):
+      shorthand_model = self.model.model_copy(deep=True)
+      if shorthand_model.endpoint is None:
+        shorthand_model.endpoint = endpoint
+    else:
+      shorthand_model = types.ModelTarget(
+          name=self.model, types=[types.ModelType.TEXT], endpoint=endpoint
+      )
+    return [shorthand_model]
+
+  def _build_default_models(
+      self, endpoint: types.ModelEndpoint | None
+  ) -> list[types.ModelTarget]:
+    """Builds the default text and image models."""
+    text_model = types.ModelTarget(
+        name=DEFAULT_MODEL,
+        types=[types.ModelType.TEXT],
+        endpoint=endpoint,
+    )
+    image_model = types.ModelTarget(
+        name=DEFAULT_IMAGE_GENERATION_MODEL,
+        types=[types.ModelType.IMAGE],
+        endpoint=endpoint,
+    )
+    return [text_model, image_model]
+
+  def _merge_models_list(self) -> list[types.ModelTarget]:
+    """Merges explicit, shorthand, and default models based on priority.
+
+    Priority order is: Explicit > Shorthand > Default.
+    Default models are only added if their types are not already present in the
+    collection.
+
+    Returns:
+      The merged list of model targets.
+    """
+    endpoint = self._build_shorthand_endpoint()
+    explicit_models = self.models or []
+    shorthand_models = self._build_shorthand_models(endpoint)
+    default_models = self._build_default_models(endpoint)
+
+    merged_models = list(explicit_models)
+    for model in shorthand_models:
+      merged_models.append(model)
+
+    existing_types = set()
+    for m in merged_models:
+      existing_types.update(m.types)
+
+    for default_model in default_models:
+      if not any(t in existing_types for t in default_model.types):
+        merged_models.append(default_model)
+
+    return merged_models
+
   @pydantic.model_validator(mode="after")
   def _apply_shorthand_configs(self) -> "LocalAgentConfig":
-    """Applies top-level shorthand fields (model, api_key) to gemini_config."""
-    # Defensive copy: prevent mutation of shared GeminiConfig instances.
-    self.gemini_config = self.gemini_config.model_copy(deep=True)
-
-    if self.model is not None:
-      if "default" in self.gemini_config.models.model_fields_set:
-        raise ValueError(
-            "Cannot set both 'model' shorthand and "
-            "'gemini_config.models.default'. Use one or the other."
-        )
-      self.gemini_config.models.default = types.ModelEntry(name=self.model)
-    if self.api_key is not None:
-      if self.gemini_config.api_key is not None:
-        raise ValueError(
-            "Cannot set both 'api_key' shorthand and "
-            "'gemini_config.api_key'. Use one or the other."
-        )
-      self.gemini_config.api_key = self.api_key
-    if self.vertex is not None:
-      self.gemini_config.vertex = self.vertex
-    if self.project is not None:
-      self.gemini_config.project = self.project
-    if self.location is not None:
-      self.gemini_config.location = self.location
+    """Applies top-level shorthand fields (model, api_key) to models."""
+    self.__dict__["models"] = self._merge_models_list()
     return self
 
   @pydantic.model_validator(mode="after")
@@ -147,7 +204,9 @@ class LocalAgentConfig(connection.AgentConfig):
       resolved_app_data_dir = pathlib.Path(app_data_path).expanduser().resolve()
       allowed_paths = [*self.workspaces, str(resolved_app_data_dir)]
 
-      self.policies = policy.workspace_only(allowed_paths) + self.policies
+      self.__dict__["policies"] = (
+          policy.workspace_only(allowed_paths) + self.policies
+      )
     return self
 
   def _get_system_instructions(self) -> types.SystemInstructions | None:
@@ -181,7 +240,7 @@ class LocalAgentConfig(connection.AgentConfig):
     return local_connection.LocalConnectionStrategy(
         tool_runner=tool_runner,
         hook_runner=hook_runner,
-        gemini_config=self.gemini_config,
+        models=self.models,
         system_instructions=self._get_system_instructions(),
         capabilities_config=self.capabilities,
         conversation_id=self.conversation_id,
@@ -190,4 +249,5 @@ class LocalAgentConfig(connection.AgentConfig):
         app_data_dir=self.app_data_dir,
         skills_paths=self.skills_paths,
         mcp_servers=self.mcp_servers,
+        subagents=self.subagents,
     )

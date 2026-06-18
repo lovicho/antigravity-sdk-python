@@ -46,6 +46,28 @@ async with Agent(config=config) as agent:
     pass
 ```
 
+### Gemini Enterprise Agent Platform (formerly Vertex AI) Configuration
+
+To configure the agent to use Gemini Enterprise Agent Platform (formerly Vertex
+AI) instead of Gemini Developer API:
+
+```python
+from google.antigravity import Agent, LocalAgentConfig
+
+config = LocalAgentConfig(
+    vertex=True,
+    project="your-gcp-project",
+    location="us-central1",
+)
+async with Agent(config=config) as agent:
+    # Use the agent with Gemini Enterprise Agent Platform
+    pass
+```
+
+Note: Gemini Enterprise Agent Platform authentication relies on Application
+Default Credentials (ADC). Ensure you have run `gcloud auth application-default
+login` in your environment.
+
 ### Application Data Directory Override (Artifact & Scratch Storage)
 
 By default, the agent stores generated artifacts (like `task.md`), scratch

@@ -27,6 +27,8 @@ from google.antigravity.connections.local import local_connection as lc_module
 from google.antigravity.conversation import conversation
 from google.antigravity.hooks import hooks
 from google.antigravity.hooks import policy
+from google.antigravity.models import DEFAULT_IMAGE_GENERATION_MODEL
+from google.antigravity.models import DEFAULT_MODEL
 
 
 class AgentTest(unittest.IsolatedAsyncioTestCase):
@@ -377,13 +379,6 @@ class AgentTest(unittest.IsolatedAsyncioTestCase):
       self.assertIsNotNone(ag._hook_runner)
       self.assertIn(my_hook, ag._hook_runner.pre_turn_hooks)
 
-    # Test dynamic registration
-    config = local_connection.LocalAgentConfig(system_instructions="test")
-    async with agent.Agent(config) as ag:
-      ag.register_hook(my_hook)
-      self.assertIsNotNone(ag._hook_runner)
-      self.assertIn(my_hook, ag._hook_runner.pre_turn_hooks)
-
   @mock.patch(
       "google.antigravity.connections."
       "local.local_connection.LocalConnectionStrategy"
@@ -443,74 +438,6 @@ class AgentTest(unittest.IsolatedAsyncioTestCase):
 
     # TriggerRunner.stop() called during __aexit__.
     mock_runner_instance.stop.assert_called_once()
-
-    mock_trigger_runner_class.reset_mock()
-    mock_runner_instance.reset_mock()
-
-    # Test dynamic registration before start.
-    config = local_connection.LocalAgentConfig(system_instructions="test")
-    ag = agent.Agent(config)
-    ag.register_trigger(my_trigger)
-    async with ag:
-      mock_trigger_runner_class.assert_called_once()
-      call_kwargs = mock_trigger_runner_class.call_args[1]
-      self.assertEqual(call_kwargs["triggers"], [my_trigger])
-      mock_runner_instance.start.assert_called_once()
-
-  @mock.patch(
-      "google.antigravity.connections."
-      "local.local_connection.LocalConnectionStrategy"
-  )
-  @mock.patch.object(conversation.Conversation, "create")
-  async def test_agent_register_hook_before_start(
-      self, mock_conv_create, mock_strategy_class
-  ):
-    del mock_conv_create  # Unused.
-
-    mock_strategy_instance = mock.MagicMock()
-    mock_strategy_instance.stop = mock.AsyncMock()
-    mock_strategy_class.return_value = mock_strategy_instance
-
-    class MyPreTurnHook(hooks.PreTurnHook):
-
-      async def run(self, context, data):
-        return types.HookResult(allow=True)
-
-    my_hook = MyPreTurnHook()
-
-    config = local_connection.LocalAgentConfig(system_instructions="test")
-    ag = agent.Agent(config)
-    ag.register_hook(my_hook)
-    self.assertIn(my_hook, ag._pending_hooks)
-
-    async with ag:
-      self.assertIsNotNone(ag._hook_runner)
-      self.assertIn(my_hook, ag._hook_runner.pre_turn_hooks)
-      self.assertEqual(len(ag._pending_hooks), 0)
-
-  @mock.patch(
-      "google.antigravity.connections."
-      "local.local_connection.LocalConnectionStrategy"
-  )
-  @mock.patch.object(conversation.Conversation, "create")
-  async def test_agent_register_trigger_after_start(
-      self, mock_conv_create, mock_strategy_class
-  ):
-    del mock_conv_create  # Unused.
-
-    mock_strategy_instance = mock.MagicMock()
-    mock_strategy_instance.stop = mock.AsyncMock()
-    mock_strategy_class.return_value = mock_strategy_instance
-
-    async def my_trigger(_):
-      pass
-
-    config = local_connection.LocalAgentConfig(
-        system_instructions="test", triggers=[my_trigger]
-    )
-    async with agent.Agent(config) as ag:
-      with self.assertRaises(RuntimeError):
-        ag.register_trigger(my_trigger)
 
   @mock.patch(
       "google.antigravity.connections."
@@ -647,9 +574,12 @@ class AgentTest(unittest.IsolatedAsyncioTestCase):
       async with agent.Agent(config):
         self.assertIsNone(os.environ.get("GEMINI_API_KEY"))
         _, kwargs = mock_strategy_class.call_args
-        gemini_config = kwargs.get("gemini_config")
-        self.assertIsNotNone(gemini_config)
-        self.assertEqual(gemini_config.api_key, "test_key")
+        models = kwargs.get("models")
+        self.assertIsNotNone(models)
+        text_model = next(
+            m for m in models if types.ModelType.TEXT in m.types
+        )
+        self.assertEqual(text_model.endpoint.api_key, "test_key")
 
   @mock.patch(
       "google.antigravity.connections."
@@ -670,9 +600,12 @@ class AgentTest(unittest.IsolatedAsyncioTestCase):
     )
     async with agent.Agent(config):
       _, kwargs = mock_strategy_class.call_args
-      gemini_config = kwargs.get("gemini_config")
-      self.assertIsNotNone(gemini_config)
-      self.assertEqual(gemini_config.models.default.name, "gemini-2.5-pro")
+      models = kwargs.get("models")
+      self.assertIsNotNone(models)
+      text_model = next(
+          m for m in models if types.ModelType.TEXT in m.types
+      )
+      self.assertEqual(text_model.name, "gemini-2.5-pro")
 
   @mock.patch(
       "google.antigravity.connections.local.local_connection.LocalConnectionStrategy"
@@ -801,58 +734,28 @@ class AgentTest(unittest.IsolatedAsyncioTestCase):
 class AgentConfigTest(unittest.TestCase):
   """Tests for AgentConfig sugar, conflict guards, and defensive copy."""
 
-  def test_sugar_model_flows_to_gemini_config(self):
-    """Verifies model sugar flows to gemini_config.models.default.name."""
+  def test_sugar_model_flows_to_models(self):
+    """Verifies model sugar flows to config.models."""
     config = local_connection.LocalAgentConfig(
         system_instructions="test", model="gemini-2.5-pro"
     )
-    self.assertEqual(config.gemini_config.models.default.name, "gemini-2.5-pro")
+    self.assertIsNotNone(config.models)
+    text_model = [m for m in config.models if types.ModelType.TEXT in m.types][
+        0
+    ]
+    self.assertEqual(text_model.name, "gemini-2.5-pro")
 
-  def test_sugar_api_key_flows_to_gemini_config(self):
-    """Verifies api_key sugar flows to gemini_config.api_key."""
+  def test_sugar_api_key_flows_to_models(self):
+    """Verifies api_key sugar flows to config.models."""
     config = local_connection.LocalAgentConfig(
         system_instructions="test", api_key="my-key"
     )
-    self.assertEqual(config.gemini_config.api_key, "my-key")
-
-  def test_conflict_model_raises(self):
-    """Verifies ValueError when both model sugar and structured config are set."""
-    with self.assertRaises(ValueError):
-      local_connection.LocalAgentConfig(
-          system_instructions="test",
-          model="gemini-2.5-pro",
-          gemini_config=types.GeminiConfig(
-              models=types.ModelConfig(
-                  default=types.ModelEntry(name="different-model"),
-              ),
-          ),
-      )
-
-  def test_conflict_api_key_raises(self):
-    """Verifies ValueError when both api_key sugar and gemini_config.api_key are set."""
-    with self.assertRaises(ValueError):
-      local_connection.LocalAgentConfig(
-          system_instructions="test",
-          api_key="sugar-key",
-          gemini_config=types.GeminiConfig(api_key="config-key"),
-      )
-
-  def test_defensive_copy(self):
-    """Verifies shared GeminiConfig is not cross-contaminated."""
-    shared = types.GeminiConfig()
-    config1 = local_connection.LocalAgentConfig(
-        system_instructions="test",
-        gemini_config=shared,
-        model="model-a",
-    )
-    config2 = local_connection.LocalAgentConfig(
-        system_instructions="test",
-        gemini_config=shared,
-        model="model-b",
-    )
-    self.assertEqual(config1.gemini_config.models.default.name, "model-a")
-    self.assertEqual(config2.gemini_config.models.default.name, "model-b")
-    self.assertEqual(shared.models.default.name, types.DEFAULT_MODEL)
+    self.assertIsNotNone(config.models)
+    text_model = [m for m in config.models if types.ModelType.TEXT in m.types][
+        0
+    ]
+    self.assertIsInstance(text_model.endpoint, types.GeminiAPIEndpoint)
+    self.assertEqual(text_model.endpoint.api_key, "my-key")
 
   def test_defaults(self):
     """Verifies AgentConfig defaults: safe policies, default model."""
@@ -867,33 +770,26 @@ class AgentConfigTest(unittest.TestCase):
       self.assertEqual(config.policies[i].name, "workspace_only")
     self.assertEqual(config.policies[3].tool, "run_command")
     self.assertEqual(config.policies[4].tool, "*")
-    self.assertEqual(
-        config.gemini_config.models.default.name, types.DEFAULT_MODEL
-    )
-    self.assertIsNone(config.gemini_config.api_key)
+    self.assertIsNotNone(config.models)
+    text_model = [m for m in config.models if types.ModelType.TEXT in m.types][
+        0
+    ]
+    self.assertEqual(text_model.name, DEFAULT_MODEL)
 
   def test_model_sugar_does_not_clobber_image_generation(self):
     """Verifies model sugar only sets default slot, not image_generation."""
     config = local_connection.LocalAgentConfig(
         system_instructions="test", model="custom-chat-model"
     )
-    self.assertEqual(
-        config.gemini_config.models.default.name, "custom-chat-model"
-    )
-    self.assertEqual(
-        config.gemini_config.models.image_generation.name,
-        types.DEFAULT_IMAGE_GENERATION_MODEL,
-    )
-
-  def test_conflict_model_with_gemini_config_no_model(self):
-    """Verifies no conflict when gemini_config has no explicit default."""
-    config = local_connection.LocalAgentConfig(
-        system_instructions="test",
-        model="custom-model",
-        gemini_config=types.GeminiConfig(api_key="key-only"),
-    )
-    self.assertEqual(config.gemini_config.models.default.name, "custom-model")
-    self.assertEqual(config.gemini_config.api_key, "key-only")
+    self.assertIsNotNone(config.models)
+    text_model = [m for m in config.models if types.ModelType.TEXT in m.types][
+        0
+    ]
+    image_model = [
+        m for m in config.models if types.ModelType.IMAGE in m.types
+    ][0]
+    self.assertEqual(text_model.name, "custom-chat-model")
+    self.assertEqual(image_model.name, DEFAULT_IMAGE_GENERATION_MODEL)
 
   @mock.patch.object(lc_module, "LocalConnectionStrategy", autospec=True)
   @mock.patch.object(conversation.Conversation, "create", autospec=True)

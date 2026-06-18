@@ -81,9 +81,19 @@ class GenerateImageResult(pydantic.BaseModel):
   """Structured result from a generate_image tool execution."""
 
   image_name: str = ""
+  aspect_ratio: str = ""
 
   def __str__(self) -> str:
     return self.image_name
+
+
+class SearchWebResult(pydantic.BaseModel):
+  """Structured result from a search_web tool execution."""
+
+  summary: str = ""
+
+  def __str__(self) -> str:
+    return self.summary
 
 
 class TextResult(pydantic.BaseModel):
@@ -103,5 +113,6 @@ ToolOutput = (
     | FindFileResult
     | EditFileResult
     | GenerateImageResult
+    | SearchWebResult
     | TextResult
 )

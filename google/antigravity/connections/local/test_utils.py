@@ -73,6 +73,7 @@ class TestLocalHarness:
       ws: TestWebSocket | None = None,
       tool_runner: tool_runner.ToolRunner | None = None,
       hook_runner: hook_runner.HookRunner | None = None,
+      initial_history: list[types.Step] | None = None,
   ):
     self.test_case = test_case
     self.ws = ws or TestWebSocket()
@@ -81,6 +82,7 @@ class TestLocalHarness:
         ws=self.ws,
         tool_runner=tool_runner,
         hook_runner=hook_runner,
+        initial_history=initial_history,
     )
 
   async def disconnect_sdk(self):

@@ -20,6 +20,12 @@ files, and uploaded media.
 
 To run:
   python app_data_dir_override.py
+
+Criteria for correct script performance:
+  1. The script exits cleanly with return code 0 (no unhandled exceptions).
+  2. The agent successfully creates the artifact.
+  3. The script prints a success message confirming the artifact was stored in
+     the custom app_data_dir.
 """
 
 import asyncio

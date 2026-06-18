@@ -43,6 +43,7 @@ To run:
 import asyncio
 from collections.abc import Sequence
 import glob
+import mimetypes
 import os
 import sys
 
@@ -74,7 +75,7 @@ async def _stream_response(response: types.ChatResponse) -> None:
 def _find_generated_image(name: str) -> str | None:
   """Searches the antigravity brain dirs for a generated image by name.
 
-  The generate_image tool saves files as <name>_<timestamp>.png inside
+  The generate_image tool saves files as <name>_<timestamp>.<ext> inside
   a conversation-specific brain directory.
 
   Args:
@@ -86,9 +87,13 @@ def _find_generated_image(name: str) -> str | None:
   base = os.path.expanduser("~/.gemini/antigravity/brain")
   if not os.path.isdir(base):
     return None
-  matches = glob.glob(os.path.join(base, "**", f"{name}*.png"), recursive=True)
-  if matches:
-    return max(matches, key=os.path.getmtime)
+  matches = glob.glob(os.path.join(base, "**", f"{name}*"), recursive=True)
+  valid_extensions = {".png", ".jpg", ".jpeg"}
+  image_matches = [
+      m for m in matches if os.path.splitext(m)[1].lower() in valid_extensions
+  ]
+  if image_matches:
+    return max(image_matches, key=os.path.getmtime)
   return None
 
 
@@ -158,7 +163,10 @@ async def run() -> None:
   # Load raw bytes — no filename leaks to the discriminator.
   with open(image_path, "rb") as f:
     image_bytes = f.read()
-  image = types.Image(data=image_bytes, mime_type="image/png")
+  mime_type, _ = mimetypes.guess_type(image_path)
+  if not mime_type:
+    mime_type = "image/png"
+  image = types.Image(data=image_bytes, mime_type=mime_type)
   disc_prompt: types.Content = [
       "What do you see in this image? Describe it in detail.",
       image,

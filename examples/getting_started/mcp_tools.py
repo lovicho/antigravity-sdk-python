@@ -19,6 +19,12 @@ using stdio, SSE, and Streamable HTTP transports.
 
 To run:
   python mcp_tools.py
+
+Criteria for correct script performance:
+  1. The script exits cleanly with return code 0 (no unhandled exceptions).
+  2. The agent successfully uses the pirate_multiply tool to multiply numbers.
+  3. The agent respects the safety policy and fails to use the pirate_divide
+     tool when it is denied.
 """
 
 import asyncio
@@ -53,9 +59,6 @@ async def mcp_stdio() -> None:
     print(f"  User: {prompt}")
     response = await my_agent.chat(prompt)
     print(f"  Agent: {await response.text()}")
-
-
-
 
 
 async def mcp_http() -> None:

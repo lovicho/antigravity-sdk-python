@@ -24,6 +24,13 @@ This example shows:
 
 To run:
   python cancellation.py
+
+Criteria for correct script performance:
+  1. The script exits cleanly with return code 0 (no unhandled exceptions).
+  2. The output contains "[Programmatic Cancel Caught]" showing the
+     SDK-specific cancellation was handled.
+  3. The output contains "[Native Cancel Caught]" showing the standard Python
+     cancellation was handled.
 """
 
 import asyncio

@@ -52,7 +52,9 @@ def _find_context_param(fn: Callable[..., Any]) -> str | None:
   Returns:
     The parameter name, or None if no ToolContext parameter is found.
   """
-  target = fn.fn if isinstance(fn, ToolWithSchema) else fn
+  target = fn
+  while isinstance(target, ToolWithSchema):
+    target = target.fn
   try:
     hints = typing.get_type_hints(target)
   except (TypeError, NameError, AttributeError):
@@ -86,14 +88,18 @@ def _make_public_callable(
   Returns:
     A wrapper callable with a cleaned signature.
   """
-  target = fn.fn if isinstance(fn, ToolWithSchema) else fn
-  sig = inspect.signature(target)
+  if isinstance(fn, ToolWithSchema):
+    return ToolWithSchema(
+        _make_public_callable(fn.fn, context_param), fn.input_schema
+    )
+
+  sig = inspect.signature(fn)
   new_params = [p for n, p in sig.parameters.items() if n != context_param]
   public_sig = sig.replace(parameters=new_params)
 
-  @functools.wraps(target)
+  @functools.wraps(fn)
   def _proxy(**kwargs):
-    return target(**kwargs)
+    return fn(**kwargs)
 
   setattr(_proxy, "__signature__", public_sig)
   return _proxy
@@ -114,6 +120,8 @@ class ToolWithSchema:
 
 def _is_async(callable_obj: Any) -> bool:
   """Returns True if the callable is async (coroutine function or __call__)."""
+  if isinstance(callable_obj, ToolWithSchema):
+    return _is_async(callable_obj.fn)
   return inspect.iscoroutinefunction(callable_obj) or (
       hasattr(callable_obj, "__call__")
       and inspect.iscoroutinefunction(callable_obj.__call__)

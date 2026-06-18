@@ -19,6 +19,11 @@ This example showcases:
   `types.SlashCommand` object in a prompt parts list.
 - Understanding how planning mode generates a detailed implementation plan and
   awaits user approval (human-in-the-loop).
+
+Criteria for correct script performance:
+  1. The script exits cleanly with return code 0 (no unhandled exceptions).
+  2. The agent successfully generates an implementation plan artifact.
+  3. The script prints a success message confirming the plan exists.
 """
 
 import asyncio

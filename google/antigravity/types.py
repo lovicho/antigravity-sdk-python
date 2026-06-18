@@ -28,19 +28,30 @@ import pathlib
 from typing import Annotated, Any, AsyncIterator, Callable, Literal, TypeVar, cast
 
 import pydantic
+from google.antigravity.models import GeminiAPIEndpoint
+from google.antigravity.models import GeminiModelOptions
+from google.antigravity.models import ModelEndpoint
+from google.antigravity.models import ModelTarget
+from google.antigravity.models import ModelType
+from google.antigravity.models import ThinkingLevel
+from google.antigravity.models import VertexEndpoint
 
 _BaseMediaT = TypeVar("_BaseMediaT", bound="_BaseMedia")
 
 __all__ = [
     "ThinkingLevel",
-    "GenerationConfig",
-    "ModelEntry",
-    "ModelConfig",
-    "GeminiConfig",
+    "ModelType",
+    "ModelEndpoint",
+    "GeminiAPIEndpoint",
+    "VertexEndpoint",
+    "GeminiModelOptions",
+    "ModelTarget",
     "SystemInstructionSection",
     "CustomSystemInstructions",
     "TemplatedSystemInstructions",
     "SystemInstructions",
+    "SubagentConfig",
+    "SubagentCapabilities",
     "BuiltinTools",
     "CapabilitiesConfig",
     "BaseMcpServerConfig",
@@ -49,7 +60,6 @@ __all__ = [
     "McpServerConfig",
     "ToolCall",
     "ToolResult",
-    "PythonTool",
     "UsageMetadata",
     "StepType",
     "StepSource",
@@ -66,9 +76,6 @@ __all__ = [
     "AntigravityCancelledError",
     "AntigravityValidationError",
     "AntigravityExecutionError",
-    "TriggerDelivery",
-    "FileChangeKind",
-    "FileChange",
     "StreamChunk",
     "Thought",
     "Text",
@@ -85,104 +92,6 @@ __all__ = [
 # =============================================================================
 # Config types
 # =============================================================================
-
-DEFAULT_MODEL = "gemini-3.5-flash"
-DEFAULT_IMAGE_GENERATION_MODEL = "gemini-3.1-flash-image-preview"
-
-
-class ThinkingLevel(str, enum.Enum):
-  """Thinking level for Gemini models that support extended thinking.
-
-  Controls the amount of reasoning the model performs before responding.
-  See https://ai.google.dev/gemini-api/docs/thinking#thinking-levels for
-  details.
-
-  Attributes:
-    MINIMAL: Minimal thinking.
-    LOW: Low thinking.
-    MEDIUM: Medium thinking.
-    HIGH: High thinking.
-  """
-
-  MINIMAL = "minimal"
-  LOW = "low"
-  MEDIUM = "medium"
-  HIGH = "high"
-
-
-class GenerationConfig(pydantic.BaseModel):
-  """Generation parameters for a model.
-
-  Attributes:
-    thinking_level: Thinking level for models that support extended thinking.
-      When None, the model's default level is used.
-  """
-
-  thinking_level: ThinkingLevel | None = None
-
-
-def _coerce_model_entry(v: "ModelEntry | str") -> "ModelEntry":
-  """Coerce a bare model name string into a ModelEntry."""
-  if isinstance(v, str):
-    return ModelEntry(name=v)
-  return v
-
-
-class ModelEntry(pydantic.BaseModel):
-  """A model with optional auth and generation overrides.
-
-  Attributes:
-    name: Model name (e.g. 'gemini-3.1-pro-preview').
-    api_key: Per-model API key override. Falls back to GeminiConfig.api_key.
-    generation: Generation parameters for this model.
-  """
-
-  name: str
-  api_key: str | None = None
-  generation: GenerationConfig = pydantic.Field(
-      default_factory=GenerationConfig
-  )
-
-
-class ModelConfig(pydantic.BaseModel):
-  """Model selection for each capability.
-
-  Slots accept a bare model name string (coerced to ModelEntry) or
-  a ModelEntry for per-model overrides. After validation, all slots
-  are always ModelEntry.
-
-  Attributes:
-    default: The primary reasoning model.
-    image_generation: The model used for image generation.
-  """
-
-  default: Annotated[
-      ModelEntry, pydantic.BeforeValidator(_coerce_model_entry)
-  ] = pydantic.Field(default_factory=lambda: ModelEntry(name=DEFAULT_MODEL))
-  image_generation: Annotated[
-      ModelEntry, pydantic.BeforeValidator(_coerce_model_entry)
-  ] = pydantic.Field(
-      default_factory=lambda: ModelEntry(name=DEFAULT_IMAGE_GENERATION_MODEL)
-  )
-
-
-class GeminiConfig(pydantic.BaseModel):
-  """Configuration for the Gemini model backend.
-
-  Attributes:
-    api_key: Shared API key for all models. Falls back to $GEMINI_API_KEY if not
-      set. Individual ModelEntry instances can override this.
-    vertex: If True, uses the Vertex AI backend instead of Gemini Developer API.
-    project: GCP Project ID for Vertex AI.
-    location: GCP Location/Region for Vertex AI (e.g., "us-central1").
-    models: Per-modality model selection and configuration.
-  """
-
-  api_key: str | None = None
-  vertex: bool = False
-  project: str | None = None
-  location: str | None = None
-  models: ModelConfig = pydantic.Field(default_factory=ModelConfig)
 
 
 class SystemInstructionSection(pydantic.BaseModel):
@@ -227,6 +136,51 @@ class TemplatedSystemInstructions(pydantic.BaseModel):
 SystemInstructions = CustomSystemInstructions | TemplatedSystemInstructions
 
 
+class SubagentCapabilities(pydantic.BaseModel):
+  """Capabilities configuration for subagents.
+
+  Attributes:
+    enabled_tools: Explicit allowlist of builtin tools to enable. Mutually
+      exclusive with disabled_tools. When None, the harness defaults are used.
+    disabled_tools: Explicit denylist of builtin tools to disable. Mutually
+      exclusive with enabled_tools. When None, the harness defaults are used.
+  """
+
+  enabled_tools: list[BuiltinTools] | None = None
+  disabled_tools: list[BuiltinTools] | None = None
+
+  @pydantic.model_validator(mode="after")
+  def _check_mutually_exclusive(self) -> "SubagentCapabilities":
+    if self.enabled_tools is not None and self.disabled_tools is not None:
+      raise ValueError(
+          "enabled_tools and disabled_tools should be mutually exclusive."
+      )
+    return self
+
+
+class SubagentConfig(pydantic.BaseModel):
+  """Configuration for a static subagent.
+
+  Attributes:
+    name: Unique name of the subagent.
+    description: Description of the subagent.
+    system_instructions: Optional system instructions for the subagent. Note
+      that these will be appended to the subagent's default system instructions.
+    capabilities: Optional capabilities config controlling allowed tools. If
+      None, defaults to read-only tools.
+    tools: Optional list of additional custom tools (callable functions or
+      string names) to enable. Any custom Python tools used by subagents must
+      also be added to the main agent's tools list in order to be available to
+      the subagent during execution.
+  """
+
+  name: str
+  description: str
+  system_instructions: str | list[SystemInstructionSection] | None = None
+  capabilities: SubagentCapabilities | None = None
+  tools: list[Callable[..., Any] | str] = pydantic.Field(default_factory=list)
+
+
 class BuiltinTools(str, enum.Enum):
   """Identifiers for common connection-provided builtin tools.
 
@@ -241,6 +195,7 @@ class BuiltinTools(str, enum.Enum):
     ASK_QUESTION: Ask the user a clarifying question.
     START_SUBAGENT: Invoke a subagent.
     GENERATE_IMAGE: Generate or edit images.
+    SEARCH_WEB: Search the web.
     FINISH: Finish the conversation and return structured output.
   """
 
@@ -254,6 +209,7 @@ class BuiltinTools(str, enum.Enum):
   ASK_QUESTION = "ask_question"
   START_SUBAGENT = "start_subagent"
   GENERATE_IMAGE = "generate_image"
+  SEARCH_WEB = "search_web"
   FINISH = "finish"
 
   @classmethod
@@ -288,6 +244,7 @@ class BuiltinTools(str, enum.Enum):
         cls.ASK_QUESTION,
         cls.START_SUBAGENT,
         cls.GENERATE_IMAGE,
+        cls.SEARCH_WEB,
         cls.FINISH,
     ]
 
@@ -361,8 +318,6 @@ class CapabilitiesConfig(pydantic.BaseModel):
       saving tokens and preventing the model from even considering them.
     compaction_threshold: Token count after which the context window may be
       compacted. When None, the backend's default is used.
-    image_model: The model to use for image generation. Defaults to
-      'gemini-3.1-flash-image-preview'.
     finish_tool_schema_json: Optional JSON schema string for the finish tool.
   """
 
@@ -370,7 +325,6 @@ class CapabilitiesConfig(pydantic.BaseModel):
   enabled_tools: list[BuiltinTools] | None = None
   disabled_tools: list[BuiltinTools] | None = None
   compaction_threshold: int | None = None
-  image_model: str = "gemini-3.1-flash-image-preview"
   finish_tool_schema_json: str | None = None
 
   @pydantic.model_validator(mode="after")
@@ -418,6 +372,8 @@ class McpStdioServer(BaseMcpServerConfig):
     name: Unique identifier for this MCP server.
     type: The type of connection, always "stdio".
     args: Arguments to pass to the command.
+    env: Environment variables to merge into the spawned subprocess's
+      environment.
     enabled_tools: Explicit allowlist of tools to enable. Mutually exclusive
       with disabled_tools. When None, all tools from the server are enabled.
       Only enabled tools are exposed to the model; others are hidden entirely
@@ -431,6 +387,7 @@ class McpStdioServer(BaseMcpServerConfig):
   command: str
   type: Literal["stdio"] = "stdio"
   args: list[str] = pydantic.Field(default_factory=list)
+  env: dict[str, str] | None = None
   enabled_tools: list[str] | None = None
   disabled_tools: list[str] | None = None
 
@@ -760,7 +717,7 @@ class AntigravityValidationError(Exception):
     self.errors = errors or []
 
   @classmethod
-  def from_pydantic(
+  def _from_pydantic(
       cls, exc: pydantic.ValidationError
   ) -> "AntigravityValidationError":
     """Constructs from a Pydantic ValidationError.
@@ -781,28 +738,6 @@ class TriggerDelivery(str, enum.Enum):
   WAIT_IDLE = "wait_idle"  # Wait until agent is idle before sending.
   # TODO: INTERRUPT — cancel current turn, then send. Deferred due to
   # safety implications for in-flight tool calls (requires Connection.cancel()).
-
-
-class FileChangeKind(str, enum.Enum):
-  """Kind of filesystem change detected by a file-watching trigger."""
-
-  ADDED = "added"
-  MODIFIED = "modified"
-  DELETED = "deleted"
-
-
-class FileChange(pydantic.BaseModel):
-  """A single filesystem change detected by a file-watching trigger.
-
-  Attributes:
-    kind: The type of change (added, modified, deleted).
-    path: Absolute path to the changed file.
-  """
-
-  model_config = pydantic.ConfigDict(frozen=True)
-
-  kind: FileChangeKind
-  path: str
 
 
 # =============================================================================
@@ -960,7 +895,7 @@ class ChatResponse:
   @property
   def usage_metadata(self) -> UsageMetadata | None:
     """Accumulated token usage across all model invocations in this turn."""
-    return self._conversation.last_turn_usage
+    return self._conversation._last_turn_usage  # pylint: disable=protected-access
 
   async def cancel(self) -> None:
     """Cancels the active execution turn and halts generation.
@@ -1091,7 +1026,7 @@ class Image(_BaseMedia):
 
   @pydantic.field_validator("mime_type")
   @classmethod
-  def validate_mime_type(cls, v: str) -> str:
+  def _validate_mime_type(cls, v: str) -> str:
     """Validates that the MIME type is supported for Image content."""
     if v not in SUPPORTED_IMAGE_MIMES:
       raise ValueError(f"Unsupported Image MIME type: '{v}'")
@@ -1103,7 +1038,7 @@ class Document(_BaseMedia):
 
   @pydantic.field_validator("mime_type")
   @classmethod
-  def validate_mime_type(cls, v: str) -> str:
+  def _validate_mime_type(cls, v: str) -> str:
     """Validates that the MIME type is supported for Document content."""
     if v not in SUPPORTED_DOCUMENT_MIMES:
       raise ValueError(f"Unsupported Document MIME type: '{v}'")
@@ -1115,7 +1050,7 @@ class Audio(_BaseMedia):
 
   @pydantic.field_validator("mime_type")
   @classmethod
-  def validate_mime_type(cls, v: str) -> str:
+  def _validate_mime_type(cls, v: str) -> str:
     """Validates that the MIME type is supported for Audio content."""
     if v not in SUPPORTED_AUDIO_MIMES:
       raise ValueError(f"Unsupported Audio MIME type: '{v}'")
@@ -1127,7 +1062,7 @@ class Video(_BaseMedia):
 
   @pydantic.field_validator("mime_type")
   @classmethod
-  def validate_mime_type(cls, v: str) -> str:
+  def _validate_mime_type(cls, v: str) -> str:
     """Validates that the MIME type is supported for Video content."""
     if v not in SUPPORTED_VIDEO_MIMES:
       raise ValueError(f"Unsupported Video MIME type: '{v}'")

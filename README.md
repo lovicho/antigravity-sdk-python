@@ -27,6 +27,35 @@ Get started by running one of the [`examples/`](examples/), such as the
 export GEMINI_API_KEY="your_api_key_here"
 python ./examples/getting_started/hello_world.py
 ```
+## Gemini Enterprise Agent Platform (formerly Vertex AI)
+
+To use the SDK with Gemini Enterprise Agent Platform (formerly Vertex AI),
+configure `LocalAgentConfig` with `vertex=True` and specify your GCP `project`
+and `location`.
+
+By default, the SDK uses Application Default Credentials (ADC) for
+authentication.
+
+```python
+from google.antigravity import Agent, LocalAgentConfig
+
+config = LocalAgentConfig(
+    vertex=True,
+    project="your-gcp-project",
+    location="us-central1",
+)
+
+async with Agent(config) as agent:
+    response = await agent.chat("Hello!")
+    print(await response.text())
+```
+
+Ensure you have authenticated locally before running the agent:
+
+```sh
+gcloud auth application-default login
+```
+
 ## Concepts
 
 ### Simple Agent
@@ -100,15 +129,14 @@ By default, `Agent` runs in **read-only mode** for safety. Pass
 ### Interactive Loop
 
 ```python
-from google.antigravity import Agent, LocalAgentConfig, CapabilitiesConfig
+from google.antigravity import LocalAgentConfig, CapabilitiesConfig
 from google.antigravity.utils.interactive import run_interactive_loop
 
 config = LocalAgentConfig(
     # api_key="your_api_key_here",
     capabilities=CapabilitiesConfig(),
 )
-async with Agent(config) as agent:
-    await run_interactive_loop(agent)
+await run_interactive_loop(config)
 ```
 
 ### Advanced Usage with Conversation
@@ -123,13 +151,11 @@ import asyncio
 from google.antigravity.connections.local import LocalConnectionStrategy
 from google.antigravity.conversation.conversation import Conversation
 from google.antigravity.tools.tool_runner import ToolRunner
-from google.antigravity.types import GeminiConfig
 
 async def main():
     tool_runner = ToolRunner()
     strategy = LocalConnectionStrategy(
         tool_runner=tool_runner,
-        # gemini_config=GeminiConfig(api_key="your_api_key_here"),
     )
     
     async with Conversation.create(strategy) as conversation:
@@ -222,7 +248,7 @@ async with Agent(config) as agent:
 Control agent behavior with a declarative policy system:
 
 ```python
-from google.antigravity import Agent, LocalAgentConfig, CapabilitiesConfig
+from google.antigravity import LocalAgentConfig, CapabilitiesConfig
 from google.antigravity.hooks.policy import deny, allow, ask_user, enforce
 from google.antigravity.utils.interactive import run_interactive_loop
 
@@ -236,8 +262,7 @@ config = LocalAgentConfig(
     capabilities=CapabilitiesConfig(),
     policies=policies,
 )
-async with Agent(config) as agent:
-    await run_interactive_loop(agent)
+await run_interactive_loop(config)
 ```
 
 ### Triggers
@@ -246,7 +271,7 @@ Run background tasks that react to external events and push messages into the
 agent:
 
 ```python
-from google.antigravity import Agent, LocalAgentConfig
+from google.antigravity import LocalAgentConfig
 from google.antigravity.triggers import every
 from google.antigravity.utils.interactive import run_interactive_loop
 
@@ -256,8 +281,7 @@ async def check_status(ctx):
 config = LocalAgentConfig(
     triggers=[every(60, check_status)],
 )
-async with Agent(config) as agent:
-    await run_interactive_loop(agent)
+await run_interactive_loop(config)
 ```
 
 ## Architecture

@@ -72,8 +72,9 @@ async def main() -> None:
 
   async with Agent(gen_config) as gen_agent:
     prompt = (
-        "Generate an image of a futuristic city, name it 'future_city'. "
-        "Please provide the file path to the generated image."
+        "Generate an image of a futuristic city with a 16:9 aspect ratio, name"
+        " it 'future_city'. Please provide the file path to the generated"
+        " image."
     )
     print(f"  User: {prompt}")
     response = await gen_agent.chat(prompt)
