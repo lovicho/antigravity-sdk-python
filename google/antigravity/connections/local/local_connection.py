@@ -43,6 +43,7 @@ from google.antigravity.connections import connection
 from google.antigravity.connections.local import localharness_pb2
 from google.antigravity.connections.local import types as local_types
 from google.antigravity.connections.local.hook_router import HookRouter
+from google.antigravity.connections.local.local_connection_config import BUILTIN_TOOL_PROTO_FIELDS
 from google.antigravity.hooks import hook_runner as h_runner
 from google.antigravity.hooks import hooks
 from google.antigravity.tools import tool_runner as t_runner
@@ -56,6 +57,8 @@ class _StepTracker:
 
   state: int = localharness_pb2.StepUpdate.State.STATE_UNSPECIFIED
   handled_requests: set[str] = dataclasses.field(default_factory=set)
+  pre_step_dispatched: bool = False
+  post_step_dispatched: bool = False
 
   def update_state(self, new_state: int) -> None:
     """Updates state and clears handled requests if transitioning out of waiting."""
@@ -101,23 +104,6 @@ _TARGET_MAP = {
     "TARGET_USER": types.StepTarget.USER,
     "TARGET_ENVIRONMENT": types.StepTarget.ENVIRONMENT,
     "TARGET_UNSPECIFIED": types.StepTarget.UNSPECIFIED,
-}
-
-# Map from BuiltinTools enum to the proto field name on StepUpdate.
-# Used for (a) determining step type and (b) extracting tool-confirmation args.
-# Kept as an explicit map because enum values and proto field names may diverge.
-_BUILTIN_TOOL_PROTO_FIELDS: dict[types.BuiltinTools, str] = {
-    types.BuiltinTools.CREATE_FILE: "create_file",
-    types.BuiltinTools.EDIT_FILE: "edit_file",
-    types.BuiltinTools.FIND_FILE: "find_file",
-    types.BuiltinTools.LIST_DIR: "list_directory",
-    types.BuiltinTools.RUN_COMMAND: "run_command",
-    types.BuiltinTools.SEARCH_DIR: "search_directory",
-    types.BuiltinTools.VIEW_FILE: "view_file",
-    types.BuiltinTools.START_SUBAGENT: "invoke_subagent",
-    types.BuiltinTools.GENERATE_IMAGE: "generate_image",
-    types.BuiltinTools.SEARCH_WEB: "search_web",
-    types.BuiltinTools.FINISH: "finish",
 }
 
 # Fallback action name used when a tool confirmation request does not match any
@@ -172,13 +158,16 @@ def _extract_tool_result(
   Returns:
     A typed result object, or None if no structured result is present.
   """
-  _run_command = _BUILTIN_TOOL_PROTO_FIELDS[types.BuiltinTools.RUN_COMMAND]
-  _list_dir = _BUILTIN_TOOL_PROTO_FIELDS[types.BuiltinTools.LIST_DIR]
-  _find_file = _BUILTIN_TOOL_PROTO_FIELDS[types.BuiltinTools.FIND_FILE]
-  _search_dir = _BUILTIN_TOOL_PROTO_FIELDS[types.BuiltinTools.SEARCH_DIR]
-  _edit_file = _BUILTIN_TOOL_PROTO_FIELDS[types.BuiltinTools.EDIT_FILE]
-  _gen_image = _BUILTIN_TOOL_PROTO_FIELDS[types.BuiltinTools.GENERATE_IMAGE]
-  _search_web = _BUILTIN_TOOL_PROTO_FIELDS[types.BuiltinTools.SEARCH_WEB]
+  _run_command = BUILTIN_TOOL_PROTO_FIELDS[types.BuiltinTools.RUN_COMMAND]
+  _list_dir = BUILTIN_TOOL_PROTO_FIELDS[types.BuiltinTools.LIST_DIR]
+  _find_file = BUILTIN_TOOL_PROTO_FIELDS[types.BuiltinTools.FIND_FILE]
+  _search_dir = BUILTIN_TOOL_PROTO_FIELDS[types.BuiltinTools.SEARCH_DIR]
+  _edit_file = BUILTIN_TOOL_PROTO_FIELDS[types.BuiltinTools.EDIT_FILE]
+  _gen_image = BUILTIN_TOOL_PROTO_FIELDS[types.BuiltinTools.GENERATE_IMAGE]
+  _search_web = BUILTIN_TOOL_PROTO_FIELDS[types.BuiltinTools.SEARCH_WEB]
+  _read_url_content = BUILTIN_TOOL_PROTO_FIELDS[
+      types.BuiltinTools.READ_URL_CONTENT
+  ]
 
   # run_command -> raw stdout/stderr, e.g. "hello world\n"
   if step_update.HasField(_run_command):
@@ -225,6 +214,15 @@ def _extract_tool_result(
     sw = step_update.search_web
     if sw.summary:
       return local_types.SearchWebResult(summary=sw.summary)
+  # read_url_content -> title, summary, content_path
+  elif step_update.HasField(_read_url_content):
+    ruc = step_update.read_url_content
+    if ruc.summary or ruc.title or ruc.content_path:
+      return local_types.ReadUrlContentResult(
+          title=ruc.title,
+          summary=ruc.summary,
+          content_path=ruc.content_path,
+      )
   return None
 
 
@@ -251,7 +249,6 @@ def normalize_wire_path(path: str) -> str:
 class LocalConnectionStep(types.Step):
   """Connection-specific step for LocalConnection."""
 
-  cascade_id: str = ""
   trajectory_id: str = ""
   http_code: int = 0
 
@@ -276,7 +273,7 @@ class LocalConnectionStep(types.Step):
     active_tool_pair = next(
         (
             (tool_enum.value, step_dict[proto_field])
-            for tool_enum, proto_field in _BUILTIN_TOOL_PROTO_FIELDS.items()
+            for tool_enum, proto_field in BUILTIN_TOOL_PROTO_FIELDS.items()
             if proto_field in step_dict
         ),
         (None, {}),
@@ -322,12 +319,13 @@ class LocalConnectionStep(types.Step):
     elif step_dict.get("finish") is not None:
       step_type = types.StepType.FINISH
     elif active_tool_name or any(
-        step_dict.get(k) is not None
-        for k in _BUILTIN_TOOL_PROTO_FIELDS.values()
+        step_dict.get(k) is not None for k in BUILTIN_TOOL_PROTO_FIELDS.values()
     ):
       step_type = types.StepType.TOOL_CALL
     elif step_dict.get("text"):
       step_type = types.StepType.TEXT_RESPONSE
+    elif step_dict.get("thinking"):
+      step_type = types.StepType.THINKING
 
     source_str = step_dict.get("source")
     source = (
@@ -376,7 +374,6 @@ class LocalConnectionStep(types.Step):
     return cls(
         id=id_str,
         step_index=step_idx,
-        cascade_id=step_dict.get("cascade_id", ""),
         trajectory_id=traj_id,
         type=step_type,
         source=source,
@@ -548,35 +545,26 @@ class LocalConnection(connection.Connection):
     self._ws = ws
     self._tool_runner = tool_runner
     self.__initial_history = initial_history or []
+    self._client_cancelled = False
+    self._is_idle = asyncio.Event()
+    self._is_idle.set()
     self._hook_router = (
-        HookRouter(hook_runner, self._send_input_event) if hook_runner else None
+        HookRouter(hook_runner, self._send_input_event, _extract_tool_result)
+        if hook_runner
+        else None
     )
     self._step_trackers: dict[tuple[str, int], _StepTracker] = {}
     self._step_queue = asyncio.Queue()
     self._background_tasks = set()
     self._reader_task = asyncio.create_task(self._ws_reader_loop())
-    self._current_turn_context = None
-    self._cancelled = False
-    self._client_cancelled = False
-    self._cancelled_message = ""
-    self._is_idle = asyncio.Event()
-    self._is_idle.set()
     # Set of trajectory IDs for currently-running subagents. The connection
     # is only considered idle when the parent trajectory is idle AND this
     # set is empty, ensuring post-tool-call hooks for subagent completions
     # fire before receive_steps() returns.
     self._active_subagent_ids: set[str] = set()
-    # Maps subagent trajectory_id -> final response content. Populated
-    # when the reader loop sees an is_complete_response step from a subagent
-    # trajectory, and consumed when that trajectory goes idle.
-    self._subagent_responses: dict[str, str] = {}
     self._parent_idle = True
-    # The cascade_id from step updates identifies the parent trajectory.
-    # A step belongs to the parent trajectory when cascade_id ==
-    # trajectory_id; otherwise it belongs to a subagent trajectory.
-    # We store the cascade_id so TrajectoryStateUpdate (which lacks the
-    # field) can distinguish parent vs. subagent trajectories.
-    self._cascade_id: str | None = None
+    # The main trajectory ID is tracked on the first step we see.
+    self._main_trajectory_id: str | None = None
 
     # Flag set early in disconnect() so the reader loop can distinguish
     # expected closures from harness crashes.
@@ -611,7 +599,7 @@ class LocalConnection(connection.Connection):
   @property
   def conversation_id(self) -> str:
     """Returns the conversation identifier, if one exists."""
-    return self._cascade_id or ""
+    return self._main_trajectory_id or ""
 
   async def send(self, prompt: types.Content | None, **kwargs: Any) -> None:
     """Sends a prompt to the agent.
@@ -620,23 +608,11 @@ class LocalConnection(connection.Connection):
       prompt: The user prompt or content to send.
       **kwargs: Strategy-specific options.
     """
-    self._cancelled = False
     self._client_cancelled = False
     self._is_idle.clear()
     self._parent_idle = False
     self._active_subagent_ids.clear()
-    self._subagent_responses.clear()
-    if self._hook_runner:
-      res, turn_context = await self._hook_runner.dispatch_pre_turn(prompt)
-      self._current_turn_context = turn_context
-      if not res.allow:
-        logging.warning("Turn denied by hook: %s", res.message)
-        self._cancelled = True
-        self._cancelled_message = (
-            res.message or "Turn execution denied by hook."
-        )
-        self._is_idle.set()
-        return
+    self._main_trajectory_id = None
 
     if prompt is None:
       event = localharness_pb2.InputEvent(user_input="")
@@ -665,15 +641,6 @@ class LocalConnection(connection.Connection):
       )
     self._is_receiving = True
     try:
-      if self._cancelled:
-        yield LocalConnectionStep(
-            status=types.StepStatus.CANCELED,
-            error=self._cancelled_message,
-            source=types.StepSource.SYSTEM,
-            type=types.StepType.SYSTEM_MESSAGE,
-        )
-        return
-
       if self._is_idle.is_set() and self._step_queue.empty():
         if self._client_cancelled:
           raise types.AntigravityCancelledError()
@@ -687,6 +654,7 @@ class LocalConnection(connection.Connection):
         if self._is_idle.is_set() and self._step_queue.empty():
           if self._client_cancelled:
             raise types.AntigravityCancelledError()
+          self._current_turn_context = None
           return
 
         step_obj = await self._step_queue.get()
@@ -727,25 +695,6 @@ class LocalConnection(connection.Connection):
             logging.warning(
                 "System step error (HTTP %s): %s", http_code, step_obj.error
             )
-
-        is_from_model = step_obj.source == types.StepSource.MODEL
-        is_done = step_obj.status == types.StepStatus.DONE
-        is_terminal = is_done or step_obj.status in (
-            types.StepStatus.ERROR,
-            types.StepStatus.CANCELED,
-        )
-        is_target_user = getattr(step_obj, "target", None) == "TARGET_USER"
-
-        if is_terminal and is_target_user and is_from_model:
-          # Dispatch post-turn hook with the final response content.
-          if self._hook_runner and self._current_turn_context:
-            await self._hook_runner.dispatch_post_turn(
-                self._current_turn_context, step_obj.content or ""
-            )
-            self._current_turn_context = None
-          # Don't force idle here — wait for the TrajectoryStateUpdate
-          # path to confirm that the parent and all subagent trajectories
-          # have completed.
     finally:
       self._is_receiving = False
 
@@ -876,9 +825,9 @@ class LocalConnection(connection.Connection):
     Callers must ensure self._hook_runner is not None before calling.
     """
     assert self._hook_runner is not None
-    return self._current_turn_context or hooks.TurnContext(
-        self._hook_runner.session_context
-    )
+    if self._hook_router and self._hook_router.current_turn_context:
+      return self._hook_router.current_turn_context
+    return hooks.TurnContext(self._hook_runner.session_context)
 
   def _run_in_background(self, coro) -> None:
     """Schedules a coroutine as a fire-and-forget background task."""
@@ -943,13 +892,35 @@ class LocalConnection(connection.Connection):
             step_obj = parsed_step
           await self._step_queue.put(step_obj)
 
-          # Record the cascade_id for use by TrajectoryStateUpdate
-          # (which does not carry a cascade_id field).
+          # Record the main trajectory ID on the first step we see
+          if self._main_trajectory_id is None and step_update.trajectory_id:
+            self._main_trajectory_id = step_update.trajectory_id
+
+          # Dispatch Telemetry Internal Step Hooks
           if (
-              step_update.cascade_id
-              and step_update.cascade_id == step_update.trajectory_id
+              not tracker.pre_step_dispatched
+              and self._hook_runner
+              and step_update.state
+              != localharness_pb2.StepUpdate.State.STATE_UNSPECIFIED
           ):
-            self._cascade_id = step_update.cascade_id
+            tracker.pre_step_dispatched = True
+            await self._hook_runner.dispatch_pre_step(
+                self._get_turn_context(), step_obj
+            )
+
+          is_terminal = step_update.state in (
+              localharness_pb2.StepUpdate.State.STATE_DONE,
+              localharness_pb2.StepUpdate.State.STATE_ERROR,
+          )
+          if (
+              is_terminal
+              and not tracker.post_step_dispatched
+              and self._hook_runner
+          ):
+            tracker.post_step_dispatched = True
+            await self._hook_runner.dispatch_post_step(
+                self._get_turn_context(), step_obj
+            )
 
           # 3. Dispatch observe-only hooks for special step types.
           if step_obj.type == types.StepType.COMPACTION and self._hook_runner:
@@ -965,36 +936,21 @@ class LocalConnection(connection.Connection):
           # as tool responses; we capture the last model text here so the
           # PostToolCallHook receives the subagent's actual output.
           is_subagent_step = (
-              self._cascade_id
+              self._main_trajectory_id
               and step_obj.trajectory_id
-              and step_obj.trajectory_id != self._cascade_id
+              and step_obj.trajectory_id != self._main_trajectory_id
           )
-          if (
-              is_subagent_step
-              and step_obj.source == types.StepSource.MODEL
-              and step_obj.content
-          ):
-            self._subagent_responses[step_obj.trajectory_id] = step_obj.content
-
-          # Dispatch post-tool-call or on-tool-error hooks for built-in tools
-          # that were approved via ToolConfirmation. The harness executes them
-          # internally; we observe completion via step state transitions.
+          # TODO(abhipatel): Post-tool hook for STATE_DONE is now dispatched by
+          # the harness via CallHookRequest. Only STATE_ERROR tracking remains
+          # for the on_tool_error hook (to be migrated in a follow-up).
           if (
               step_key in self._pending_builtin_tool_calls
               and step_update.state
               == localharness_pb2.StepUpdate.State.STATE_DONE
           ):
-            tc, op_ctx = self._pending_builtin_tool_calls.pop(step_key)
-            if self._hook_runner:
-              extracted = _extract_tool_result(step_update)
-              result = types.ToolResult(
-                  name=tc.name,
-                  id=tc.id,
-                  result=extracted or step_obj.content,
-              )
-              self._run_in_background(
-                  self._hook_runner.dispatch_post_tool_call(op_ctx, result)
-              )
+            # Remove the pending entry — harness already fired the post-tool
+            # hook.
+            self._pending_builtin_tool_calls.pop(step_key)
           elif (
               step_key in self._pending_builtin_tool_calls
               and step_update.state
@@ -1040,7 +996,8 @@ class LocalConnection(connection.Connection):
         elif event.HasField("trajectory_state_update"):
           tsu = event.trajectory_state_update
           is_subagent = (
-              self._cascade_id and tsu.trajectory_id != self._cascade_id
+              self._main_trajectory_id
+              and tsu.trajectory_id != self._main_trajectory_id
           )
 
           if (
@@ -1054,17 +1011,9 @@ class LocalConnection(connection.Connection):
               tsu.state
               == localharness_pb2.TrajectoryStateUpdate.State.STATE_IDLE
           ):
-            # Dispatch post-tool-call hook if this is a subagent trajectory.
+            # Clean up subagent tracking when its trajectory completes.
             if is_subagent:
               self._active_subagent_ids.discard(tsu.trajectory_id)
-              if self._hook_runner:
-                op_ctx = hooks.OperationContext(self._get_turn_context())
-                response = self._subagent_responses.pop(tsu.trajectory_id, "")
-                result = types.ToolResult(
-                    name=types.BuiltinTools.START_SUBAGENT.value,
-                    result=response or tsu.trajectory_id,
-                )
-                await self._hook_runner.dispatch_post_tool_call(op_ctx, result)
             else:
               # Parent trajectory went idle.
               self._parent_idle = True
@@ -1088,6 +1037,19 @@ class LocalConnection(connection.Connection):
                 await self._step_queue.put(
                     types.AntigravityExecutionError(tsu.error)
                 )
+
+          elif (
+              tsu.state
+              == localharness_pb2.TrajectoryStateUpdate.State.STATE_CANCELLED
+          ):
+            # The turn was rejected (e.g. by a PreTurn hook DENY).
+            # Queue an error so receive_steps() raises it on the correct
+            # turn, then mark idle.
+            msg = tsu.error if tsu.HasField("error") else "Turn cancelled"
+            await self._step_queue.put(types.AntigravityExecutionError(msg))
+            if not self._is_idle.is_set():
+              self._is_idle.set()
+              await self._step_queue.put(_IDLE_SENTINEL)
 
         elif event.HasField("tool_call"):
           self._run_in_background(self._handle_tool_call(event.tool_call))
@@ -1139,9 +1101,7 @@ class LocalConnection(connection.Connection):
       ]
 
       if self._hook_runner and questions_list:
-        ctx = self._current_turn_context or hooks.TurnContext(
-            self._hook_runner.session_context
-        )
+        ctx = self._get_turn_context()
         _, question_res, _ = await self._hook_runner.dispatch_interaction(
             turn_context=ctx,
             interaction_spec=types.AskQuestionInteractionSpec(
@@ -1218,7 +1178,7 @@ class LocalConnection(connection.Connection):
       args = {}
       found_action = False
 
-      for tool_enum, proto_field in _BUILTIN_TOOL_PROTO_FIELDS.items():
+      for tool_enum, proto_field in BUILTIN_TOOL_PROTO_FIELDS.items():
         if step_update.HasField(proto_field):
           action_str = tool_enum.value
           found_action = True
@@ -1262,9 +1222,7 @@ class LocalConnection(connection.Connection):
       if tc.name == DEFAULT_HOST_TOOL_NAME:
         allow = True
       elif self._hook_runner:
-        ctx = self._current_turn_context or hooks.TurnContext(
-            self._hook_runner.session_context
-        )
+        ctx = self._get_turn_context()
         res, _, op_ctx = await self._hook_runner.dispatch_pre_tool_call(
             turn_context=ctx, tool_call=tc
         )
@@ -1274,9 +1232,7 @@ class LocalConnection(connection.Connection):
       # when the step transitions to STATE_DONE.
       if allow and tc.name != DEFAULT_HOST_TOOL_NAME and self._hook_runner:
         if op_ctx is None:
-          ctx = self._current_turn_context or hooks.TurnContext(
-              self._hook_runner.session_context
-          )
+          ctx = self._get_turn_context()
           op_ctx = hooks.OperationContext(ctx)
         pending_key = _PendingCallKey(
             trajectory_id=step_update.trajectory_id,
@@ -1334,9 +1290,7 @@ class LocalConnection(connection.Connection):
       op_context = None
 
       if self._hook_runner:
-        ctx = self._current_turn_context or hooks.TurnContext(
-            self._hook_runner.session_context
-        )
+        ctx = self._get_turn_context()
         res, tc, op_context = await self._hook_runner.dispatch_pre_tool_call(
             turn_context=ctx, tool_call=tc
         )
@@ -1388,13 +1342,6 @@ class LocalConnection(connection.Connection):
                 name=tool_call.name,
                 result=recovery_val,
             )
-
-        # Dispatch post-tool-call hook on success.
-        elif not result.error and self._hook_runner:
-          if not op_context:
-            op_context = hooks.OperationContext(self._get_turn_context())
-          await self._hook_runner.dispatch_post_tool_call(op_context, result)
-
         await self._send_tool_results([result])
       else:
         logging.warning(
@@ -1759,6 +1706,9 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
         search_web=localharness_pb2.SearchWebToolConfig(
             enabled=types.BuiltinTools.SEARCH_WEB in active_tools
         ),
+        read_url_content=localharness_pb2.ReadUrlContentToolConfig(
+            enabled=types.BuiltinTools.READ_URL_CONTENT in active_tools
+        ),
     )
 
   def _build_custom_subagents_protos(
@@ -1847,11 +1797,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
         _to_mcp_server_proto(s) for s in self._mcp_servers or []
     ]
 
-    enabled_hooks = []
-    if self._hook_runner and self._hook_runner.on_session_start_hooks:
-      enabled_hooks.append(localharness_pb2.LIFECYCLE_HOOK_ON_SESSION_START)
-    if self._hook_runner and self._hook_runner.on_session_end_hooks:
-      enabled_hooks.append(localharness_pb2.LIFECYCLE_HOOK_ON_SESSION_END)
+    enabled_hooks = self._get_enabled_hooks()
 
     custom_agents_protos = self._build_custom_subagents_protos(
         main_agent_tool_protos
@@ -1876,6 +1822,47 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
         enabled_hooks=enabled_hooks,
         custom_subagents=custom_agents_protos,
     )
+
+  def _get_enabled_hooks(self) -> list[Any]:
+    """Returns a list of proto enum IDs for registered hook collections."""
+    enabled_hooks = []
+    if not self._hook_runner:
+      return enabled_hooks
+
+    hook_mapping = [
+        (
+            self._hook_runner.on_session_start_hooks,
+            localharness_pb2.LIFECYCLE_HOOK_ON_SESSION_START,
+        ),
+        (
+            self._hook_runner.on_session_end_hooks,
+            localharness_pb2.LIFECYCLE_HOOK_ON_SESSION_END,
+        ),
+        (
+            self._hook_runner.pre_turn_hooks,
+            localharness_pb2.LIFECYCLE_HOOK_PRE_TURN,
+        ),
+        (
+            self._hook_runner.post_turn_hooks,
+            localharness_pb2.LIFECYCLE_HOOK_POST_TURN,
+        ),
+        (
+            self._hook_runner.pre_tool_call_decide_hooks,
+            localharness_pb2.LIFECYCLE_HOOK_PRE_TOOL,
+        ),
+        (
+            self._hook_runner.post_tool_call_hooks,
+            localharness_pb2.LIFECYCLE_HOOK_POST_TOOL,
+        ),
+        (
+            self._hook_runner.on_tool_error_hooks,
+            localharness_pb2.LIFECYCLE_HOOK_ON_TOOL_ERROR,
+        ),
+    ]
+    for hooks_list, hook_type in hook_mapping:
+      if hooks_list:
+        enabled_hooks.append(hook_type)
+    return enabled_hooks
 
   def connect(self) -> connection.Connection:
     """Returns the established Connection."""

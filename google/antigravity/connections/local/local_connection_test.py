@@ -246,6 +246,31 @@ class LocalConnectionTest(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(len(steps), 1)
     self.assertEqual(steps[0].content, "I'm working")
 
+  async def test_receive_steps_mcp_load_failure(self):
+    harness = self._make_harness()
+
+    await harness.conn.send("Hello")
+    init_data = await harness.wait_for_response()
+    self.assertEqual(init_data.get("userInput"), "Hello")
+
+    # Send an error indicating MCP failure.
+    event = localharness_pb2.OutputEvent(
+        trajectory_state_update=localharness_pb2.TrajectoryStateUpdate(
+            trajectory_id="my_cascade",
+            state=localharness_pb2.TrajectoryStateUpdate.STATE_IDLE,
+            error="MCP load failed for dead_server: connection refused",
+        )
+    )
+    await harness.send_event(event)
+    await harness.close_from_harness_side()
+
+    with self.assertRaisesRegex(
+        types.AntigravityExecutionError,
+        "MCP load failed for dead_server: connection refused",
+    ):
+      async for _ in harness.conn.receive_steps():
+        pass
+
   def test_local_connection_step_from_dict(self):
     """Tests that LocalConnectionStep maps fields correctly."""
     step_dict = {
@@ -418,14 +443,37 @@ class LocalConnectionTest(unittest.IsolatedAsyncioTestCase):
     )
 
     await harness.conn.send("Hello")
+    await harness.send_event(
+        localharness_pb2.OutputEvent(
+            call_hook_request=localharness_pb2.CallHookRequest(
+                request_id="req_deny",
+                name="PreTurn",
+                type=localharness_pb2.LIFECYCLE_HOOK_PRE_TURN,
+                pre_turn_args=localharness_pb2.PreTurnArgs(
+                    user_input=localharness_pb2.UserInput(
+                        parts=[localharness_pb2.UserInput.Part(text="Hello")]
+                    )
+                ),
+            )
+        )
+    )
 
-    steps = []
-    async for step in harness.conn.receive_steps():
-      steps.append(step)
+    # The harness emits STATE_CANCELLED when the PreTurn hook denies.
+    await harness.send_event(
+        localharness_pb2.OutputEvent(
+            trajectory_state_update=localharness_pb2.TrajectoryStateUpdate(
+                trajectory_id="test",
+                state=localharness_pb2.TrajectoryStateUpdate.State.STATE_CANCELLED,
+                error="Denied by hook",
+            )
+        )
+    )
 
-    self.assertEqual(len(steps), 1)
-    self.assertEqual(steps[0].status, types.StepStatus.CANCELED)
-    self.assertEqual(steps[0].error, "Denied by hook")
+    with self.assertRaises(types.AntigravityExecutionError) as ctx:
+      async for _ in harness.conn.receive_steps():
+        pass
+
+    self.assertIn("Denied by hook", str(ctx.exception))
 
   async def test_send_none_dispatches_turn_hook_with_empty_string(self):
     hr = hook_runner.HookRunner()
@@ -446,6 +494,21 @@ class LocalConnectionTest(unittest.IsolatedAsyncioTestCase):
     )
 
     await harness.conn.send(None)
+    await harness.send_event(
+        localharness_pb2.OutputEvent(
+            call_hook_request=localharness_pb2.CallHookRequest(
+                request_id="req_none",
+                name="PreTurn",
+                type=localharness_pb2.LIFECYCLE_HOOK_PRE_TURN,
+                pre_turn_args=localharness_pb2.PreTurnArgs(
+                    user_input=localharness_pb2.UserInput(
+                        parts=[localharness_pb2.UserInput.Part(text="")]
+                    )
+                ),
+            )
+        )
+    )
+    await asyncio.sleep(0.05)
     self.assertEqual(captured, [""])
 
   async def test_tool_hook_deny(self):
@@ -1161,7 +1224,7 @@ class LocalConnectionTest(unittest.IsolatedAsyncioTestCase):
     It also verifies that wait_for_idle supports multiple concurrent callers.
     """
     harness = self._make_harness()
-    harness.conn._cascade_id = "parent_traj"
+    harness.conn._main_trajectory_id = "parent_traj"
     harness.conn._is_idle.clear()
     harness.conn._parent_idle = False
 
@@ -1834,6 +1897,7 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
     self.assertTrue(config.harness_side_tools.grep_search.enabled)
     self.assertTrue(config.harness_side_tools.list_dir.enabled)
     self.assertTrue(config.harness_side_tools.search_web.enabled)
+    self.assertTrue(config.harness_side_tools.read_url_content.enabled)
 
   def test_capabilities_config_enabled_tools(self):
     """Verifies that enabled_tools allowlist excludes non-listed tools.
@@ -1861,6 +1925,9 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
         grep_search=localharness_pb2.GrepSearchToolConfig(enabled=False),
         list_dir=localharness_pb2.ListDirToolConfig(enabled=False),
         search_web=localharness_pb2.SearchWebToolConfig(enabled=False),
+        read_url_content=localharness_pb2.ReadUrlContentToolConfig(
+            enabled=False
+        ),
     )
 
     self.assertEqual(config.harness_side_tools, expected_harness_side_tools)
@@ -2187,6 +2254,47 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
     self.assertEqual(
         strategy._workspaces, ["/dev/shm/workspace", "/tmp/clean-path"]
     )
+
+  def test_mcp_servers_propagated(self):
+    """Verifies that mcp_servers are correctly serialized to HarnessConfig."""
+    mcp_servers = [
+        types.McpStreamableHttpServer(
+            name="my_http_server",
+            url="http://localhost:8080/mcp",
+            headers={"Authorization": "Bearer token123"},
+            timeout_seconds=30,
+        ),
+        types.McpStdioServer(
+            name="my_stdio_server",
+            command="node",
+            args=["server.js"],
+            env={"NODE_ENV": "production"},
+            timeout_seconds=10,
+        ),
+    ]
+    strategy = self._make_strategy(mcp_servers=mcp_servers)
+    config = strategy._build_harness_config()
+
+    self.assertLen(config.mcp_servers, 2)
+
+    # Assert HTTP server fields
+    http_server = config.mcp_servers[0]
+    self.assertEqual(http_server.name, "my_http_server")
+    self.assertTrue(http_server.HasField("http"))
+    self.assertEqual(http_server.http.url, "http://localhost:8080/mcp")
+    self.assertEqual(
+        http_server.http.headers["Authorization"], "Bearer token123"
+    )
+    self.assertEqual(http_server.timeout_seconds, 30)
+
+    # Assert Stdio server fields
+    stdio_server = config.mcp_servers[1]
+    self.assertEqual(stdio_server.name, "my_stdio_server")
+    self.assertTrue(stdio_server.HasField("stdio"))
+    self.assertEqual(stdio_server.stdio.command, "node")
+    self.assertEqual(stdio_server.stdio.args, ["server.js"])
+    self.assertEqual(stdio_server.stdio.env["NODE_ENV"], "production")
+    self.assertEqual(stdio_server.timeout_seconds, 10)
 
 
 class LocalConnectionStrategyApiKeyTest(unittest.IsolatedAsyncioTestCase):
@@ -2578,6 +2686,19 @@ class LocalConnectionPostTurnHookTest(unittest.IsolatedAsyncioTestCase):
         )
     )
     await harness.send_event(idle_event)
+    await harness.send_event(
+        localharness_pb2.OutputEvent(
+            call_hook_request=localharness_pb2.CallHookRequest(
+                request_id="post_req_1",
+                name="PostTurn",
+                type=localharness_pb2.LIFECYCLE_HOOK_POST_TURN,
+                post_turn_args=localharness_pb2.PostTurnArgs(
+                    response_text="Final answer"
+                ),
+            )
+        )
+    )
+    await asyncio.sleep(0.05)
 
     # Drain receive_steps to trigger terminal detection + hook dispatch.
     steps = []
@@ -2711,6 +2832,19 @@ class LocalConnectionPostTurnHookTest(unittest.IsolatedAsyncioTestCase):
     await harness.send_event(env_event)
     await harness.send_event(user_event)
     await harness.send_event(idle_event)
+    await harness.send_event(
+        localharness_pb2.OutputEvent(
+            call_hook_request=localharness_pb2.CallHookRequest(
+                request_id="post_req_2",
+                name="PostTurn",
+                type=localharness_pb2.LIFECYCLE_HOOK_POST_TURN,
+                post_turn_args=localharness_pb2.PostTurnArgs(
+                    response_text="Final answer"
+                ),
+            )
+        )
+    )
+    await asyncio.sleep(0.05)
 
     steps = []
     async for step in harness.conn.receive_steps():
@@ -2811,90 +2945,6 @@ class LocalConnectionSubagentHookTest(unittest.IsolatedAsyncioTestCase):
     # Drain the queue to inspect the step.
     step = await asyncio.wait_for(harness.conn._step_queue.get(), timeout=2.0)
     self.assertEqual(step.type, types.StepType.TOOL_CALL)
-
-  async def test_post_tool_hook_on_subagent_trajectory_idle(self):
-    """Verifies post-tool-call hook fires when a non-main trajectory goes idle."""
-    hook_event = asyncio.Event()
-    captured = []
-
-    class PostToolHook(hooks_base.PostToolCallHook):
-
-      async def run(self, context, data):  # pylint: disable=unused-argument
-        captured.append(data)
-        hook_event.set()
-
-    hr = hook_runner.HookRunner()
-    hr.register_hook(PostToolHook())
-
-    harness = test_utils.TestLocalHarness(
-        test_case=self,
-        process=self.mock_process,
-        hook_runner=hr,
-    )
-
-    # Establish the cascade_id via a parent trajectory step
-    # (cascade_id == trajectory_id).
-    main_step = localharness_pb2.OutputEvent(
-        step_update=localharness_pb2.StepUpdate(
-            cascade_id="main_traj",
-            step_index=0,
-            trajectory_id="main_traj",
-            text="Main step",
-            state=localharness_pb2.StepUpdate.STATE_ACTIVE,
-            source=localharness_pb2.StepUpdate.SOURCE_MODEL,
-        )
-    )
-    await harness.send_event(main_step)
-    # Wait for it to be processed by draining queue
-    await asyncio.wait_for(harness.conn._step_queue.get(), timeout=2.0)
-
-    self.assertEqual(harness.conn._cascade_id, "main_traj")
-
-    # Simulate a subagent model step with text (may arrive as ACTIVE first).
-    sub_active = localharness_pb2.OutputEvent(
-        step_update=localharness_pb2.StepUpdate(
-            cascade_id="main_traj",
-            trajectory_id="sub_traj",
-            step_index=0,
-            text="Here is a poem about nature.",
-            state=localharness_pb2.StepUpdate.STATE_ACTIVE,
-            source=localharness_pb2.StepUpdate.SOURCE_MODEL,
-            target=localharness_pb2.StepUpdate.TARGET_USER,
-        )
-    )
-    await harness.send_event(sub_active)
-    # Wait for it to be processed by draining queue
-    await asyncio.wait_for(harness.conn._step_queue.get(), timeout=2.0)
-
-    # Now simulate the subagent trajectory going idle.
-    idle_event = localharness_pb2.OutputEvent(
-        trajectory_state_update=localharness_pb2.TrajectoryStateUpdate(
-            trajectory_id="sub_traj",
-            state=localharness_pb2.TrajectoryStateUpdate.STATE_IDLE,
-        )
-    )
-    await harness.send_event(idle_event)
-    await harness.wait_for_event(hook_event)
-
-    self.assertEqual(len(captured), 1)
-    self.assertIsInstance(captured[0], types.ToolResult)
-    self.assertEqual(captured[0].name, types.BuiltinTools.START_SUBAGENT.value)
-    self.assertEqual(captured[0].result, "Here is a poem about nature.")
-
-    # Main trajectory idle should NOT fire post-tool hook for subagent.
-    main_idle = localharness_pb2.OutputEvent(
-        trajectory_state_update=localharness_pb2.TrajectoryStateUpdate(
-            trajectory_id="main_traj",
-            state=localharness_pb2.TrajectoryStateUpdate.STATE_IDLE,
-        )
-    )
-    await harness.send_event(main_idle)
-
-    # Wait a tiny bit to ensure it didn't fire
-    await asyncio.sleep(0.01)
-
-    # Still only 1 capture.
-    self.assertEqual(len(captured), 1)
 
   async def test_ws_reader_parses_usage_metadata(self):
     """Verifies that _ws_reader_loop parses and attaches usage_metadata to steps."""
@@ -3065,13 +3115,11 @@ class LocalConnectionSubagentHookTest(unittest.IsolatedAsyncioTestCase):
 
     # Pollute tracking state.
     harness.conn._active_subagent_ids.add("leftover")
-    harness.conn._subagent_responses["leftover"] = "stale response"
     harness.conn._parent_idle = True
 
     await harness.conn.send("new turn")
 
     self.assertEqual(harness.conn._active_subagent_ids, set())
-    self.assertEqual(harness.conn._subagent_responses, {})
     self.assertFalse(harness.conn._parent_idle)
     self.assertFalse(harness.conn._is_idle.is_set())
 
@@ -3083,50 +3131,6 @@ class LocalConnectionToolCallHooksTest(unittest.IsolatedAsyncioTestCase):
     super().setUp()
     self.mock_process = mock.MagicMock()
     self.mock_ws = test_utils.TestWebSocket()
-
-  async def test_post_tool_call_hook_dispatched(self):
-    """Verifies PostToolCallHook fires after successful tool execution."""
-    hook_event = asyncio.Event()
-    captured_results = []
-
-    class PostToolHook(hooks_base.PostToolCallHook):
-
-      async def run(self, context, data):  # pylint: disable=unused-argument
-        captured_results.append(data)
-        hook_event.set()
-
-    tr = tool_runner.ToolRunner()
-
-    async def echo_handler(**kwargs):
-      return json.dumps({"echo": kwargs})
-
-    tr.register(echo_handler, "echo_tool")
-
-    hr = hook_runner.HookRunner()
-    hr.register_hook(PostToolHook())
-
-    harness = test_utils.TestLocalHarness(
-        test_case=self,
-        process=self.mock_process,
-        tool_runner=tr,
-        hook_runner=hr,
-    )
-
-    event = localharness_pb2.OutputEvent(
-        tool_call=localharness_pb2.ToolCall(
-            id="call_1",
-            name="echo_tool",
-            arguments_json='{"msg": "hi"}',
-        )
-    )
-
-    await harness.send_event(event)
-    await harness.wait_for_event(hook_event)
-
-    self.assertEqual(len(captured_results), 1)
-    self.assertIsInstance(captured_results[0], types.ToolResult)
-    self.assertEqual(captured_results[0].name, "echo_tool")
-    self.assertEqual(captured_results[0].result, '{"echo": {"msg": "hi"}}')
 
   async def test_on_tool_error_hook_with_recovery(self):
     """Verifies OnToolErrorHook can provide recovery values on tool failure."""
@@ -4166,16 +4170,16 @@ class LocalAgentConfigWorkspaceTest(
 
 
 class LocalConnectionBuiltinToolHooksTest(unittest.IsolatedAsyncioTestCase):
-  """Tests for PostToolCallHook / OnToolErrorHook dispatch for built-in tools.
+  """Tests for built-in tool STATE_DONE/STATE_ERROR cleanup.
 
   Built-in tools (run_command, list_directory, etc.) execute inside the Go
-  harness and report results via StepUpdate proto messages over WebSocket.
-  The SDK tracks approved tool calls via _pending_builtin_tool_calls and
-  dispatches PostToolCallHook (on STATE_DONE) or OnToolErrorHook (on
-  STATE_ERROR) with structured results extracted by _extract_tool_result().
+  harness. PostToolCallHook is now dispatched by Go via CallHookRequest (tested
+  in hook_router_test.py). The Python SDK tracks approved tool calls via
+  _pending_builtin_tool_calls to handle STATE_ERROR (OnToolErrorHook, to be
+  migrated in a follow-up CL).
 
-  These tests simulate the full confirmation→completion lifecycle for each
-  built-in tool type, verifying that hooks receive the correct typed result.
+  These tests verify that STATE_DONE properly cleans up the pending tracking
+  without Python-side hook dispatch.
   """
 
   def setUp(self):
@@ -4234,315 +4238,32 @@ class LocalConnectionBuiltinToolHooksTest(unittest.IsolatedAsyncioTestCase):
         )
     )
 
-  async def _run_post_hook_test(
-      self,
-      confirm_kwargs,
-      done_kwargs,
-      expected_name,
-      expected_type,
-      assertions_fn,
-  ):
-    """Runs the confirm→done→assert pattern for a PostToolCallHook test.
-
-    Args:
-      confirm_kwargs: kwargs for _make_confirm_event (action fields).
-      done_kwargs: kwargs for _make_done_event (action + result fields).
-      expected_name: Expected ToolResult.name value.
-      expected_type: Expected type of ToolResult.result.
-      assertions_fn: Callable(result) for type-specific assertions.
-    """
-    hook_event = asyncio.Event()
-    captured = []
-
-    class PostHook(hooks_base.PostToolCallHook):  # pylint: disable=unused-argument
-
-      async def run(self, context, data):
-        captured.append(data)
-        hook_event.set()
-
+  async def test_builtin_tool_done_cleans_up_pending_tracking(self):
+    """Verifies that STATE_DONE properly cleans up pending tool call tracking."""
     hr = hook_runner.HookRunner()
-    hr.register_hook(PostHook())
     harness = self._make_harness(hr)
 
-    confirm = self._make_confirm_event(0, "traj", **confirm_kwargs)
-    done = self._make_done_event(0, "traj", **done_kwargs)
+    confirm = self._make_confirm_event(
+        0,
+        "traj",
+        run_command=localharness_pb2.ActionRunCommand(command_line="echo hi"),
+    )
+    done = self._make_done_event(
+        0,
+        "traj",
+        run_command=localharness_pb2.ActionRunCommand(
+            command_line="echo hi", combined_output="hi\n"
+        ),
+    )
     sent_data = await self._confirm_and_complete(harness, confirm, done)
     self.assertTrue(sent_data["toolConfirmation"]["accepted"])
 
-    await harness.wait_for_event(hook_event)
+    await asyncio.sleep(0.1)
 
-    self.assertEqual(len(captured), 1)
-    result = captured[0]
-    self.assertEqual(result.name, expected_name)
-    if expected_type is not None:
-      self.assertIsInstance(result.result, expected_type)
-    assertions_fn(result)
-
-  # ---- Per-tool-type tests ----
-
-  async def test_tool_result_for_run_command(self):
-    """Verifies PostToolCallHook receives RunCommandResult for run_command.
-
-    What: PostToolCallHook receives a RunCommandResult with combined_output.
-    Why: run_command is the most common built-in tool; its stdout/stderr must
-         be available to hooks for logging, auditing, and policy enforcement.
-    How: Simulate approval + STATE_DONE with combined_output set; assert the
-         hook receives RunCommandResult with the correct output string.
-    """
-    from google.antigravity.connections.local import types as local_types  # pylint: disable=g-import-not-at-top
-
-    await self._run_post_hook_test(
-        confirm_kwargs=dict(
-            run_command=localharness_pb2.ActionRunCommand(
-                command_line="echo hello",
-            ),
-        ),
-        done_kwargs=dict(
-            run_command=localharness_pb2.ActionRunCommand(
-                command_line="echo hello",
-                combined_output="hello\n",
-            ),
-        ),
-        expected_name=types.BuiltinTools.RUN_COMMAND.value,
-        expected_type=local_types.RunCommandResult,
-        assertions_fn=lambda r: self.assertEqual(r.result.output, "hello\n"),
-    )
-
-  async def test_tool_result_for_list_directory(self):
-    """Verifies PostToolCallHook receives ListDirectoryResult for list_dir.
-
-    What: PostToolCallHook receives a ListDirectoryResult with structured
-          directory entries.
-    Why: list_directory returns structured entry data (name, is_directory,
-         file_size) via Result sub-messages, unlike tools that return raw text.
-         This tests the most complex extraction branch in _extract_tool_result.
-    How: Simulate approval + STATE_DONE with two Result entries; assert the
-         hook receives ListDirectoryResult with correctly parsed entries.
-    """
-    from google.antigravity.connections.local import types as local_types  # pylint: disable=g-import-not-at-top
-
-    await self._run_post_hook_test(
-        confirm_kwargs=dict(
-            list_directory=localharness_pb2.ActionListDirectory(
-                directory_path="/tmp/test",
-            ),
-        ),
-        done_kwargs=dict(
-            list_directory=localharness_pb2.ActionListDirectory(
-                directory_path="/tmp/test",
-                results=[
-                    localharness_pb2.ActionListDirectory.Result(
-                        name="foo.py", file_size=100
-                    ),
-                    localharness_pb2.ActionListDirectory.Result(
-                        name="bar", is_directory=True
-                    ),
-                ],
-            ),
-        ),
-        expected_name=types.BuiltinTools.LIST_DIR.value,
-        expected_type=local_types.ListDirectoryResult,
-        assertions_fn=lambda r: (
-            self.assertEqual(len(r.result.entries), 2),
-            self.assertEqual(r.result.entries[0].name, "foo.py"),
-        ),
-    )
-
-  async def test_tool_result_for_find_file(self):
-    """Verifies PostToolCallHook receives FindFileResult for find_file.
-
-    What: PostToolCallHook receives a FindFileResult with raw find output.
-    Why: find_file returns a newline-separated list of matching file paths.
-         Hooks may use this for auditing which files were discovered.
-    How: Simulate approval + STATE_DONE with output set; assert the hook
-         receives FindFileResult with the correct output string.
-    """
-    from google.antigravity.connections.local import types as local_types  # pylint: disable=g-import-not-at-top
-
-    await self._run_post_hook_test(
-        confirm_kwargs=dict(
-            find_file=localharness_pb2.ActionFindFile(
-                directory_path="/tmp/searchdir",
-                query="target.txt",
-            ),
-        ),
-        done_kwargs=dict(
-            find_file=localharness_pb2.ActionFindFile(
-                directory_path="/tmp/searchdir",
-                query="target.txt",
-                output="/tmp/searchdir/target.txt",
-            ),
-        ),
-        expected_name=types.BuiltinTools.FIND_FILE.value,
-        expected_type=local_types.FindFileResult,
-        assertions_fn=lambda r: self.assertEqual(
-            r.result.output, "/tmp/searchdir/target.txt"
-        ),
-    )
-
-  async def test_tool_result_for_search_directory(self):
-    """Verifies PostToolCallHook receives SearchDirectoryResult for grep_search.
-
-    What: PostToolCallHook receives a SearchDirectoryResult with num_results.
-    Why: search_directory (grep_search) returns a count of matching results.
-         Hooks may use this for observability (e.g. "search found N results").
-    How: Simulate approval + STATE_DONE with num_results=3; assert the hook
-         receives SearchDirectoryResult with the correct count.
-    """
-    from google.antigravity.connections.local import types as local_types  # pylint: disable=g-import-not-at-top
-
-    await self._run_post_hook_test(
-        confirm_kwargs=dict(
-            search_directory=localharness_pb2.ActionSearchDirectory(
-                directory_path="/tmp",
-                query="hello",
-            ),
-        ),
-        done_kwargs=dict(
-            search_directory=localharness_pb2.ActionSearchDirectory(
-                directory_path="/tmp",
-                query="hello",
-                num_results=3,
-            ),
-        ),
-        expected_name=types.BuiltinTools.SEARCH_DIR.value,
-        expected_type=local_types.SearchDirectoryResult,
-        assertions_fn=lambda r: self.assertEqual(r.result.num_results, 3),
-    )
-
-  async def test_tool_result_for_edit_file(self):
-    """Verifies PostToolCallHook receives EditFileResult for edit_file.
-
-    What: PostToolCallHook receives an EditFileResult with a text summary.
-    Why: edit_file returns diff blocks; _extract_tool_result checks for the
-         presence of diff_block and falls back to step_update.text for the
-         summary. This tests the diff_block detection branch.
-    How: Simulate approval + STATE_DONE with a diff_block set and text
-         containing the summary; assert EditFileResult has the summary.
-    """
-    from google.antigravity.connections.local import types as local_types  # pylint: disable=g-import-not-at-top
-
-    await self._run_post_hook_test(
-        confirm_kwargs=dict(
-            edit_file=localharness_pb2.ActionEditFile(
-                file_path="/tmp/file.py",
-            ),
-        ),
-        done_kwargs=dict(
-            text="Applied 2 edits to /tmp/file.py",
-            edit_file=localharness_pb2.ActionEditFile(
-                file_path="/tmp/file.py",
-                diff_block=[
-                    localharness_pb2.ActionEditFile.DiffBlock(
-                        start_line=0,
-                        end_line=1,
-                        lines=[
-                            localharness_pb2.ActionEditFile.DiffLine(
-                                text="+ new line",
-                                action=localharness_pb2.ActionEditFile.DiffLine.LINE_ACTION_INSERT,
-                            ),
-                        ],
-                    ),
-                ],
-            ),
-        ),
-        expected_name=types.BuiltinTools.EDIT_FILE.value,
-        expected_type=local_types.EditFileResult,
-        assertions_fn=lambda r: self.assertIn(
-            "Applied 2 edits", r.result.summary
-        ),
-    )
-
-  async def test_tool_result_for_generate_image(self):
-    """Verifies PostToolCallHook receives GenerateImageResult for generate_image.
-
-    What: PostToolCallHook receives a GenerateImageResult with image_name.
-    Why: generate_image returns the name of the generated image file. Hooks
-         may use this for asset tracking or post-processing.
-    How: Simulate approval + STATE_DONE with image_name set; assert the hook
-         receives GenerateImageResult with the correct image name.
-    """
-    from google.antigravity.connections.local import types as local_types  # pylint: disable=g-import-not-at-top
-
-    await self._run_post_hook_test(
-        confirm_kwargs=dict(
-            generate_image=localharness_pb2.ActionGenerateImage(
-                prompt="sunset photo",
-            ),
-        ),
-        done_kwargs=dict(
-            generate_image=localharness_pb2.ActionGenerateImage(
-                prompt="sunset photo",
-                image_name="sunset_photo",
-                aspect_ratio="16:9",
-            ),
-        ),
-        expected_name=types.BuiltinTools.GENERATE_IMAGE.value,
-        expected_type=local_types.GenerateImageResult,
-        assertions_fn=lambda r: (
-            self.assertEqual(r.result.image_name, "sunset_photo"),
-            self.assertEqual(r.result.aspect_ratio, "16:9"),
-        ),
-    )
-
-  async def test_tool_result_for_search_web(self):
-    """Verifies PostToolCallHook receives SearchWebResult for search_web.
-
-    What: PostToolCallHook receives a SearchWebResult with summary.
-    Why: search_web returns a summary of web search results. Hooks
-         may use this for logging or auditing search queries.
-    How: Simulate approval + STATE_DONE with summary set; assert the hook
-         receives SearchWebResult with the correct summary and verify string
-         representation.
-    """
-    from google.antigravity.connections.local import types as local_types  # pylint: disable=g-import-not-at-top
-
-    await self._run_post_hook_test(
-        confirm_kwargs=dict(
-            search_web=localharness_pb2.ActionSearchWeb(
-                query="google news",
-            ),
-        ),
-        done_kwargs=dict(
-            search_web=localharness_pb2.ActionSearchWeb(
-                query="google news",
-                summary="google news search results",
-            ),
-        ),
-        expected_name=types.BuiltinTools.SEARCH_WEB.value,
-        expected_type=local_types.SearchWebResult,
-        assertions_fn=lambda r: (
-            self.assertEqual(r.result.summary, "google news search results"),
-            self.assertEqual(str(r.result), "google news search results"),
-        ),
-    )
-
-  async def test_tool_result_fallback_for_view_file(self):
-    """Verifies PostToolCallHook falls back to step text for view_file.
-
-    What: PostToolCallHook receives step text (not a structured result) for
-          tools without structured result fields (e.g. view_file).
-    Why: view_file has no result-bearing fields in the proto (ActionViewFile
-         only has file_path and line range). _extract_tool_result returns None,
-         so the dispatch falls back to step_obj.content (the step text).
-    How: Simulate approval + STATE_DONE with text but no structured result
-         field; assert the hook receives the text string as the result.
-    """
-    await self._run_post_hook_test(
-        confirm_kwargs=dict(
-            view_file=localharness_pb2.ActionViewFile(
-                file_path="/tmp/file.py",
-            ),
-        ),
-        done_kwargs=dict(
-            text="File viewing",
-            view_file=localharness_pb2.ActionViewFile(
-                file_path="/tmp/file.py",
-            ),
-        ),
-        expected_name=types.BuiltinTools.VIEW_FILE.value,
-        expected_type=None,  # Falls back to text string, not typed result.
-        assertions_fn=lambda r: self.assertIsInstance(r.result, str),
+    step_key = ("traj", 0)
+    self.assertNotIn(
+        step_key,
+        harness.conn._pending_builtin_tool_calls,
     )
 
   # ---- Error path ----
