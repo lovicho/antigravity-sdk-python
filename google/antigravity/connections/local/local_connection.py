@@ -29,7 +29,7 @@ import struct
 import subprocess
 import sys
 import threading
-from typing import Any, AsyncIterator, Callable, NamedTuple, Sequence, cast
+from typing import Any, AsyncIterator, Callable, Sequence, cast
 import urllib.parse
 import urllib.request
 
@@ -122,20 +122,6 @@ def _get_mcp_tool_name(server_name: str, tool_name: str) -> str:
 
 _IDLE_SENTINEL = object()
 _CLOSE_SENTINEL = None
-
-
-class _PendingCallKey(NamedTuple):
-  """Key for tracking approved built-in tool calls."""
-
-  trajectory_id: str
-  step_index: int
-
-
-class _PendingCallValue(NamedTuple):
-  """Value for tracking approved built-in tool calls."""
-
-  tool_call: types.ToolCall
-  operation_context: hooks.OperationContext
 
 
 def _extract_tool_result(
@@ -578,14 +564,6 @@ class LocalConnection(connection.Connection):
     self._stderr_thread: threading.Thread | None = None
     self._is_receiving: bool = False
 
-    # Tracks builtin tool calls that were approved via ToolConfirmation,
-    # keyed by (trajectory_id, step_index). When the step transitions to
-    # STATE_DONE or STATE_ERROR, we dispatch PostToolCallHook or
-    # OnToolErrorHook respectively.
-    self._pending_builtin_tool_calls: dict[
-        _PendingCallKey, _PendingCallValue
-    ] = {}
-
   @property
   def is_idle(self) -> bool:
     """Returns True if the connection is idle and ready for input."""
@@ -940,32 +918,6 @@ class LocalConnection(connection.Connection):
               and step_obj.trajectory_id
               and step_obj.trajectory_id != self._main_trajectory_id
           )
-          # TODO(abhipatel): Post-tool hook for STATE_DONE is now dispatched by
-          # the harness via CallHookRequest. Only STATE_ERROR tracking remains
-          # for the on_tool_error hook (to be migrated in a follow-up).
-          if (
-              step_key in self._pending_builtin_tool_calls
-              and step_update.state
-              == localharness_pb2.StepUpdate.State.STATE_DONE
-          ):
-            # Remove the pending entry — harness already fired the post-tool
-            # hook.
-            self._pending_builtin_tool_calls.pop(step_key)
-          elif (
-              step_key in self._pending_builtin_tool_calls
-              and step_update.state
-              == localharness_pb2.StepUpdate.State.STATE_ERROR
-          ):
-            _, op_ctx = self._pending_builtin_tool_calls.pop(step_key)
-            if self._hook_runner:
-              error = RuntimeError(
-                  step_update.error_message
-                  or step_obj.content
-                  or "Built-in tool failed"
-              )
-              self._run_in_background(
-                  self._hook_runner.dispatch_on_tool_error(op_ctx, error)
-              )
 
           # 4. Process wait requests if this is a wait state
           if (
@@ -1228,21 +1180,6 @@ class LocalConnection(connection.Connection):
         )
         allow = res.allow
 
-      # Track approved built-in tool calls so we can dispatch PostToolCallHook
-      # when the step transitions to STATE_DONE.
-      if allow and tc.name != DEFAULT_HOST_TOOL_NAME and self._hook_runner:
-        if op_ctx is None:
-          ctx = self._get_turn_context()
-          op_ctx = hooks.OperationContext(ctx)
-        pending_key = _PendingCallKey(
-            trajectory_id=step_update.trajectory_id,
-            step_index=step_update.step_index,
-        )
-        self._pending_builtin_tool_calls[pending_key] = _PendingCallValue(
-            tool_call=tc,
-            operation_context=op_ctx,
-        )
-
       await self._send_tool_confirmation(step_update, allow)
     except Exception:  # pylint: disable=broad-except
       # The protocol requires a response to avoid deadlocking the harness.
@@ -1308,18 +1245,13 @@ class LocalConnection(connection.Connection):
           return
 
       if self._tool_runner:
-        tool_error: Exception | None = None
         try:
           results = await self._tool_runner.process_tool_calls(
               [types.ToolCall(name=tc.name, args=tc.args)]
           )
           result = results[0]
           result.id = tool_call.id
-          # ToolRunner may catch exceptions internally and set result.error.
-          if result.error:
-            tool_error = result.exception or RuntimeError(result.error)
         except Exception as e:  # pylint: disable=broad-except
-          tool_error = e
           result = types.ToolResult(
               id=tool_call.id,
               name=tool_call.name,
@@ -1327,21 +1259,6 @@ class LocalConnection(connection.Connection):
               exception=e,
           )
 
-        # Dispatch on-tool-error hook when the result carries an error.
-        if tool_error and self._hook_runner:
-          if not op_context:
-            op_context = hooks.OperationContext(self._get_turn_context())
-          recovery_res, recovery_val = (
-              await self._hook_runner.dispatch_on_tool_error(
-                  op_context, tool_error
-              )
-          )
-          if recovery_res.allow and recovery_val is not None:
-            result = types.ToolResult(
-                id=tool_call.id,
-                name=tool_call.name,
-                result=recovery_val,
-            )
         await self._send_tool_results([result])
       else:
         logging.warning(
@@ -1398,10 +1315,16 @@ class LocalConnection(connection.Connection):
             " LocalConnection protocol requires an id to correlate results"
             " with calls."
         )
-      response = localharness_pb2.ToolResponse(
-          id=result.id,
-          response_json=json.dumps(self._tool_result_to_dict(result)),
-      )
+      if result.error is not None:
+        response = localharness_pb2.ToolResponse(
+            id=result.id,
+            error_message=result.error,
+        )
+      else:
+        response = localharness_pb2.ToolResponse(
+            id=result.id,
+            response_json=json.dumps(self._tool_result_to_dict(result)),
+        )
       input_event = localharness_pb2.InputEvent(tool_response=response)
       await self._ws.send(json_format.MessageToJson(input_event))
 

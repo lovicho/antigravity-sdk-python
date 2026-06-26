@@ -14,6 +14,7 @@
 
 """Routes lifecycle hook requests from the local harness to Python SDK hook handlers."""
 
+import json
 import logging
 from typing import Any, Callable, Coroutine
 
@@ -92,6 +93,9 @@ class HookRouter:
         localharness_pb2.LIFECYCLE_HOOK_PRE_TURN: self._handle_pre_turn,
         localharness_pb2.LIFECYCLE_HOOK_POST_TURN: self._handle_post_turn,
         localharness_pb2.LIFECYCLE_HOOK_POST_TOOL: self._handle_post_tool,
+        localharness_pb2.LIFECYCLE_HOOK_ON_TOOL_ERROR: (
+            self._handle_on_tool_error
+        ),
     }
 
   @property
@@ -178,6 +182,38 @@ class HookRouter:
     op_ctx = hooks.OperationContext(turn_ctx)
     await self._hook_runner.dispatch_post_tool_call(op_ctx, tool_result)
     resp.empty_result.CopyFrom(localharness_pb2.EmptyResult())
+
+  async def _handle_on_tool_error(
+      self,
+      req: localharness_pb2.CallHookRequest,
+      resp: localharness_pb2.CallHookResponse,
+  ) -> None:
+    """Handles OnToolError lifecycle hooks dispatched by the Go harness."""
+    error_message = "Tool failed"
+    if req.HasField("on_tool_error_args"):
+      error_message = req.on_tool_error_args.error_message or error_message
+
+    error = RuntimeError(error_message)
+    turn_ctx = self._current_turn_context or hooks.TurnContext(
+        self._hook_runner.session_context
+    )
+    op_ctx = hooks.OperationContext(turn_ctx)
+    hook_result, recovery_val = await self._hook_runner.dispatch_on_tool_error(
+        op_ctx, error
+    )
+
+    if (
+        hook_result.allow
+        and isinstance(recovery_val, str)
+        and recovery_val.strip()
+    ):
+      resp.on_tool_error_result.CopyFrom(
+          localharness_pb2.OnToolErrorResult(
+              custom_error_message=recovery_val.strip(),
+          )
+      )
+    else:
+      resp.empty_result.CopyFrom(localharness_pb2.EmptyResult())
 
   async def handle(self, req: localharness_pb2.CallHookRequest) -> None:
     """Handles an incoming CallHookRequest and sends a CallHookResponse back to the harness."""

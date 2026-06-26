@@ -517,5 +517,119 @@ class HookRouterStructuredExtractionTest(absltest.TestCase):
     )
 
 
+class HookRouterOnToolErrorTest(absltest.TestCase):
+  """Verifies OnToolError hook dispatch and recovery through the HookRouter."""
+
+  def test_on_tool_error_no_recovery(self):
+
+    async def _test():
+      fired = asyncio.Event()
+      received_errors: list[Exception] = []
+
+      @hooks.on_tool_error
+      async def my_hook(data: Exception):
+        fired.set()
+        received_errors.append(data)
+        return None  # No recovery
+
+      hook_runner = h_runner.HookRunner(on_tool_error_hooks=[my_hook])
+      sent_events = []
+
+      async def mock_send(event: localharness_pb2.InputEvent):
+        sent_events.append(event)
+
+      router = HookRouter(hook_runner, mock_send)
+      req = localharness_pb2.CallHookRequest(
+          request_id="test_on_error",
+          name="OnToolError",
+          type=localharness_pb2.LIFECYCLE_HOOK_ON_TOOL_ERROR,
+          on_tool_error_args=localharness_pb2.OnToolErrorArgs(
+              tool_name="run_command",
+              error_message="command failed",
+          ),
+      )
+
+      await router.handle(req)
+
+      self.assertTrue(fired.is_set())
+      self.assertLen(received_errors, 1)
+      self.assertIsInstance(received_errors[0], RuntimeError)
+      self.assertEqual(str(received_errors[0]), "command failed")
+      self.assertLen(sent_events, 1)
+      resp = sent_events[0].call_hook_response
+      self.assertEqual(resp.request_id, "test_on_error")
+      self.assertTrue(resp.HasField("empty_result"))
+
+    asyncio.run(_test())
+
+  def test_on_tool_error_with_recovery(self):
+
+    async def _test():
+      fired = asyncio.Event()
+
+      @hooks.on_tool_error
+      async def my_hook(data: Exception):
+        fired.set()
+        return "fallback value"
+
+      hook_runner = h_runner.HookRunner(on_tool_error_hooks=[my_hook])
+      sent_events = []
+
+      async def mock_send(event: localharness_pb2.InputEvent):
+        sent_events.append(event)
+
+      router = HookRouter(hook_runner, mock_send)
+      req = localharness_pb2.CallHookRequest(
+          request_id="test_recovery",
+          name="OnToolError",
+          type=localharness_pb2.LIFECYCLE_HOOK_ON_TOOL_ERROR,
+          on_tool_error_args=localharness_pb2.OnToolErrorArgs(
+              tool_name="my_tool",
+              error_message="broken",
+          ),
+      )
+
+      await router.handle(req)
+
+      self.assertTrue(fired.is_set())
+      self.assertLen(sent_events, 1)
+      resp = sent_events[0].call_hook_response
+      self.assertEqual(resp.request_id, "test_recovery")
+      self.assertEqual(
+          resp.on_tool_error_result.custom_error_message, "fallback value"
+      )
+
+    asyncio.run(_test())
+
+  def test_on_tool_error_no_hooks_registered(self):
+
+    async def _test():
+      hook_runner = h_runner.HookRunner()
+      sent_events = []
+
+      async def mock_send(event: localharness_pb2.InputEvent):
+        sent_events.append(event)
+
+      router = HookRouter(hook_runner, mock_send)
+      req = localharness_pb2.CallHookRequest(
+          request_id="test_no_hooks",
+          name="OnToolError",
+          type=localharness_pb2.LIFECYCLE_HOOK_ON_TOOL_ERROR,
+          on_tool_error_args=localharness_pb2.OnToolErrorArgs(
+              tool_name="view_file",
+              error_message="file not found",
+          ),
+      )
+
+      await router.handle(req)
+
+      self.assertLen(sent_events, 1)
+      resp = sent_events[0].call_hook_response
+      self.assertEqual(resp.request_id, "test_no_hooks")
+      self.assertTrue(resp.HasField("empty_result"))
+
+    asyncio.run(_test())
+
+
 if __name__ == "__main__":
   absltest.main()

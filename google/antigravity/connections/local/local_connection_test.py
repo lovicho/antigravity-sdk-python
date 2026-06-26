@@ -542,7 +542,7 @@ class LocalConnectionTest(unittest.IsolatedAsyncioTestCase):
     self.assertIn("toolResponse", sent_data)
     resp = sent_data["toolResponse"]
     self.assertEqual(resp["id"], "call_1")
-    self.assertIn("Denied tool", resp["responseJson"])
+    self.assertIn("Denied tool", resp["errorMessage"])
 
   async def test_tool_confirmation_request_integration(self):
     hr = hook_runner.HookRunner()
@@ -3132,14 +3132,12 @@ class LocalConnectionToolCallHooksTest(unittest.IsolatedAsyncioTestCase):
     self.mock_process = mock.MagicMock()
     self.mock_ws = test_utils.TestWebSocket()
 
-  async def test_on_tool_error_hook_with_recovery(self):
-    """Verifies OnToolErrorHook can provide recovery values on tool failure."""
+  async def test_on_tool_error_sends_error_to_harness(self):
+    """Verifies that tool errors are sent back to the harness without recovery.
 
-    class RecoveringErrorHook(hooks_base.OnToolErrorHook):
-
-      async def run(self, context, data):  # pylint: disable=unused-argument
-        return "recovered_value"
-
+    OnToolError dispatch and recovery have been migrated to the Go harness
+    (dispatched via HookRouter). The Python SDK sends the error JSON as-is.
+    """
     tr = tool_runner.ToolRunner()
 
     async def failing_handler(**kwargs):
@@ -3147,14 +3145,10 @@ class LocalConnectionToolCallHooksTest(unittest.IsolatedAsyncioTestCase):
 
     tr.register(failing_handler, "failing_tool")
 
-    hr = hook_runner.HookRunner()
-    hr.register_hook(RecoveringErrorHook())
-
     harness = test_utils.TestLocalHarness(
         test_case=self,
         process=self.mock_process,
         tool_runner=tr,
-        hook_runner=hr,
     )
 
     event = localharness_pb2.OutputEvent(
@@ -3167,61 +3161,12 @@ class LocalConnectionToolCallHooksTest(unittest.IsolatedAsyncioTestCase):
 
     await harness.send_event(event)
 
-    # The recovery value should have been sent back.
+    # The error should be sent back as-is (no Python-side recovery).
     sent_data = await harness.wait_for_response()
     self.assertIn("toolResponse", sent_data)
-    self.assertIn("recovered_value", sent_data["toolResponse"]["responseJson"])
-
-  async def test_on_tool_error_hook_receives_original_exception_type(self):
-    """Verifies OnToolErrorHook receives the original exception, not wrapped.
-
-    Regression test for b/508736962: the hook should receive the original
-    ValueError (not a RuntimeError wrapping the error string) so that
-    isinstance-based dispatch works in hook implementations.
-    """
-    hook_event = asyncio.Event()
-    captured_errors = []
-
-    class CapturingErrorHook(hooks_base.OnToolErrorHook):
-
-      async def run(self, context, data):  # pylint: disable=unused-argument
-        captured_errors.append(data)
-        hook_event.set()
-        return "recovered"
-
-    tr = tool_runner.ToolRunner()
-
-    async def value_error_tool(**kwargs):
-      raise ValueError("bad input")
-
-    tr.register(value_error_tool, "value_error_tool")
-
-    hr = hook_runner.HookRunner()
-    hr.register_hook(CapturingErrorHook())
-
-    harness = test_utils.TestLocalHarness(
-        test_case=self,
-        process=self.mock_process,
-        tool_runner=tr,
-        hook_runner=hr,
+    self.assertIn(
+        "Intentional failure", sent_data["toolResponse"]["errorMessage"]
     )
-
-    event = localharness_pb2.OutputEvent(
-        tool_call=localharness_pb2.ToolCall(
-            id="call_typed",
-            name="value_error_tool",
-            arguments_json="{}",
-        )
-    )
-
-    await harness.send_event(event)
-    await harness.wait_for_event(hook_event)
-
-    self.assertEqual(len(captured_errors), 1)
-    # The hook must receive the original ValueError, not RuntimeError.
-    self.assertIsInstance(captured_errors[0], ValueError)
-    self.assertNotIsInstance(captured_errors[0], RuntimeError)
-    self.assertIn("bad input", str(captured_errors[0]))
 
 
 class LocalConnectionBuiltinDecideHookTest(unittest.IsolatedAsyncioTestCase):
@@ -4238,93 +4183,14 @@ class LocalConnectionBuiltinToolHooksTest(unittest.IsolatedAsyncioTestCase):
         )
     )
 
-  async def test_builtin_tool_done_cleans_up_pending_tracking(self):
-    """Verifies that STATE_DONE properly cleans up pending tool call tracking."""
-    hr = hook_runner.HookRunner()
-    harness = self._make_harness(hr)
-
-    confirm = self._make_confirm_event(
-        0,
-        "traj",
-        run_command=localharness_pb2.ActionRunCommand(command_line="echo hi"),
-    )
-    done = self._make_done_event(
-        0,
-        "traj",
-        run_command=localharness_pb2.ActionRunCommand(
-            command_line="echo hi", combined_output="hi\n"
-        ),
-    )
-    sent_data = await self._confirm_and_complete(harness, confirm, done)
-    self.assertTrue(sent_data["toolConfirmation"]["accepted"])
-
-    await asyncio.sleep(0.1)
-
-    step_key = ("traj", 0)
-    self.assertNotIn(
-        step_key,
-        harness.conn._pending_builtin_tool_calls,
-    )
-
-  # ---- Error path ----
-
-  async def test_on_tool_error_dispatched_for_builtin_error(self):
-    """Verifies OnToolErrorHook fires when a builtin tool transitions to STATE_ERROR.
-
-    What: OnToolErrorHook receives a RuntimeError with the harness error
-    message.
-    Why: Users need observability into builtin tool failures for logging and
-         recovery. The harness reports errors via STATE_ERROR transitions.
-    How: Simulate approval + STATE_ERROR with an error_message; assert the hook
-         receives a RuntimeError containing the message text.
-    """
-    hook_event = asyncio.Event()
-    captured_errors = []
-
-    class CapturingErrorHook(hooks_base.OnToolErrorHook):
-
-      async def run(self, context, data):  # pylint: disable=unused-argument
-        captured_errors.append(data)
-        hook_event.set()
-        return None
-
-    hr = hook_runner.HookRunner()
-    hr.register_hook(CapturingErrorHook())
-    harness = self._make_harness(hr)
-
-    confirm = self._make_confirm_event(
-        0,
-        "traj_err",
-        run_command=localharness_pb2.ActionRunCommand(
-            command_line="failing_cmd",
-        ),
-    )
-    error = localharness_pb2.OutputEvent(
-        step_update=localharness_pb2.StepUpdate(
-            step_index=0,
-            trajectory_id="traj_err",
-            cascade_id="traj_err",
-            state=localharness_pb2.StepUpdate.STATE_ERROR,
-            source=localharness_pb2.StepUpdate.SOURCE_MODEL,
-            error_message="Permission denied",
-        )
-    )
-    await self._confirm_and_complete(harness, confirm, error)
-    await harness.wait_for_event(hook_event)
-
-    self.assertEqual(len(captured_errors), 1)
-    self.assertIsInstance(captured_errors[0], RuntimeError)
-    self.assertIn("Permission denied", str(captured_errors[0]))
-
   # ---- Guard tests ----
 
   async def test_denied_builtin_not_tracked(self):
-    """Verifies denied builtin tools are not tracked for post-tool dispatch.
+    """Verifies denied builtin tools don't trigger post-tool dispatch.
 
     What: PostToolCallHook does NOT fire for denied built-in tool calls.
     Why: If a Decide hook denies a builtin tool, the harness rejects it and
-         there is no execution to observe. Tracking it would cause stale
-         entries in _pending_builtin_tool_calls or spurious dispatches.
+         there is no execution to observe.
     How: Deny via Decide hook, send a STATE_DONE for the same step, and
          verify PostToolCallHook was not called.
     """
@@ -4534,7 +4400,7 @@ class LocalConnectionExceptionSafetyTest(unittest.IsolatedAsyncioTestCase):
     self.assertIn("toolResponse", sent_data)
     resp = sent_data["toolResponse"]
     self.assertEqual(resp["id"], "call_123")
-    self.assertIn("Intentional tool execution hook crash", resp["responseJson"])
+    self.assertIn("Intentional tool execution hook crash", resp["errorMessage"])
 
 
 class LocalConnectionSerializationTest(unittest.IsolatedAsyncioTestCase):
