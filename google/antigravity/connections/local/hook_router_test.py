@@ -277,6 +277,54 @@ class HookRouterTest(absltest.TestCase):
 
     asyncio.run(_test())
 
+  def test_handle_post_tool_mcp(self):
+
+    async def _test():
+      fired = asyncio.Event()
+      received_data: list[Any] = []
+
+      @hooks.post_tool_call
+      async def my_hook(data: Any):
+        fired.set()
+        received_data.append(data)
+
+      hook_runner = h_runner.HookRunner(post_tool_call_hooks=[my_hook])
+      sent_events = []
+
+      async def mock_send(event: localharness_pb2.InputEvent):
+        sent_events.append(event)
+
+      router = HookRouter(hook_runner, mock_send)
+      su = localharness_pb2.StepUpdate(
+          mcp_tool=localharness_pb2.ActionMcpTool(
+              server_name="pirate_math",
+              tool_name="pirate_multiply",
+              arguments_json='{"a": 5, "b": 7}',
+          )
+      )
+      req = localharness_pb2.CallHookRequest(
+          request_id="test_post_tool_mcp",
+          name="PostTool",
+          type=localharness_pb2.LIFECYCLE_HOOK_POST_TOOL,
+          post_tool_args=localharness_pb2.PostToolArgs(
+              tool_name="pirate_multiply",
+              result="35",
+              step_update=su,
+          ),
+      )
+
+      await router.handle(req)
+
+      self.assertTrue(fired.is_set())
+      self.assertLen(received_data, 1)
+      tool_result = received_data[0]
+      self.assertEqual(tool_result.name, "pirate_multiply")
+      self.assertEqual(tool_result.server_name, "pirate_math")
+      self.assertEqual(tool_result.result, "35")
+      self.assertIsNone(tool_result.error)
+
+    asyncio.run(_test())
+
   def test_handle_post_tool_with_error(self):
 
     async def _test():

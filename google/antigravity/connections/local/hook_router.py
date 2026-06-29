@@ -160,6 +160,7 @@ class HookRouter:
       resp: localharness_pb2.CallHookResponse,
   ) -> None:
     tool_name = ""
+    server_name: str | None = None
     result_val: Any = None
     error_str = ""
     if req.HasField("post_tool_args"):
@@ -167,12 +168,21 @@ class HookRouter:
       tool_name = PROTO_FIELD_TO_SDK_NAME.get(pta.tool_name, pta.tool_name)
       result_val = pta.result if not pta.error else None
       error_str = pta.error
-      if pta.HasField("step_update") and self._extract_result:
-        extracted = self._extract_result(pta.step_update)
-        if extracted is not None:
-          result_val = extracted
+      if pta.HasField("step_update"):
+        su = pta.step_update
+        if su.HasField("mcp_tool"):
+          server_name = su.mcp_tool.server_name or None
+          if su.mcp_tool.tool_name:
+            tool_name = PROTO_FIELD_TO_SDK_NAME.get(
+                su.mcp_tool.tool_name, su.mcp_tool.tool_name
+            )
+        if self._extract_result:
+          extracted = self._extract_result(su)
+          if extracted is not None:
+            result_val = extracted
     tool_result = types.ToolResult(
         name=tool_name,
+        server_name=server_name,
         result=result_val,
         error=error_str or None,
     )
