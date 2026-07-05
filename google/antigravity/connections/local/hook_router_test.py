@@ -883,6 +883,23 @@ class HookRouterPreToolTest(absltest.TestCase):
           captured_tool_calls[0].args["file_path"], "/home/user/foo.py"
       )
 
+      req2 = localharness_pb2.CallHookRequest(
+          request_id="test_target_file_norm",
+          name="PreTool",
+          type=localharness_pb2.LIFECYCLE_HOOK_PRE_TOOL,
+          pre_tool_args=localharness_pb2.PreToolArgs(
+              tool_name="replace_file_content",
+              arguments_json='{"TargetFile": "file:///home/user/bar.py"}',
+          ),
+      )
+
+      await router.handle(req2)
+
+      self.assertLen(captured_tool_calls, 2)
+      self.assertEqual(
+          captured_tool_calls[1].args["TargetFile"], "/home/user/bar.py"
+      )
+
     asyncio.run(_test())
 
   def test_handle_pre_tool_mcp_server_name(self):

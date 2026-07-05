@@ -18,8 +18,6 @@ import asyncio
 import json
 import logging
 from typing import Any, Callable, Coroutine
-import urllib.parse
-import urllib.request
 
 from google.protobuf import json_format
 import pydantic
@@ -28,6 +26,8 @@ from google.antigravity import types
 from google.antigravity.connections.local import types as local_types
 from google.antigravity.connections.local.hook_router import HookRouter
 from google.antigravity.connections.local.local_connection_config import BUILTIN_TOOL_PROTO_FIELDS
+from google.antigravity.connections.local.local_connection_config import normalize_wire_path
+from google.antigravity.connections.local.local_connection_config import WIRE_PATH_ARGUMENT_KEYS
 from google.antigravity.hooks import hook_runner as h_runner
 from google.antigravity.hooks import hooks
 from google.antigravity.tools import tool_runner as t_runner
@@ -205,21 +205,6 @@ def _make_step_id(trajectory_id: str, step_index: int) -> str:
   return f"{trajectory_id}:{step_index}" if trajectory_id else str(step_index)
 
 
-def normalize_wire_path(path: str) -> str:
-  """Translates Go harness transport representations to clean absolute filesystem paths."""
-  parsed = urllib.parse.urlparse(path)
-  if parsed.scheme == "file":
-    # urlparse("file:///abs/path").path == "/abs/path"
-    # url2pathname converts URL path to platform-native path
-    return urllib.request.url2pathname(parsed.path)
-  if parsed.scheme == "cns":
-    # urlparse("cns://el-d/home/user/...").netloc == "el-d"
-    # urlparse("cns://el-d/home/user/...").path == "/home/user/..."
-    # Convert to the canonical /cns/<cell>/... absolute path format.
-    return "/cns/" + parsed.netloc + parsed.path
-  return path
-
-
 def _parse_usage_metadata(
     usage_metadata: localharness_pb2.UsageMetadata,
 ) -> types.UsageMetadata:
@@ -294,7 +279,7 @@ class LocalConnectionStep(types.Step):
     if active_tool_name:
       canonical_path = None
       # Sanitize all known file path argument fields in-place
-      for path_key in ("path", "file_path", "TargetFile", "directory_path"):
+      for path_key in WIRE_PATH_ARGUMENT_KEYS:
         if path_key in active_tool_args and isinstance(
             active_tool_args[path_key], str
         ):

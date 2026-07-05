@@ -58,6 +58,12 @@ PROTO_FIELD_TO_SDK_NAME: dict[str, str] = {
     v: k.value for k, v in BUILTIN_TOOL_PROTO_FIELDS.items()
 }
 
+# Argument keys in tool call JSON payloads that carry wire-format URIs
+# (file:///..., cns://...) and must be normalized to clean filesystem paths.
+WIRE_PATH_ARGUMENT_KEYS: frozenset[str] = frozenset(
+    {"path", "file_path", "directory_path", "TargetFile"}
+)
+
 
 def normalize_wire_path(path: str) -> str:
   """Translates wire-format URIs to clean absolute filesystem paths.

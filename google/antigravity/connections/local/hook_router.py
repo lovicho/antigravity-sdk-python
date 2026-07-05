@@ -22,6 +22,7 @@ from google.antigravity.connections.local import localharness_pb2
 from google.antigravity import types
 from google.antigravity.connections.local.local_connection_config import normalize_wire_path
 from google.antigravity.connections.local.local_connection_config import PROTO_FIELD_TO_SDK_NAME
+from google.antigravity.connections.local.local_connection_config import WIRE_PATH_ARGUMENT_KEYS
 from google.antigravity.hooks import hook_runner as hook_runner_lib
 from google.antigravity.hooks import hooks
 
@@ -59,13 +60,6 @@ def _from_proto_user_input(ui: localharness_pb2.UserInput) -> types.Content:
   return content_list
 
 
-# Path argument keys that carry wire-format URIs (file:///..., cns://...)
-# and must be normalized to clean absolute paths before reaching user hooks.
-# Mirrors the keys in local_connection.py's from_dict /
-# _handle_tool_confirmation_request.
-_PATH_FIELDS = frozenset({"path", "file_path", "directory_path"})
-
-
 def _normalize_path_args(args: dict[str, Any]) -> None:
   """Converts wire-format URIs to clean filesystem paths in-place.
 
@@ -73,7 +67,7 @@ def _normalize_path_args(args: dict[str, Any]) -> None:
   User hooks expect clean absolute paths (e.g. /home/user/file.py),
   so we normalize known path fields before dispatch.
   """
-  for key in _PATH_FIELDS:
+  for key in WIRE_PATH_ARGUMENT_KEYS:
     val = args.get(key)
     if isinstance(val, str) and val:
       args[key] = normalize_wire_path(val)
@@ -199,7 +193,7 @@ class HookRouter:
     # Derive canonical_path from the first normalized path field so that
     # workspace_only() policies can enforce path restrictions.
     canonical_path: str | None = None
-    for key in _PATH_FIELDS:
+    for key in WIRE_PATH_ARGUMENT_KEYS:
       val = args.get(key)
       if isinstance(val, str) and val:
         canonical_path = val
