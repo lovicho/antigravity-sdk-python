@@ -1774,7 +1774,7 @@ class LocalConnectionStrategyApiKeyTest(unittest.IsolatedAsyncioTestCase):
 
   @mock.patch.dict("os.environ", {}, clear=True)
   async def test_raises_without_auth_in_vertex_mode(self):
-    """Verifies strategy raises validation error when Vertex is set but no project/location or api_key provided."""
+    """Verifies strategy raises validation error when Vertex is set but no project/location provided."""
     models = [
         types.ModelTarget(
             name="gemini-3.5-flash",
@@ -1786,7 +1786,7 @@ class LocalConnectionStrategyApiKeyTest(unittest.IsolatedAsyncioTestCase):
     with self.assertRaises(types.AntigravityValidationError) as ctx:
       async with strategy:
         pass
-    self.assertIn("project and location, or an API key", str(ctx.exception))
+    self.assertIn("project and location must be set", str(ctx.exception))
 
   @mock.patch.dict("os.environ", {}, clear=True)
   @mock.patch("subprocess.Popen")

@@ -112,10 +112,7 @@ class VertexEndpoint(ModelEndpoint):
 
   def validate_endpoint(self) -> None:
     if not (self.project and self.location):
-      raise ValueError(
-          "For Vertex AI, a GCP project and location, or an API key (Express"
-          " Mode), must be set."
-      )
+      raise ValueError("For Vertex AI, a GCP project and location must be set.")
 
 
 class ModelTarget(pydantic.BaseModel):
