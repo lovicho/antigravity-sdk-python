@@ -630,6 +630,59 @@ class LiteRTConnectionTest(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(strategy._model_name, "llama3.2")
     self.assertEqual(strategy._base_url, "http://custom-ollama:11434/v1")
 
+  @mock.patch.object(litert_connection.litert_server, "_LITERT_AVAILABLE", True)
+  def test_openai_tool_base_class_inheritance(self):
+    """Verify OpenAITool inherits from litert_lm.Tool when litert_lm is available."""
+    mock_tool_base = type("Tool", (object,), {})
+    with mock.patch.object(
+        litert_connection.litert_server, "litert_lm"
+    ) as mock_lm:
+      mock_lm.Tool = mock_tool_base
+      # Re-evaluate class with mocked litert_lm.Tool
+      tool = litert_connection.litert_server.OpenAITool({"name": "foo"})
+      self.assertEqual(tool.get_tool_description(), {"name": "foo"})
+
+  async def test_litert_engine_max_num_tokens_param(self):
+    """Verify max_num_tokens (not max_context_tokens) is passed to litert_lm.Engine."""
+    config = litert_connection_config.LiteRTAgentConfig(
+        model_path="/dummy/path.litertlm",
+        max_context_tokens=4096,
+    )
+    strategy = config.create_strategy(
+        tool_runner=mock.MagicMock(),
+        hook_runner=mock.MagicMock(),
+    )
+    mock_engine_cls = mock.MagicMock()
+    mock_engine_inst = mock.MagicMock()
+    mock_engine_cls.return_value = mock_engine_inst
+    mock_engine_inst.__enter__.return_value = mock.MagicMock()
+
+    with mock.patch.object(
+        litert_connection, "litert_lm"
+    ) as mock_lm, mock.patch.object(
+        litert_connection.litert_server, "LiteRTOpenAIServer"
+    ), mock.patch.object(
+        litert_connection, "_urlopen_no_proxy"
+    ) as mock_urlopen, mock.patch(
+        "os.path.exists", return_value=True
+    ):
+      mock_resp = mock.MagicMock()
+      mock_resp.status = 200
+      mock_resp.__enter__.return_value = mock_resp
+      mock_urlopen.return_value = mock_resp
+      mock_lm.Engine = mock_engine_cls
+      mock_lm.Backend.CPU.return_value = "CPU"
+      try:
+        await strategy.__aenter__()
+      finally:
+        await strategy.__aexit__(None, None, None)
+
+      mock_engine_cls.assert_called_once()
+      _, kwargs = mock_engine_cls.call_args
+      self.assertIn("max_num_tokens", kwargs)
+      self.assertNotIn("max_context_tokens", kwargs)
+      self.assertEqual(kwargs["max_num_tokens"], 4096)
+
 
 if __name__ == "__main__":
   unittest.main()

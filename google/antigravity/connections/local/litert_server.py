@@ -21,8 +21,17 @@ import threading
 import time
 from typing import Any, cast
 
+try:
+  # pylint: disable=g-import-not-at-top
+  import litert_lm  # type: ignore[import-error]
 
-class OpenAITool:
+  _LITERT_AVAILABLE = True
+except ImportError:
+  litert_lm = None  # type: ignore[assignment]
+  _LITERT_AVAILABLE = False
+
+
+class OpenAITool(litert_lm.Tool if _LITERT_AVAILABLE else object):  # type: ignore[misc]
   """Wrapper around LiteRT Tool representing an OpenAPI/Workspace tool."""
 
   def __init__(self, description: dict[str, Any]):
@@ -33,16 +42,6 @@ class OpenAITool:
 
   def execute(self, param: Any) -> Any:
     raise NotImplementedError("Proxy tools are not executable.")
-
-
-try:
-  # pylint: disable=g-import-not-at-top
-  import litert_lm  # type: ignore[import-error]
-
-  _LITERT_AVAILABLE = True
-except ImportError:
-  litert_lm = None  # type: ignore[assignment]
-  _LITERT_AVAILABLE = False
 
 
 class LiteRTOpenAIServer(http.server.ThreadingHTTPServer):

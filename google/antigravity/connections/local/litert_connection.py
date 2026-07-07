@@ -186,7 +186,7 @@ class LiteRTConnectionStrategy(LocalOpenAIConnectionStrategy):
           cache_dir=self._cache_dir,
           audio_backend=engine_audio,
           vision_backend=engine_vision,
-          max_context_tokens=self._max_context_tokens,
+          max_num_tokens=self._max_context_tokens,
       )
       self._engine_context = self._engine.__enter__()
 

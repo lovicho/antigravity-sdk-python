@@ -22,6 +22,7 @@ from typing import Any, Callable, Coroutine, cast
 from google.protobuf import json_format
 import pydantic
 
+from google.antigravity.connections.local import localharness_pb2
 from google.antigravity import types
 from google.antigravity.connections.local import types as local_types
 from google.antigravity.connections.local.hook_router import HookRouter
