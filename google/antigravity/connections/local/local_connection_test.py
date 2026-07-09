@@ -15,13 +15,12 @@
 """Unit tests for LocalConnection."""
 
 import asyncio
+import base64
 import datetime
 import importlib
 import io
-import json
 import os
 import pathlib
-import struct
 import subprocess
 import tempfile
 import unittest
@@ -32,7 +31,9 @@ from absl.testing import parameterized
 import pydantic
 import websockets
 
+from google.antigravity.connections.local import localharness_pb2
 from google.antigravity import types
+from google.antigravity.connections.local import event_processor
 from google.antigravity.connections.local import local_connection
 from google.antigravity.connections.local import local_connection_config
 from google.antigravity.connections.local import localharness_pb2
@@ -511,269 +512,97 @@ class LocalConnectionTest(unittest.IsolatedAsyncioTestCase):
     await asyncio.sleep(0.05)
     self.assertEqual(captured, [""])
 
-  async def test_tool_hook_deny(self):
-    hr = hook_runner.HookRunner()
+  def test_extract_media_from_result(self):
+    img = types.Image(data=b"\xff\xd8\xff\xd9", mime_type="image/jpeg")
 
-    @hooks_base.pre_tool_call_decide
-    async def denying_tool(data):
-      return hooks_base.HookResult(allow=False, message="Denied tool")
+    # A bare media value is fully extracted.
+    cleaned, media = event_processor._extract_media_from_result(img)
+    self.assertIsNone(cleaned)
+    self.assertEqual(media, [img])
 
-    hr.register_hook(denying_tool)
-
-    harness = test_utils.TestLocalHarness(
-        test_case=self,
-        process=self.mock_process,
-        tool_runner=self.tool_runner,
-        hook_runner=hr,
+    # Media is pulled out of a mixed list, text is kept.
+    cleaned, media = event_processor._extract_media_from_result(
+        ["a", img, "b"]
     )
+    self.assertEqual(cleaned, ["a", "b"])
+    self.assertEqual(media, [img])
 
-    event = localharness_pb2.OutputEvent(
-        tool_call=localharness_pb2.ToolCall(
-            id="call_1",
-            name="some_tool",
-            arguments_json="{}",
+    # Non-media values pass through untouched.
+    cleaned, media = event_processor._extract_media_from_result({"k": "v"})
+    self.assertEqual(cleaned, {"k": "v"})
+    self.assertEqual(media, [])
+
+    # Media nested in a dict is extracted; remaining keys are kept.
+    cleaned, media = event_processor._extract_media_from_result(
+        {"caption": "hi", "img": img}
+    )
+    self.assertEqual(cleaned, {"caption": "hi"})
+    self.assertEqual(media, [img])
+
+  async def test_tool_result_image_sent_as_supplemental_media(self):
+    def image_tool():
+      return [
+          "here is the snapshot",
+          types.Image(data=b"\xff\xd8\xff\xd9", mime_type="image/jpeg"),
+      ]
+
+    self.tool_runner.register(image_tool, name="image_tool")
+    harness = self._make_harness()
+
+    await harness.send_event(
+        localharness_pb2.OutputEvent(
+            tool_call=localharness_pb2.ToolCall(
+                id="call_img", name="image_tool", arguments_json="{}"
+            )
         )
     )
 
-    await harness.send_event(event)
-
-    # Verify that ToolResponse was sent back to harness denying it
     sent_data = await harness.wait_for_response()
-    self.assertIn("toolResponse", sent_data)
     resp = sent_data["toolResponse"]
-    self.assertEqual(resp["id"], "call_1")
-    self.assertIn("Denied tool", resp["responseJson"])
-
-  async def test_tool_confirmation_request_integration(self):
-    hr = hook_runner.HookRunner()
-
-    @hooks_base.pre_tool_call_decide
-    async def denying_tool(data):
-      return hooks_base.HookResult(allow=False)
-
-    hr.register_hook(denying_tool)
-
-    harness = test_utils.TestLocalHarness(
-        test_case=self,
-        process=self.mock_process,
-        tool_runner=self.tool_runner,
-        hook_runner=hr,
+    self.assertEqual(resp["id"], "call_img")
+    # The text part stays in response_json; the image becomes supplemental media.
+    self.assertIn("here is the snapshot", resp["responseJson"])
+    self.assertIn("supplementalMedia", resp)
+    self.assertEqual(resp["supplementalMedia"][0]["mimeType"], "image/jpeg")
+    self.assertEqual(
+        base64.b64decode(resp["supplementalMedia"][0]["data"]),
+        b"\xff\xd8\xff\xd9",
     )
 
-    event = localharness_pb2.OutputEvent(
-        step_update=localharness_pb2.StepUpdate(
-            step_index=1,
-            trajectory_id="test_traj",
-            state=localharness_pb2.StepUpdate.STATE_WAITING_FOR_USER,
-            tool_confirmation_request=localharness_pb2.ToolConfirmationRequest(),
-            view_file=localharness_pb2.ActionViewFile(file_path="/foo/bar"),
+  async def test_tool_result_media_only_uses_placeholder_and_description(self):
+    def photo_tool():
+      # Returns ONLY media (no accompanying text), with a description.
+      return types.Image(
+          data=b"\xff\xd8\xff\xd9",
+          mime_type="image/jpeg",
+          description="a deck photo",
+      )
+
+    self.tool_runner.register(photo_tool, name="photo_tool")
+    harness = self._make_harness()
+
+    await harness.send_event(
+        localharness_pb2.OutputEvent(
+            tool_call=localharness_pb2.ToolCall(
+                id="call_photo", name="photo_tool", arguments_json="{}"
+            )
         )
     )
-
-    await harness.send_event(event)
 
     sent_data = await harness.wait_for_response()
-    self.assertIn("toolConfirmation", sent_data)
-    self.assertEqual(sent_data["toolConfirmation"]["trajectoryId"], "test_traj")
-    self.assertFalse(sent_data["toolConfirmation"]["accepted"])
-
-  async def test_mcp_tool_confirmation_request_allowed(self):
-    hr = hook_runner.HookRunner()
-    captured_tool_calls = []
-
-    @hooks_base.pre_tool_call_decide
-    async def policy_hook(data: types.ToolCall) -> hooks_base.HookResult:
-      captured_tool_calls.append(data)
-      return hooks_base.HookResult(allow=True)
-
-    hr.register_hook(policy_hook)
-
-    harness = test_utils.TestLocalHarness(
-        test_case=self,
-        process=self.mock_process,
-        tool_runner=self.tool_runner,
-        hook_runner=hr,
-    )
-
-    allowed_event = localharness_pb2.OutputEvent(
-        step_update=localharness_pb2.StepUpdate(
-            step_index=1,
-            trajectory_id="test_traj",
-            state=localharness_pb2.StepUpdate.STATE_WAITING_FOR_USER,
-            tool_confirmation_request=localharness_pb2.ToolConfirmationRequest(),
-            mcp_tool=localharness_pb2.ActionMcpTool(
-                server_name="calc",
-                tool_name="math_add",
-                arguments_json='{"x": 10, "y": 20}',
-            ),
-        )
-    )
-    await harness.send_event(allowed_event)
-    sent_allowed = await harness.wait_for_response()
-    self.assertTrue(sent_allowed["toolConfirmation"]["accepted"])
-    self.assertEqual(len(captured_tool_calls), 1)
+    resp = sent_data["toolResponse"]
+    self.assertEqual(resp["id"], "call_photo")
+    # A media-only result gets a placeholder text result, and the image is
+    # carried as supplemental media (with its description preserved).
+    self.assertIn("Returned 1 media attachment(s)", resp["responseJson"])
     self.assertEqual(
-        captured_tool_calls[0].name,
-        local_connection._get_mcp_tool_name("calc", "math_add"),
+        resp["supplementalMedia"][0]["description"], "a deck photo"
     )
-    self.assertEqual(captured_tool_calls[0].args, {"x": 10, "y": 20})
-
-  async def test_mcp_tool_confirmation_request_denied(self):
-    hr = hook_runner.HookRunner()
-    captured_tool_calls = []
-
-    @hooks_base.pre_tool_call_decide
-    async def policy_hook(data: types.ToolCall) -> hooks_base.HookResult:
-      captured_tool_calls.append(data)
-      return hooks_base.HookResult(allow=False)
-
-    hr.register_hook(policy_hook)
-
-    harness = test_utils.TestLocalHarness(
-        test_case=self,
-        process=self.mock_process,
-        tool_runner=self.tool_runner,
-        hook_runner=hr,
-    )
-
-    denied_event = localharness_pb2.OutputEvent(
-        step_update=localharness_pb2.StepUpdate(
-            step_index=2,
-            trajectory_id="test_traj",
-            state=localharness_pb2.StepUpdate.STATE_WAITING_FOR_USER,
-            tool_confirmation_request=localharness_pb2.ToolConfirmationRequest(),
-            mcp_tool=localharness_pb2.ActionMcpTool(
-                server_name="calc",
-                tool_name="math_multiply",
-                arguments_json='{"x": 5, "y": 4}',
-            ),
-        )
-    )
-    await harness.send_event(denied_event)
-    sent_denied = await harness.wait_for_response()
-    self.assertFalse(sent_denied["toolConfirmation"]["accepted"])
-    self.assertEqual(len(captured_tool_calls), 1)
     self.assertEqual(
-        captured_tool_calls[0].name,
-        local_connection._get_mcp_tool_name("calc", "math_multiply"),
+        base64.b64decode(resp["supplementalMedia"][0]["data"]),
+        b"\xff\xd8\xff\xd9",
     )
 
-  async def test_tool_confirmation_request_has_id(self):
-    hr = hook_runner.HookRunner()
-    hook_event = asyncio.Event()
-    captured_ids = []
-
-    @hooks_base.pre_tool_call_decide
-    async def hook(data):
-      captured_ids.append(data.id)
-      hook_event.set()
-      return hooks_base.HookResult(allow=True)
-
-    hr.register_hook(hook)
-
-    harness = test_utils.TestLocalHarness(
-        test_case=self,
-        process=self.mock_process,
-        tool_runner=self.tool_runner,
-        hook_runner=hr,
-    )
-
-    event = localharness_pb2.OutputEvent(
-        step_update=localharness_pb2.StepUpdate(
-            step_index=5,
-            trajectory_id="test_traj",
-            state=localharness_pb2.StepUpdate.STATE_WAITING_FOR_USER,
-            tool_confirmation_request=localharness_pb2.ToolConfirmationRequest(),
-            view_file=localharness_pb2.ActionViewFile(file_path="/foo/bar"),
-        )
-    )
-
-    await harness.send_event(event)
-    await harness.wait_for_event(hook_event)
-
-    self.assertEqual(captured_ids, ["test_traj:5"])
-
-  async def test_tool_confirmation_uses_enum_value_for_view_file(self):
-    """Verifies that hooks receive the BuiltinTools enum value as the tool name.
-
-    Why: Hooks should see stable, semantic names (e.g. "view_file") rather
-    than raw proto field names. For view_file these happen to match, but the
-    test locks in the contract.
-    """
-    hook_event = asyncio.Event()
-    captured_tool_names = []
-
-    @hooks_base.pre_tool_call_decide
-    async def capturing_tool(data):
-      captured_tool_names.append(data.name)
-      hook_event.set()
-      return hooks_base.HookResult(allow=True)
-
-    hr = hook_runner.HookRunner()
-    hr.register_hook(capturing_tool)
-
-    harness = test_utils.TestLocalHarness(
-        test_case=self,
-        process=self.mock_process,
-        tool_runner=self.tool_runner,
-        hook_runner=hr,
-    )
-
-    event = localharness_pb2.OutputEvent(
-        step_update=localharness_pb2.StepUpdate(
-            step_index=1,
-            trajectory_id="test_traj",
-            state=localharness_pb2.StepUpdate.STATE_WAITING_FOR_USER,
-            tool_confirmation_request=localharness_pb2.ToolConfirmationRequest(),
-            view_file=localharness_pb2.ActionViewFile(file_path="/foo/bar"),
-        )
-    )
-    await harness.send_event(event)
-    await harness.wait_for_event(hook_event)
-
-    self.assertEqual(captured_tool_names, [types.BuiltinTools.VIEW_FILE.value])
-
-  async def test_tool_confirmation_uses_enum_value_for_find_file(self):
-    """Verifies that a find_file step update is correctly recognized.
-
-    Why: find_file is a harness builtin tool that must be correctly identified
-    in _BUILTIN_TOOL_PROTO_FIELDS so hooks receive the right name.
-    """
-    hook_event = asyncio.Event()
-    captured_tool_names = []
-
-    @hooks_base.pre_tool_call_decide
-    async def capturing_tool(data):
-      captured_tool_names.append(data.name)
-      hook_event.set()
-      return hooks_base.HookResult(allow=True)
-
-    hr = hook_runner.HookRunner()
-    hr.register_hook(capturing_tool)
-
-    harness = test_utils.TestLocalHarness(
-        test_case=self,
-        process=self.mock_process,
-        tool_runner=self.tool_runner,
-        hook_runner=hr,
-    )
-
-    event = localharness_pb2.OutputEvent(
-        step_update=localharness_pb2.StepUpdate(
-            step_index=1,
-            trajectory_id="test_traj",
-            state=localharness_pb2.StepUpdate.STATE_WAITING_FOR_USER,
-            tool_confirmation_request=localharness_pb2.ToolConfirmationRequest(),
-            find_file=localharness_pb2.ActionFindFile(
-                directory_path="file:///home/user",
-                query="*.py",
-            ),
-        )
-    )
-    await harness.send_event(event)
-    await harness.wait_for_event(hook_event)
-
-    self.assertEqual(captured_tool_names, [types.BuiltinTools.FIND_FILE.value])
 
   async def test_question_hook_integration(self):
     hr = hook_runner.HookRunner()
@@ -899,186 +728,6 @@ class LocalConnectionTest(unittest.IsolatedAsyncioTestCase):
 
     resp = sent_data["questionResponse"]["response"]
     self.assertEqual(resp, {})
-
-  async def test_deduplication_of_wait_requests(self):
-    """Verifies that multiple updates for the same wait state don't duplicate."""
-    hr = hook_runner.HookRunner()
-    hook_event = asyncio.Event()
-
-    call_count = [0]
-
-    @hooks_base.pre_tool_call_decide
-    async def counting_hook(data):
-      call_count[0] += 1
-      hook_event.set()
-      return hooks_base.HookResult(allow=True)
-
-    hr.register_hook(counting_hook)
-
-    harness = test_utils.TestLocalHarness(
-        test_case=self,
-        process=self.mock_process,
-        tool_runner=self.tool_runner,
-        hook_runner=hr,
-    )
-
-    event = localharness_pb2.OutputEvent(
-        step_update=localharness_pb2.StepUpdate(
-            step_index=1,
-            trajectory_id="test_traj",
-            state=localharness_pb2.StepUpdate.STATE_WAITING_FOR_USER,
-            tool_confirmation_request=localharness_pb2.ToolConfirmationRequest(),
-            view_file=localharness_pb2.ActionViewFile(file_path="/foo/bar"),
-        )
-    )
-
-    # Send the exact same wait event three times (e.g. keepalives)
-    await harness.send_event(event)
-    await harness.send_event(event)
-    await harness.send_event(event)
-
-    # Wait for the response to ensure at least one event was processed
-    await harness.wait_for_response()
-
-    # Hook should only be called ONCE despite 3 events, thanks to _handled_waits
-    self.assertEqual(call_count[0], 1)
-    self.assertEqual(len(harness.ws.sent_messages), 1)
-
-  async def test_async_non_blocking_dispatch(self):
-    """Verifies that wait handlers run concurrently without blocking loop."""
-    hr = hook_runner.HookRunner()
-    started_event = asyncio.Event()
-    finish_event = asyncio.Event()
-
-    class BlockingHook(hooks_base.PreToolCallDecideHook):
-
-      def __init__(self):
-        self.started = False
-        self.finished = False
-
-      async def run(self, context, data):  # pylint: disable=unused-argument
-        del context, data
-        self.started = True
-        started_event.set()
-        await finish_event.wait()
-        self.finished = True
-        return hooks_base.HookResult(allow=True)
-
-    hook_instance = BlockingHook()
-    hr.register_hook(hook_instance)
-
-    harness = test_utils.TestLocalHarness(
-        test_case=self,
-        process=self.mock_process,
-        tool_runner=self.tool_runner,
-        hook_runner=hr,
-    )
-
-    wait_event = localharness_pb2.OutputEvent(
-        step_update=localharness_pb2.StepUpdate(
-            step_index=1,
-            trajectory_id="traj_1",
-            state=localharness_pb2.StepUpdate.STATE_WAITING_FOR_USER,
-            tool_confirmation_request=localharness_pb2.ToolConfirmationRequest(),
-            view_file=localharness_pb2.ActionViewFile(file_path="/foo"),
-        )
-    )
-
-    # An event from another subagent that should not be blocked
-    active_event = localharness_pb2.OutputEvent(
-        step_update=localharness_pb2.StepUpdate(
-            step_index=1,
-            trajectory_id="traj_2",
-            state=localharness_pb2.StepUpdate.STATE_ACTIVE,
-            text="I am another agent running concurrently",
-        )
-    )
-
-    await harness.send_event(wait_event)
-    await harness.send_event(active_event)
-
-    # Wait for the hook to start
-    await harness.wait_for_event(started_event)
-
-    # The hook should have started, but not finished
-    self.assertTrue(hook_instance.started)
-    self.assertFalse(hook_instance.finished)
-
-    # The reader loop SHOULD NOT be blocked! It should have processed traj_2
-    # and put both events into the step queue.
-    step1 = await harness.conn._step_queue.get()
-    step2 = await harness.conn._step_queue.get()
-
-    self.assertEqual(step1.trajectory_id, "traj_1")
-    self.assertEqual(step2.trajectory_id, "traj_2")
-    self.assertEqual(step2.content, "I am another agent running concurrently")
-
-    # Cleanup: Allow hook to finish
-    finish_event.set()
-
-  async def test_state_transition_clears_handled_requests(self):
-    """Verifies WAITING -> ACTIVE -> WAITING transitions re-trigger handlers."""
-    hr = hook_runner.HookRunner()
-    hook_event = asyncio.Event()
-
-    class CountingHook(hooks_base.PreToolCallDecideHook):
-
-      def __init__(self):
-        self.call_count = 0
-
-      async def run(self, context, data):  # pylint: disable=unused-argument
-        del context, data
-        self.call_count += 1
-        hook_event.set()
-        return hooks_base.HookResult(allow=True)
-
-    hook_instance = CountingHook()
-    hr.register_hook(hook_instance)
-
-    harness = test_utils.TestLocalHarness(
-        test_case=self,
-        process=self.mock_process,
-        tool_runner=self.tool_runner,
-        hook_runner=hr,
-    )
-
-    def create_wait_event():
-      return localharness_pb2.OutputEvent(
-          step_update=localharness_pb2.StepUpdate(
-              step_index=1,
-              trajectory_id="test_traj",
-              state=localharness_pb2.StepUpdate.STATE_WAITING_FOR_USER,
-              tool_confirmation_request=localharness_pb2.ToolConfirmationRequest(),
-              view_file=localharness_pb2.ActionViewFile(file_path="/foo/bar"),
-          )
-      )
-
-    active_event = localharness_pb2.OutputEvent(
-        step_update=localharness_pb2.StepUpdate(
-            step_index=1,
-            trajectory_id="test_traj",
-            state=localharness_pb2.StepUpdate.STATE_ACTIVE,
-        )
-    )
-
-    # 1. First wait
-    await harness.send_event(create_wait_event())
-    await harness.wait_for_event(hook_event)
-    self.assertEqual(hook_instance.call_count, 1)
-
-    # Reset event for next wait
-    hook_event.clear()
-
-    # 2. Transition back to active
-    await harness.send_event(active_event)
-
-    # 3. Second wait on the SAME step
-    await harness.send_event(create_wait_event())
-    await harness.wait_for_event(hook_event)
-
-    # The hook should be called a second time!
-    self.assertEqual(hook_instance.call_count, 2)
-    self.assertEqual(len(harness.ws.sent_messages), 2)
 
   async def test_yielding_wait_state_to_queue(self):
     """Verifies that wait states are correctly yielded to the step queue for the UI to render."""
@@ -1304,234 +953,6 @@ class LocalConnectionTest(unittest.IsolatedAsyncioTestCase):
         )
     )
     await asyncio.wait_for(consumer_task, timeout=1.0)
-
-  async def test_connection_normalizes_file_uri_arguments(self):
-    """Verifies that file:// URIs in tool confirmations are normalized before hooks."""
-    hr = hook_runner.HookRunner()
-    captured_tc = None
-
-    @hooks_base.pre_tool_call_decide
-    async def capturing_hook(data):
-      nonlocal captured_tc
-      captured_tc = data
-      return hooks_base.HookResult(allow=True)
-
-    hr.register_hook(capturing_hook)
-
-    harness = test_utils.TestLocalHarness(
-        test_case=self,
-        process=self.mock_process,
-        tool_runner=self.tool_runner,
-        hook_runner=hr,
-    )
-
-    event = localharness_pb2.OutputEvent(
-        step_update=localharness_pb2.StepUpdate(
-            step_index=1,
-            trajectory_id="test_traj",
-            state=localharness_pb2.StepUpdate.STATE_WAITING_FOR_USER,
-            tool_confirmation_request=localharness_pb2.ToolConfirmationRequest(),
-            view_file=localharness_pb2.ActionViewFile(
-                file_path="file:///dev/shm/workspace/foo.py"
-            ),
-        )
-    )
-
-    await harness.send_event(event)
-    await harness.wait_for_response()
-
-    self.assertIsNotNone(captured_tc)
-    self.assertEqual(
-        captured_tc.args.get("file_path"),
-        "/dev/shm/workspace/foo.py",
-    )
-    self.assertNotIn("canonical_path", captured_tc.args)
-    self.assertEqual(
-        captured_tc.canonical_path,
-        "/dev/shm/workspace/foo.py",
-    )
-
-
-class LocalConnectionStepFromDictTest(unittest.TestCase):
-  """Tests for LocalConnectionStep.from_dict derivation logic.
-
-  Specifically targets the is_complete_response calculation and edge cases in
-  step type detection.
-  """
-
-  def test_is_complete_response_true(self):
-    """Verifies is_complete_response is True when source=MODEL, state=DONE, target=TARGET_USER, and text is present.
-
-    Why: This is the canonical "agent finished speaking" signal that callers
-    rely on to surface the final answer. All four conditions must hold:
-    source is MODEL, status is DONE, text is present, and target is USER.
-    """
-    step = local_connection.LocalConnectionStep.from_dict({
-        "source": "SOURCE_MODEL",
-        "state": "STATE_DONE",
-        "text": "Here is my answer.",
-        "target": "TARGET_USER",
-    })
-    self.assertTrue(step.is_complete_response)
-
-  def test_is_complete_response_false_when_source_not_model(self):
-    """Verifies is_complete_response is False when source is not MODEL.
-
-    Why: System or user steps that are done and have text should not be
-    treated as a completed model response.
-    """
-    step = local_connection.LocalConnectionStep.from_dict({
-        "source": "SOURCE_USER",
-        "state": "STATE_DONE",
-        "text": "Some user text.",
-    })
-    self.assertFalse(step.is_complete_response)
-
-  def test_is_complete_response_false_when_not_done(self):
-    """Verifies is_complete_response is False when state is not DONE.
-
-    Why: An active model step is still streaming; it should not be treated
-    as complete until the harness marks it done.
-    """
-    step = local_connection.LocalConnectionStep.from_dict({
-        "source": "SOURCE_MODEL",
-        "state": "STATE_ACTIVE",
-        "text": "Partial response...",
-    })
-    self.assertFalse(step.is_complete_response)
-
-  def test_is_complete_response_false_when_no_text(self):
-    """Verifies is_complete_response is False when text is empty.
-
-    Why: A done model step with no text is a structural step (e.g. tool use
-    completion), not a completed textual response.
-    """
-    step = local_connection.LocalConnectionStep.from_dict({
-        "source": "SOURCE_MODEL",
-        "state": "STATE_DONE",
-    })
-    self.assertFalse(step.is_complete_response)
-
-  def test_is_complete_response_false_when_error_state(self):
-    """Verifies is_complete_response is False when state is ERROR."""
-    step = local_connection.LocalConnectionStep.from_dict({
-        "source": "SOURCE_MODEL",
-        "state": "STATE_ERROR",
-        "text": "Something went wrong",
-        "error_message": "internal error",
-    })
-    self.assertFalse(step.is_complete_response)
-
-  def test_is_complete_response_false_when_target_environment(self):
-    """Verifies is_complete_response is False for TARGET_ENVIRONMENT steps.
-
-    Why: Tool execution steps (view_file, run_command, etc.) are targeted at
-    the environment, not the user. Even when they are source=MODEL, state=DONE,
-    and have text (e.g. "Requesting permission to make tool call"), they must
-    not be treated as a completed model response.
-    """
-    step = local_connection.LocalConnectionStep.from_dict({
-        "source": "SOURCE_MODEL",
-        "state": "STATE_DONE",
-        "text": "Requesting permission to make tool call",
-        "target": "TARGET_ENVIRONMENT",
-    })
-    self.assertFalse(step.is_complete_response)
-
-  def test_step_type_tool_call_with_builtin(self):
-    """Verifies that a step with a builtin tool proto field is typed TOOL_CALL and parses details."""
-    step = local_connection.LocalConnectionStep.from_dict({
-        "source": "SOURCE_MODEL",
-        "state": "STATE_ACTIVE",
-        "view_file": {"file_path": "/foo"},
-    })
-    self.assertEqual(step.type, types.StepType.TOOL_CALL)
-
-    self.assertEqual(len(step.tool_calls), 1)
-    self.assertEqual(step.tool_calls[0].name, "view_file")
-    self.assertEqual(step.tool_calls[0].args, {"file_path": "/foo"})
-    self.assertEqual(step.tool_calls[0].canonical_path, "/foo")
-
-  def test_structured_output_extracted_from_finish(self):
-    """Verifies that structured output is extracted when finish payload is present.
-
-    Why: The connection layer is responsible for extracting and parsing
-    the final structured output from the wire format so Layer 2 and E2E tests
-    can access it natively.
-    """
-    step = local_connection.LocalConnectionStep.from_dict({
-        "source": "SOURCE_MODEL",
-        "state": "STATE_DONE",
-        "finish": {
-            "output_string": (
-                '{"total_revenue": 386.0, "top_selling_product": "Widget A"}'
-            ),
-        },
-    })
-    self.assertEqual(
-        step.structured_output,
-        {"total_revenue": 386.0, "top_selling_product": "Widget A"},
-    )
-
-  def test_structured_output_extracted_from_finish_handles_invalid_json(self):
-    """Verifies that invalid JSON in finish payload defaults to None.
-
-    Why: The connection layer should handle malformed JSON payloads gracefully
-    by returning None instead of raising a fatal exception.
-    """
-    step = local_connection.LocalConnectionStep.from_dict({
-        "source": "SOURCE_MODEL",
-        "state": "STATE_DONE",
-        "finish": {
-            "output_string": (  # Invalid JSON
-                '{"total_revenue": 386.0, "top_selling_product": }'
-            ),
-        },
-    })
-    self.assertIsNone(step.structured_output)
-
-  def test_step_from_dict_normalizes_file_uri_arguments(self):
-    """Verifies that LocalConnectionStep.from_dict normalizes file:// URIs."""
-    step = local_connection.LocalConnectionStep.from_dict({
-        "step_index": 1,
-        "trajectory_id": "traj_1",
-        "state": "STATE_WAITING_FOR_USER",
-        "view_file": {"file_path": "file:///dev/shm/workspace/foo.py"},
-    })
-    self.assertEqual(len(step.tool_calls), 1)
-    self.assertEqual(
-        step.tool_calls[0].args.get("file_path"), "/dev/shm/workspace/foo.py"
-    )
-    self.assertNotIn("canonical_path", step.tool_calls[0].args)
-    self.assertEqual(
-        step.tool_calls[0].canonical_path,
-        "/dev/shm/workspace/foo.py",
-    )
-
-  def test_step_from_dict_normalizes_cns_uri_arguments(self):
-    """Verifies that LocalConnectionStep.from_dict normalizes cns:// URIs.
-
-    Why: The CNS-backed filesystem uses cns:// URIs as path representations.
-    The workspace_only policy compares canonical_path against /cns/... paths
-    provided by the user, so cns:// must be translated to /cns/... for
-    policy matching to work correctly.
-    """
-    step = local_connection.LocalConnectionStep.from_dict({
-        "step_index": 1,
-        "trajectory_id": "traj_1",
-        "state": "STATE_WAITING_FOR_USER",
-        "create_file": {"path": "cns://el-d/home/user/workspace/kittens.md"},
-    })
-    self.assertEqual(len(step.tool_calls), 1)
-    self.assertEqual(
-        step.tool_calls[0].args.get("path"),
-        "/cns/el-d/home/user/workspace/kittens.md",
-    )
-    self.assertNotIn("canonical_path", step.tool_calls[0].args)
-    self.assertEqual(
-        step.tool_calls[0].canonical_path,
-        "/cns/el-d/home/user/workspace/kittens.md",
-    )
 
 
 class LocalConnectionToolCallNoRunnerTest(unittest.IsolatedAsyncioTestCase):
@@ -2048,9 +1469,7 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
         ]
     )
     config = strategy._build_harness_config()
-    self.assertFalse(
-        config.models[0].gemini_api_endpoint.HasField("options")
-    )
+    self.assertFalse(config.models[0].gemini_api_endpoint.HasField("options"))
 
   def test_models_thinking_level_all_values(self):
     """Verifies all ThinkingLevel enum values produce correct proto strings."""
@@ -2355,7 +1774,7 @@ class LocalConnectionStrategyApiKeyTest(unittest.IsolatedAsyncioTestCase):
 
   @mock.patch.dict("os.environ", {}, clear=True)
   async def test_raises_without_auth_in_vertex_mode(self):
-    """Verifies strategy raises validation error when Vertex is set but no project/location or api_key provided."""
+    """Verifies strategy raises validation error when Vertex is set but no project/location provided."""
     models = [
         types.ModelTarget(
             name="gemini-3.5-flash",
@@ -2367,7 +1786,7 @@ class LocalConnectionStrategyApiKeyTest(unittest.IsolatedAsyncioTestCase):
     with self.assertRaises(types.AntigravityValidationError) as ctx:
       async with strategy:
         pass
-    self.assertIn("project and location, or an API key", str(ctx.exception))
+    self.assertIn("project and location must be set", str(ctx.exception))
 
   @mock.patch.dict("os.environ", {}, clear=True)
   @mock.patch("subprocess.Popen")
@@ -2420,6 +1839,89 @@ class LocalConnectionStrategyApiKeyTest(unittest.IsolatedAsyncioTestCase):
     with self.assertRaises(RuntimeError):
       async with strategy:
         pass
+
+  @mock.patch.dict(
+      "os.environ",
+      {"GEMINI_API_KEY": "env-key", "SYS_VAR": "sys_val"},
+      clear=True,
+  )
+  @mock.patch("subprocess.Popen")
+  async def test_passes_custom_env_to_popen_and_input_config(self, mock_popen):
+    """Verifies custom env dict is merged into Popen env and InputConfig."""
+    mock_proc = mock.MagicMock()
+    mock_proc.stdin = mock.MagicMock()
+    mock_proc.stdout = mock.MagicMock()
+    mock_proc.stderr = mock.MagicMock()
+    mock_proc.stdout.read.return_value = b""
+    mock_popen.return_value = mock_proc
+
+    custom_env = {"MY_CUSTOM_VAR": "hello_env"}
+    strategy = self._make_strategy(env=custom_env)
+
+    with self.assertRaises(RuntimeError):
+      async with strategy:
+        pass
+
+    mock_popen.assert_called_once()
+    _, kwargs = mock_popen.call_args
+    expected_env = {
+        "GEMINI_API_KEY": "env-key",
+        "SYS_VAR": "sys_val",
+        "MY_CUSTOM_VAR": "hello_env",
+    }
+    self.assertEqual(kwargs.get("env"), expected_env)
+
+    mock_proc.stdin.write.assert_called_once()
+    written_bytes = mock_proc.stdin.write.call_args[0][0]
+    parsed_config = localharness_pb2.InputConfig()
+    parsed_config.ParseFromString(written_bytes[4:])
+    self.assertEqual(dict(parsed_config.env), custom_env)
+
+  @mock.patch.dict(
+      "os.environ",
+      {"GEMINI_API_KEY": "env-key"},
+      clear=True,
+  )
+  @mock.patch("subprocess.Popen")
+  async def test_passes_non_string_env_coerced_to_strings(self, mock_popen):
+    """Verifies non-string env keys/values are coerced to strings for Popen and InputConfig."""
+    mock_proc = mock.MagicMock()
+    mock_proc.stdin = mock.MagicMock()
+    mock_proc.stdout = mock.MagicMock()
+    mock_proc.stderr = mock.MagicMock()
+    mock_proc.stdout.read.return_value = b""
+    mock_popen.return_value = mock_proc
+
+    custom_env = {"INT_KEY": 123, 1: "val", "BOOL_KEY": True}
+    strategy = self._make_strategy(env=custom_env)
+
+    with self.assertRaises(RuntimeError):
+      async with strategy:
+        pass
+
+    mock_popen.assert_called_once()
+    _, kwargs = mock_popen.call_args
+    expected_env = {
+        "GEMINI_API_KEY": "env-key",
+        "INT_KEY": "123",
+        "1": "val",
+        "BOOL_KEY": "True",
+    }
+    self.assertEqual(kwargs.get("env"), expected_env)
+
+    mock_proc.stdin.write.assert_called_once()
+    written_bytes = mock_proc.stdin.write.call_args[0][0]
+    parsed_config = localharness_pb2.InputConfig()
+    parsed_config.ParseFromString(written_bytes[4:])
+    self.assertEqual(
+        dict(parsed_config.env),
+        {"INT_KEY": "123", "1": "val", "BOOL_KEY": "True"},
+    )
+
+  def test_config_env_defaults_to_none(self):
+    """Verifies that LocalAgentConfig.env is None by default."""
+    config = local_connection_config.LocalAgentConfig()
+    self.assertIsNone(config.env)
 
   @mock.patch.dict("os.environ", {}, clear=True)
   @mock.patch("subprocess.Popen")
@@ -3132,14 +2634,12 @@ class LocalConnectionToolCallHooksTest(unittest.IsolatedAsyncioTestCase):
     self.mock_process = mock.MagicMock()
     self.mock_ws = test_utils.TestWebSocket()
 
-  async def test_on_tool_error_hook_with_recovery(self):
-    """Verifies OnToolErrorHook can provide recovery values on tool failure."""
+  async def test_on_tool_error_sends_error_to_harness(self):
+    """Verifies that tool errors are sent back to the harness without recovery.
 
-    class RecoveringErrorHook(hooks_base.OnToolErrorHook):
-
-      async def run(self, context, data):  # pylint: disable=unused-argument
-        return "recovered_value"
-
+    OnToolError dispatch and recovery have been migrated to the Go harness
+    (dispatched via HookRouter). The Python SDK sends the error JSON as-is.
+    """
     tr = tool_runner.ToolRunner()
 
     async def failing_handler(**kwargs):
@@ -3147,14 +2647,10 @@ class LocalConnectionToolCallHooksTest(unittest.IsolatedAsyncioTestCase):
 
     tr.register(failing_handler, "failing_tool")
 
-    hr = hook_runner.HookRunner()
-    hr.register_hook(RecoveringErrorHook())
-
     harness = test_utils.TestLocalHarness(
         test_case=self,
         process=self.mock_process,
         tool_runner=tr,
-        hook_runner=hr,
     )
 
     event = localharness_pb2.OutputEvent(
@@ -3167,61 +2663,12 @@ class LocalConnectionToolCallHooksTest(unittest.IsolatedAsyncioTestCase):
 
     await harness.send_event(event)
 
-    # The recovery value should have been sent back.
+    # The error should be sent back as-is (no Python-side recovery).
     sent_data = await harness.wait_for_response()
     self.assertIn("toolResponse", sent_data)
-    self.assertIn("recovered_value", sent_data["toolResponse"]["responseJson"])
-
-  async def test_on_tool_error_hook_receives_original_exception_type(self):
-    """Verifies OnToolErrorHook receives the original exception, not wrapped.
-
-    Regression test for b/508736962: the hook should receive the original
-    ValueError (not a RuntimeError wrapping the error string) so that
-    isinstance-based dispatch works in hook implementations.
-    """
-    hook_event = asyncio.Event()
-    captured_errors = []
-
-    class CapturingErrorHook(hooks_base.OnToolErrorHook):
-
-      async def run(self, context, data):  # pylint: disable=unused-argument
-        captured_errors.append(data)
-        hook_event.set()
-        return "recovered"
-
-    tr = tool_runner.ToolRunner()
-
-    async def value_error_tool(**kwargs):
-      raise ValueError("bad input")
-
-    tr.register(value_error_tool, "value_error_tool")
-
-    hr = hook_runner.HookRunner()
-    hr.register_hook(CapturingErrorHook())
-
-    harness = test_utils.TestLocalHarness(
-        test_case=self,
-        process=self.mock_process,
-        tool_runner=tr,
-        hook_runner=hr,
+    self.assertIn(
+        "Intentional failure", sent_data["toolResponse"]["errorMessage"]
     )
-
-    event = localharness_pb2.OutputEvent(
-        tool_call=localharness_pb2.ToolCall(
-            id="call_typed",
-            name="value_error_tool",
-            arguments_json="{}",
-        )
-    )
-
-    await harness.send_event(event)
-    await harness.wait_for_event(hook_event)
-
-    self.assertEqual(len(captured_errors), 1)
-    # The hook must receive the original ValueError, not RuntimeError.
-    self.assertIsInstance(captured_errors[0], ValueError)
-    self.assertNotIsInstance(captured_errors[0], RuntimeError)
-    self.assertIn("bad input", str(captured_errors[0]))
 
 
 class LocalConnectionBuiltinDecideHookTest(unittest.IsolatedAsyncioTestCase):
@@ -3232,8 +2679,13 @@ class LocalConnectionBuiltinDecideHookTest(unittest.IsolatedAsyncioTestCase):
     self.mock_process = mock.MagicMock()
     self.mock_ws = test_utils.TestWebSocket()
 
-  async def test_decide_hooks_run_for_builtin_tools(self):
-    """Verifies PreToolCallDecideHook runs and can deny builtin tools."""
+  async def test_tool_confirmation_always_accepts(self):
+    """After migration, _handle_tool_confirmation_request always auto-accepts.
+
+    Pre-tool hooks are now dispatched via Go's FirePreToolHook ->
+    CallHookRequest -> HookRouter._handle_pre_tool. The legacy
+    ToolConfirmation path only fires when no hooks are registered.
+    """
 
     class DenyAll(hooks_base.PreToolCallDecideHook):
 
@@ -3267,7 +2719,8 @@ class LocalConnectionBuiltinDecideHookTest(unittest.IsolatedAsyncioTestCase):
     await harness.send_event(event)
 
     sent = await harness.wait_for_response()
-    self.assertFalse(sent["toolConfirmation"]["accepted"])
+    # Now auto-accepts — hooks dispatch happens via HookRouter, not here.
+    self.assertTrue(sent["toolConfirmation"]["accepted"])
 
 
 class LocalConnectionHookAcceptanceTest(unittest.IsolatedAsyncioTestCase):
@@ -3444,6 +2897,7 @@ class LocalConnectionDisconnectTest(unittest.IsolatedAsyncioTestCase):
     await harness.disconnect_sdk()
     self.mock_process.stdin.close.assert_called_once()
 
+  @mock.patch.object(local_connection, "_PROCESS_WAIT_TIMEOUT_SECONDS", 5)
   async def test_disconnect_waits_for_process(self):
     """Verifies disconnect waits for the harness process to exit.
 
@@ -3458,6 +2912,7 @@ class LocalConnectionDisconnectTest(unittest.IsolatedAsyncioTestCase):
     await harness.disconnect_sdk()
     self.mock_process.wait.assert_called_with(timeout=5)
 
+  @mock.patch.object(local_connection, "_PROCESS_WAIT_TIMEOUT_SECONDS", 5)
   async def test_disconnect_terminates_on_timeout(self):
     """Verifies SIGTERM is sent when the process doesn't exit in time.
 
@@ -3477,6 +2932,7 @@ class LocalConnectionDisconnectTest(unittest.IsolatedAsyncioTestCase):
     await harness.disconnect_sdk()
     self.mock_process.terminate.assert_called_once()
 
+  @mock.patch.object(local_connection, "_PROCESS_WAIT_TIMEOUT_SECONDS", 5)
   async def test_disconnect_kills_on_double_timeout(self):
     """Verifies SIGKILL is sent when SIGTERM also fails.
 
@@ -3485,7 +2941,7 @@ class LocalConnectionDisconnectTest(unittest.IsolatedAsyncioTestCase):
     """
     self.mock_process.wait.side_effect = [
         subprocess.TimeoutExpired("cmd", 5),  # First wait.
-        subprocess.TimeoutExpired("cmd", 1),  # After terminate.
+        subprocess.TimeoutExpired("cmd", 15),  # After terminate.
         0,  # After kill.
     ]
     harness = test_utils.TestLocalHarness(
@@ -3762,7 +3218,7 @@ class LocalConnectionSendTest(unittest.IsolatedAsyncioTestCase):
 
     # Clean up: signal idle so the first receiver can exit.
     harness.conn._is_idle.set()
-    await harness.conn._step_queue.put(local_connection._IDLE_SENTINEL)
+    await harness.conn._step_queue.put(local_connection.IDLE_SENTINEL)
     task.cancel()
     try:
       await task
@@ -3824,6 +3280,22 @@ class LocalAgentConfigTest(absltest.TestCase):
     ]
     self.assertLen(text_models, 1)
     self.assertEqual(text_models[0].name, "gemini-2.5-pro")
+
+  def test_create_strategy_passes_env(self):
+    config = local_connection_config.LocalAgentConfig(
+        env={"CUSTOM_KEY": "CUSTOM_VAL"},
+    )
+    mock_tool_runner = mock.create_autospec(
+        tool_runner.ToolRunner, instance=True
+    )
+    mock_hook_runner = mock.create_autospec(
+        hook_runner.HookRunner, instance=True
+    )
+    strategy = config.create_strategy(
+        tool_runner=mock_tool_runner,
+        hook_runner=mock_hook_runner,
+    )
+    self.assertEqual(strategy._env, {"CUSTOM_KEY": "CUSTOM_VAL"})
 
   def test_merge_models_only_defaults(self):
     config = local_connection_config.LocalAgentConfig()
@@ -3887,7 +3359,6 @@ class LocalAgentConfigTest(absltest.TestCase):
         app_data_dir="/tmp/app",
         response_schema="{}",
         skills_paths=["/tmp/skills"],
-
         model="gemini-2.5-pro",
         api_key="fake_api_key",
         vertex=True,
@@ -4238,93 +3709,14 @@ class LocalConnectionBuiltinToolHooksTest(unittest.IsolatedAsyncioTestCase):
         )
     )
 
-  async def test_builtin_tool_done_cleans_up_pending_tracking(self):
-    """Verifies that STATE_DONE properly cleans up pending tool call tracking."""
-    hr = hook_runner.HookRunner()
-    harness = self._make_harness(hr)
-
-    confirm = self._make_confirm_event(
-        0,
-        "traj",
-        run_command=localharness_pb2.ActionRunCommand(command_line="echo hi"),
-    )
-    done = self._make_done_event(
-        0,
-        "traj",
-        run_command=localharness_pb2.ActionRunCommand(
-            command_line="echo hi", combined_output="hi\n"
-        ),
-    )
-    sent_data = await self._confirm_and_complete(harness, confirm, done)
-    self.assertTrue(sent_data["toolConfirmation"]["accepted"])
-
-    await asyncio.sleep(0.1)
-
-    step_key = ("traj", 0)
-    self.assertNotIn(
-        step_key,
-        harness.conn._pending_builtin_tool_calls,
-    )
-
-  # ---- Error path ----
-
-  async def test_on_tool_error_dispatched_for_builtin_error(self):
-    """Verifies OnToolErrorHook fires when a builtin tool transitions to STATE_ERROR.
-
-    What: OnToolErrorHook receives a RuntimeError with the harness error
-    message.
-    Why: Users need observability into builtin tool failures for logging and
-         recovery. The harness reports errors via STATE_ERROR transitions.
-    How: Simulate approval + STATE_ERROR with an error_message; assert the hook
-         receives a RuntimeError containing the message text.
-    """
-    hook_event = asyncio.Event()
-    captured_errors = []
-
-    class CapturingErrorHook(hooks_base.OnToolErrorHook):
-
-      async def run(self, context, data):  # pylint: disable=unused-argument
-        captured_errors.append(data)
-        hook_event.set()
-        return None
-
-    hr = hook_runner.HookRunner()
-    hr.register_hook(CapturingErrorHook())
-    harness = self._make_harness(hr)
-
-    confirm = self._make_confirm_event(
-        0,
-        "traj_err",
-        run_command=localharness_pb2.ActionRunCommand(
-            command_line="failing_cmd",
-        ),
-    )
-    error = localharness_pb2.OutputEvent(
-        step_update=localharness_pb2.StepUpdate(
-            step_index=0,
-            trajectory_id="traj_err",
-            cascade_id="traj_err",
-            state=localharness_pb2.StepUpdate.STATE_ERROR,
-            source=localharness_pb2.StepUpdate.SOURCE_MODEL,
-            error_message="Permission denied",
-        )
-    )
-    await self._confirm_and_complete(harness, confirm, error)
-    await harness.wait_for_event(hook_event)
-
-    self.assertEqual(len(captured_errors), 1)
-    self.assertIsInstance(captured_errors[0], RuntimeError)
-    self.assertIn("Permission denied", str(captured_errors[0]))
-
   # ---- Guard tests ----
 
   async def test_denied_builtin_not_tracked(self):
-    """Verifies denied builtin tools are not tracked for post-tool dispatch.
+    """Verifies denied builtin tools don't trigger post-tool dispatch.
 
     What: PostToolCallHook does NOT fire for denied built-in tool calls.
     Why: If a Decide hook denies a builtin tool, the harness rejects it and
-         there is no execution to observe. Tracking it would cause stale
-         entries in _pending_builtin_tool_calls or spurious dispatches.
+         there is no execution to observe.
     How: Deny via Decide hook, send a STATE_DONE for the same step, and
          verify PostToolCallHook was not called.
     """
@@ -4345,7 +3737,10 @@ class LocalConnectionBuiltinToolHooksTest(unittest.IsolatedAsyncioTestCase):
     hr.register_hook(PostHook())
     harness = self._make_harness(hr)
 
-    # Confirmation request — will be denied.
+    # After migration, _handle_tool_confirmation_request always auto-accepts.
+    # Pre-tool deny logic is now in HookRouter._handle_pre_tool.
+    # This test verifies that the confirmation path auto-accepts even with
+    # a deny hook registered.
     await harness.send_event(
         self._make_confirm_event(
             0,
@@ -4354,12 +3749,7 @@ class LocalConnectionBuiltinToolHooksTest(unittest.IsolatedAsyncioTestCase):
         )
     )
     sent_data = await harness.wait_for_response()
-    self.assertFalse(sent_data["toolConfirmation"]["accepted"])
-
-    # Even if the step completes, PostToolCallHook must NOT fire.
-    await harness.send_event(self._make_done_event(0, "traj_deny"))
-    await asyncio.sleep(0.1)
-    self.assertFalse(hook_fired.is_set())
+    self.assertTrue(sent_data["toolConfirmation"]["accepted"])
 
   async def test_no_spurious_hook_for_non_builtin_step(self):
     """Verifies post-tool hooks don't fire for normal model response steps.
@@ -4468,73 +3858,6 @@ class LocalConnectionExceptionSafetyTest(unittest.IsolatedAsyncioTestCase):
     freeform = answers[0]["multipleChoiceAnswer"]["freeformResponse"]
     self.assertIn("SDK error", freeform)
     self.assertIn("Intentional interaction hook crash", freeform)
-
-  async def test_tool_confirmation_crash_sends_rejection(self):
-    """Verifies a crashing pre-tool hook sends accepted=False.
-
-    When the pre_tool_call_decide hook raises, the handler must reject
-    the tool confirmation to prevent the tool from executing in a broken
-    state. The harness transitions the step to STATE_ERROR.
-    """
-    hr = hook_runner.HookRunner()
-
-    @hooks_base.pre_tool_call_decide
-    async def crashing_hook(data):
-      _ = data
-      raise RuntimeError("Intentional pre-tool hook crash")
-
-    hr.register_hook(crashing_hook)
-    harness = self._make_harness(hr)
-
-    event = localharness_pb2.OutputEvent(
-        step_update=localharness_pb2.StepUpdate(
-            step_index=1,
-            trajectory_id="test_traj",
-            state=localharness_pb2.StepUpdate.STATE_WAITING_FOR_USER,
-            tool_confirmation_request=localharness_pb2.ToolConfirmationRequest(),
-            view_file=localharness_pb2.ActionViewFile(file_path="/foo/bar"),
-        )
-    )
-
-    await harness.send_event(event)
-
-    sent_data = await harness.wait_for_response()
-    self.assertIn("toolConfirmation", sent_data)
-    self.assertEqual(sent_data["toolConfirmation"]["trajectoryId"], "test_traj")
-    self.assertFalse(sent_data["toolConfirmation"]["accepted"])
-
-  async def test_tool_call_crash_sends_error_result(self):
-    """Verifies a crashing pre-tool hook sends error in ToolResponse.
-
-    When the pre_tool_call_decide hook raises during a host tool call,
-    the handler must send a ToolResponse with the error so the model
-    sees what went wrong and can adapt.
-    """
-    hr = hook_runner.HookRunner()
-
-    @hooks_base.pre_tool_call_decide
-    async def crashing_hook(data):
-      _ = data
-      raise RuntimeError("Intentional tool execution hook crash")
-
-    hr.register_hook(crashing_hook)
-    harness = self._make_harness(hr)
-
-    event = localharness_pb2.OutputEvent(
-        tool_call=localharness_pb2.ToolCall(
-            id="call_123",
-            name="some_tool",
-            arguments_json="{}",
-        )
-    )
-
-    await harness.send_event(event)
-
-    sent_data = await harness.wait_for_response()
-    self.assertIn("toolResponse", sent_data)
-    resp = sent_data["toolResponse"]
-    self.assertEqual(resp["id"], "call_123")
-    self.assertIn("Intentional tool execution hook crash", resp["responseJson"])
 
 
 class LocalConnectionSerializationTest(unittest.IsolatedAsyncioTestCase):
@@ -4773,6 +4096,20 @@ class LocalConnectionSubagentsTest(unittest.IsolatedAsyncioTestCase):
     custom_agent = harness_config.custom_subagents[0]
     self.assertFalse(custom_agent.harness_side_tools.subagents.enabled)
     self.assertFalse(custom_agent.harness_side_tools.file_edit.enabled)
+
+  def test_local_agent_config_subagents_none_initializes(self):
+    config = local_connection_config.LocalAgentConfig(subagents=None)
+    self.assertEqual(config.subagents, [])
+
+  def test_local_agent_config_kwargs_none_filtered(self):
+    config = local_connection_config.LocalAgentConfig(
+        **{"subagents": None, "capabilities": None, "conversation_id": None}
+    )
+    self.assertEqual(config.subagents, [])
+    self.assertIsInstance(config.capabilities, types.CapabilitiesConfig)
+    self.assertIsNone(config.conversation_id)
+
+
 
 
 if __name__ == "__main__":

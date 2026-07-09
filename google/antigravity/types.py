@@ -445,12 +445,14 @@ class ToolCall(pydantic.BaseModel):
     args: Keyword arguments for the tool, as a JSON-serializable dict.
     canonical_path: Optional normalized filesystem path for file-related tools.
       Populated by the Connection layer to enable platform-agnostic L2 policies.
+    server_name: Optional server name if this tool belongs to an MCP server.
   """
 
   name: BuiltinTools | str
   args: dict[str, Any] = pydantic.Field(default_factory=dict)
   id: str | None = None
   canonical_path: str | None = None
+  server_name: str | None = None
 
 
 class ToolResult(pydantic.BaseModel):
@@ -463,6 +465,7 @@ class ToolResult(pydantic.BaseModel):
     result: The tool's return value. Can be any JSON-serializable value.
     error: An error message if execution failed, or None on success.
     exception: The original exception if execution failed. Not serialized.
+    server_name: Optional server name if this tool belongs to an MCP server.
   """
 
   model_config = pydantic.ConfigDict(
@@ -474,6 +477,7 @@ class ToolResult(pydantic.BaseModel):
   result: Any = None
   error: str | None = None
   exception: Exception | None = pydantic.Field(default=None, exclude=True)
+  server_name: str | None = None
 
 
 PythonTool = Callable[..., Any]
@@ -1139,16 +1143,7 @@ def from_file(
         f"Could not infer a valid MIME type for extension: '{file_path.suffix}'"
     )
 
-  media_cls = _MIME_TO_MEDIA_CLASS.get(mime_guess)
-  if media_cls is None:
-    raise ValueError(
-        f"Unsupported MIME type: '{mime_guess}'. "
-        f"Supported file formats in the SDK are: {sorted(_MIME_TO_MEDIA_CLASS)}"
-    )
-  return cast(
-      Image | Document | Audio | Video,
-      media_cls(data=data, mime_type=mime_guess, description=description),
-  )
+  return from_bytes(data, mime_guess, description)
 
 
 def from_bytes(

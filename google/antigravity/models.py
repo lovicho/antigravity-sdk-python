@@ -23,7 +23,6 @@ from __future__ import annotations
 import abc
 import enum
 import os
-from typing import Any
 
 import pydantic
 
@@ -53,12 +52,14 @@ class ThinkingLevel(str, enum.Enum):
     LOW: Low thinking.
     MEDIUM: Medium thinking.
     HIGH: High thinking.
+    EXTRA_HIGH: Extra-high thinking.
   """
 
   MINIMAL = "minimal"
   LOW = "low"
   MEDIUM = "medium"
   HIGH = "high"
+  EXTRA_HIGH = "extra_high"
 
 
 class ModelType(str, enum.Enum):
@@ -113,10 +114,7 @@ class VertexEndpoint(ModelEndpoint):
 
   def validate_endpoint(self) -> None:
     if not (self.project and self.location):
-      raise ValueError(
-          "For Vertex AI, a GCP project and location, or an API key (Express"
-          " Mode), must be set."
-      )
+      raise ValueError("For Vertex AI, a GCP project and location must be set.")
 
 
 class ModelTarget(pydantic.BaseModel):
@@ -127,18 +125,3 @@ class ModelTarget(pydantic.BaseModel):
       default_factory=lambda: [ModelType.TEXT]
   )
   endpoint: ModelEndpoint | None = None
-
-
-def _coerce_models_list(v: Any) -> list[ModelTarget] | None:
-  """Coerces shorthand model definitions into a list of ModelTargets."""
-  if v is None:
-    return None
-  if isinstance(v, list):
-    coerced = []
-    for item in v:
-      if isinstance(item, dict):
-        coerced.append(ModelTarget.model_validate(item))
-      else:
-        coerced.append(item)
-    return coerced
-  return v

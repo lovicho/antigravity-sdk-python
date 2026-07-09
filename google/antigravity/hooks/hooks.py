@@ -201,14 +201,19 @@ class PostToolCallHook(InspectHook[types.ToolResult]):
 
 
 class OnToolErrorHook(TransformHook[Exception, Any]):
-  """Invoked when a tool fails, allowing for recovery or modification.
+  """Invoked when a tool fails, allowing authors to shape the failure message.
 
-  Receives the raised exception and returns the error representation that
-  the model should see. If the hook returns None, the harness uses its
-  default error formatting instead.
+  Receives the raised exception and returns an optional custom error string.
+  If a non-empty string is returned, it replaces the default stacktrace or
+  error message delivered to the model. If None is returned, default error
+  formatting is used. Works symmetrically across built-in and custom tools.
 
   The hook cannot fix or retry the tool call on its own, but it can guide
   the agent toward a specific resolution.
+
+  To customize failure messages or provide recovery fallbacks for your tool,
+  you can either return a custom error string from this hook or do so directly
+  within your tool implementation.
   """
 
   pass
@@ -303,4 +308,3 @@ class _PostStepHook(InspectHook[types.Step]):
 
 _pre_step = _make_hook_decorator(_PreStepHook)
 _post_step = _make_hook_decorator(_PostStepHook)
-

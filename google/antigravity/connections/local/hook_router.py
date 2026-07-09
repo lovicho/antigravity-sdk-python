@@ -14,12 +14,15 @@
 
 """Routes lifecycle hook requests from the local harness to Python SDK hook handlers."""
 
+import json
 import logging
 from typing import Any, Callable, Coroutine
 
-from google.antigravity import types
 from google.antigravity.connections.local import localharness_pb2
+from google.antigravity import types
+from google.antigravity.connections.local.local_connection_config import normalize_wire_path
 from google.antigravity.connections.local.local_connection_config import PROTO_FIELD_TO_SDK_NAME
+from google.antigravity.connections.local.local_connection_config import WIRE_PATH_ARGUMENT_KEYS
 from google.antigravity.hooks import hook_runner as hook_runner_lib
 from google.antigravity.hooks import hooks
 
@@ -57,6 +60,19 @@ def _from_proto_user_input(ui: localharness_pb2.UserInput) -> types.Content:
   return content_list
 
 
+def _normalize_path_args(args: dict[str, Any]) -> None:
+  """Converts wire-format URIs to clean filesystem paths in-place.
+
+  Paths arrive as file:/// or cns:// URIs over the wire protocol.
+  User hooks expect clean absolute paths (e.g. /home/user/file.py),
+  so we normalize known path fields before dispatch.
+  """
+  for key in WIRE_PATH_ARGUMENT_KEYS:
+    val = args.get(key)
+    if isinstance(val, str) and val:
+      args[key] = normalize_wire_path(val)
+
+
 class HookRouter:
   """Routes and dispatches CallHookRequest messages from the local harness to the active HookRunner."""
 
@@ -66,7 +82,7 @@ class HookRouter:
       event_sender: Callable[
           [localharness_pb2.InputEvent], Coroutine[Any, Any, None]
       ],
-      result_extractor: Callable[[Any], Any] | None = None,
+      result_extractor: Callable[[str, str], Any] | None = None,
   ):
     self._hook_runner = hook_runner
     self._send = event_sender
@@ -92,6 +108,10 @@ class HookRouter:
         localharness_pb2.LIFECYCLE_HOOK_PRE_TURN: self._handle_pre_turn,
         localharness_pb2.LIFECYCLE_HOOK_POST_TURN: self._handle_post_turn,
         localharness_pb2.LIFECYCLE_HOOK_POST_TOOL: self._handle_post_tool,
+        localharness_pb2.LIFECYCLE_HOOK_ON_TOOL_ERROR: (
+            self._handle_on_tool_error
+        ),
+        localharness_pb2.LIFECYCLE_HOOK_PRE_TOOL: self._handle_pre_tool,
     }
 
   @property
@@ -150,25 +170,78 @@ class HookRouter:
     self._current_turn_context = None
     resp.empty_result.CopyFrom(localharness_pb2.EmptyResult())
 
+  async def _handle_pre_tool(
+      self,
+      req: localharness_pb2.CallHookRequest,
+      resp: localharness_pb2.CallHookResponse,
+  ) -> None:
+    """Handles PreTool decide hooks dispatched by the Go harness."""
+    tool_name = ""
+    args: dict[str, Any] = {}
+    server_name: str | None = None
+    if req.HasField("pre_tool_args"):
+      pta = req.pre_tool_args
+      tool_name = PROTO_FIELD_TO_SDK_NAME.get(pta.tool_name, pta.tool_name)
+      if pta.arguments_json:
+        args = json.loads(pta.arguments_json)
+      # server_name is populated directly by harness for MCP tool calls,
+      # enabling SDK policies to match by server/tool target.
+      if pta.server_name:
+        server_name = pta.server_name
+      _normalize_path_args(args)
+
+    # Derive canonical_path from the first normalized path field so that
+    # workspace_only() policies can enforce path restrictions.
+    canonical_path: str | None = None
+    for key in WIRE_PATH_ARGUMENT_KEYS:
+      val = args.get(key)
+      if isinstance(val, str) and val:
+        canonical_path = val
+        break
+
+    tc = types.ToolCall(
+        name=tool_name,
+        args=args,
+        server_name=server_name,
+        canonical_path=canonical_path,
+    )
+    turn_ctx = self._current_turn_context or hooks.TurnContext(
+        self._hook_runner.session_context
+    )
+    result, _, _ = await self._hook_runner.dispatch_pre_tool_call(
+        turn_context=turn_ctx, tool_call=tc
+    )
+
+    ptr = localharness_pb2.PreToolResult()
+    if result.allow:
+      ptr.decision = localharness_pb2.PreToolResult.Decision.ALLOW
+    else:
+      ptr.decision = localharness_pb2.PreToolResult.Decision.DENY
+      ptr.reason = result.message or ""
+    resp.pre_tool_result.CopyFrom(ptr)
+
   async def _handle_post_tool(
       self,
       req: localharness_pb2.CallHookRequest,
       resp: localharness_pb2.CallHookResponse,
   ) -> None:
     tool_name = ""
+    server_name: str | None = None
     result_val: Any = None
     error_str = ""
     if req.HasField("post_tool_args"):
       pta = req.post_tool_args
       tool_name = PROTO_FIELD_TO_SDK_NAME.get(pta.tool_name, pta.tool_name)
+      server_name = pta.server_name or None
       result_val = pta.result if not pta.error else None
       error_str = pta.error
-      if pta.HasField("step_update") and self._extract_result:
-        extracted = self._extract_result(pta.step_update)
+      if self._extract_result and not pta.error and pta.result:
+        extracted = self._extract_result(tool_name, pta.result)
         if extracted is not None:
           result_val = extracted
     tool_result = types.ToolResult(
         name=tool_name,
+        server_name=server_name,
         result=result_val,
         error=error_str or None,
     )
@@ -178,6 +251,38 @@ class HookRouter:
     op_ctx = hooks.OperationContext(turn_ctx)
     await self._hook_runner.dispatch_post_tool_call(op_ctx, tool_result)
     resp.empty_result.CopyFrom(localharness_pb2.EmptyResult())
+
+  async def _handle_on_tool_error(
+      self,
+      req: localharness_pb2.CallHookRequest,
+      resp: localharness_pb2.CallHookResponse,
+  ) -> None:
+    """Handles OnToolError lifecycle hooks dispatched by the Go harness."""
+    error_message = "Tool failed"
+    if req.HasField("on_tool_error_args"):
+      error_message = req.on_tool_error_args.error_message or error_message
+
+    error = RuntimeError(error_message)
+    turn_ctx = self._current_turn_context or hooks.TurnContext(
+        self._hook_runner.session_context
+    )
+    op_ctx = hooks.OperationContext(turn_ctx)
+    hook_result, recovery_val = await self._hook_runner.dispatch_on_tool_error(
+        op_ctx, error
+    )
+
+    if (
+        hook_result.allow
+        and isinstance(recovery_val, str)
+        and recovery_val.strip()
+    ):
+      resp.on_tool_error_result.CopyFrom(
+          localharness_pb2.OnToolErrorResult(
+              custom_error_message=recovery_val.strip(),
+          )
+      )
+    else:
+      resp.empty_result.CopyFrom(localharness_pb2.EmptyResult())
 
   async def handle(self, req: localharness_pb2.CallHookRequest) -> None:
     """Handles an incoming CallHookRequest and sends a CallHookResponse back to the harness."""

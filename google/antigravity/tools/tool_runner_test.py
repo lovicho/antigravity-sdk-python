@@ -531,6 +531,26 @@ class ContextInjectionTest(absltest.TestCase):
     self.assertEqual(result, 10)
     self.assertIs(received_ctx, mock_ctx)
 
+  def test_tool_with_pep604_union_context_receives_it(self):
+    """Verifies context injection works with PEP 604 union types (X | None)."""
+    from google.antigravity.tools import tool_context  # pylint: disable=g-import-not-at-top
+
+    received_ctx = None
+
+    def _pep604_context_tool(
+        arg1: str, ctx: tool_context.ToolContext | None
+    ) -> str:
+      nonlocal received_ctx
+      received_ctx = ctx
+      return f"got {arg1}"
+
+    mock_ctx = self._make_mock_context()
+    runner = tool_runner.ToolRunner([_pep604_context_tool])
+    runner.set_context(mock_ctx)
+    result = asyncio.run(runner.execute("_pep604_context_tool", arg1="hello"))
+    self.assertEqual(result, "got hello")
+    self.assertIs(received_ctx, mock_ctx)
+
   def test_no_context_set_skips_injection(self):
     """Verifies graceful behavior when no context has been set.
 
@@ -777,6 +797,17 @@ class SchemaGenerationTest(absltest.TestCase):
     sig = inspect.signature(public.fn.fn)
     self.assertIn("query", sig.parameters)
     self.assertNotIn("ctx", sig.parameters)
+
+  def test_public_callable_preserves_async_ness(self):
+    from google.antigravity.tools import tool_context  # pylint: disable=g-import-not-at-top
+
+    async def _schema_tool(query: str, ctx: tool_context.ToolContext) -> str:
+      del ctx
+      return query
+
+    runner = tool_runner.ToolRunner([_schema_tool])
+    public = runner.get_public_callable("_schema_tool")
+    self.assertTrue(tool_runner._is_async(public))
 
 
 if __name__ == "__main__":
