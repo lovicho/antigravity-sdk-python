@@ -368,8 +368,6 @@ class LocalHarnessEventProcessor:
     self.is_idle.set()
     self.session_end_done = asyncio.Event()
     self.main_trajectory_id = None
-    self.active_subagent_ids: set[str] = set()
-    self.parent_idle = True
     self._step_trackers: dict[tuple[str, int], _StepTracker] = {}
     self._background_tasks = set()
     self._hook_router = (
@@ -380,8 +378,6 @@ class LocalHarnessEventProcessor:
 
   def reset_for_turn(self) -> None:
     self.is_idle.clear()
-    self.parent_idle = False
-    self.active_subagent_ids.clear()
     self.main_trajectory_id = None
 
   async def cancel_background_tasks(self) -> None:
@@ -531,38 +527,29 @@ class LocalHarnessEventProcessor:
           and tsu.trajectory_id != self.main_trajectory_id
       )
 
+      # Subagent execution is coordinated by the harness. The Python client
+      # only tracks the main trajectory's idle state and ignores subagent
+      # trajectory events (except for logging failures on exit).
+      if is_subagent:
+        if tsu.HasField("error"):
+          logging.info("Subagent trajectory failed with error: %s", tsu.error)
+        return
+
       if (
           tsu.state
           == localharness_pb2.TrajectoryStateUpdate.State.STATE_RUNNING
       ):
-        # If any trajectory is running, the connection is not idle.
         if self.is_idle.is_set():
           self.is_idle.clear()
-        if is_subagent:
-          self.active_subagent_ids.add(tsu.trajectory_id)
-        else:
-          # Note: the main trajectory seems to switch from RUNNING -> IDLE ->
-          # RUNNING as it invokes subagents.
-          self.parent_idle = False
 
       elif tsu.state == localharness_pb2.TrajectoryStateUpdate.State.STATE_IDLE:
-        if is_subagent:
-          self.active_subagent_ids.discard(tsu.trajectory_id)
-        else:
-          self.parent_idle = True
-
-        if self.parent_idle and not self.active_subagent_ids:
-          if not self.is_idle.is_set():
-            self.is_idle.set()
-            await self.step_queue.put(IDLE_SENTINEL)
-
         if tsu.HasField("error"):
-          if is_subagent:
-            logging.info("Subagent trajectory failed with error: %s", tsu.error)
-          else:
-            await self.step_queue.put(
-                types.AntigravityExecutionError(tsu.error)
-            )
+          await self.step_queue.put(
+              types.AntigravityExecutionError(tsu.error)
+          )
+        if not self.is_idle.is_set():
+          self.is_idle.set()
+          await self.step_queue.put(IDLE_SENTINEL)
 
       elif (
           tsu.state

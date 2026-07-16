@@ -457,17 +457,7 @@ class LocalConnection(connection.Connection):
   def _is_idle(self) -> asyncio.Event:
     return self._processor.is_idle
 
-  @property
-  def _active_subagent_ids(self) -> set[str]:
-    return self._processor.active_subagent_ids
 
-  @property
-  def _parent_idle(self) -> bool:
-    return self._processor.parent_idle
-
-  @_parent_idle.setter
-  def _parent_idle(self, val: bool) -> None:
-    self._processor.parent_idle = val
 
   @property
   def _main_trajectory_id(self) -> str | None:
