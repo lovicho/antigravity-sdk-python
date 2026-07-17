@@ -18,6 +18,7 @@ import unittest
 from unittest import mock
 
 from absl.testing import absltest
+from google.protobuf import json_format
 
 from google.antigravity.connections.local import localharness_pb2
 from google.antigravity import types
@@ -263,22 +264,63 @@ class LocalConnectionStepFromDictTest(absltest.TestCase):
         "/cns/el-d/home/user/workspace/kittens.md",
     )
 
+  def test_step_type_tool_call_with_custom_tool(self):
+    """Verifies that a step with a custom_tool field is typed TOOL_CALL and parses details."""
+    step = event_processor.LocalConnectionStep.from_dict({
+        "source": "SOURCE_MODEL",
+        "state": "STATE_DONE",
+        "custom_tool": {
+            "tool_call": {
+                "id": "call_1",
+                "name": "my_custom_tool",
+                "arguments_json": (
+                    '{"arg1": "val1", "file_path": "file:///foo"}'
+                ),
+            },
+            "tool_response": {
+                "id": "my_custom_tool",
+                "response_json": '{"result": "ok"}',
+            },
+        },
+    })
+    self.assertEqual(step.type, types.StepType.TOOL_CALL)
+
+    self.assertLen(step.tool_calls, 1)
+    self.assertEqual(step.tool_calls[0].name, "my_custom_tool")
+    self.assertEqual(
+        step.tool_calls[0].args,
+        {"arg1": "val1", "file_path": "/foo"},
+    )
+    self.assertEqual(step.tool_calls[0].canonical_path, "/foo")
+    self.assertEqual(step.tool_calls[0].id, "call_1")
+
+  def test_step_type_tool_call_with_custom_tool_fallback_id(self):
+    """Verifies that fallback ID is used if custom_tool.tool_call.id is missing."""
+    step = event_processor.LocalConnectionStep.from_dict({
+        "trajectory_id": "traj_123",
+        "step_index": 5,
+        "source": "SOURCE_MODEL",
+        "state": "STATE_DONE",
+        "custom_tool": {
+            "tool_call": {
+                "name": "my_custom_tool",
+                "arguments_json": "{}",
+            },
+        },
+    })
+    self.assertLen(step.tool_calls, 1)
+    self.assertEqual(step.tool_calls[0].id, "traj_123:5")
+
 
 class LocalHarnessEventProcessorTest(unittest.IsolatedAsyncioTestCase):
   """Tests for LocalHarnessEventProcessor."""
 
-  async def test_main_agent_trajectory_step_update_resets_idle_state(self):
-    """Verifies that when a main agent transitions to RUNNING, idleness resets.
-
-    Why: The main agent can go in and out of the idle state as it waits on
-    subagents. When it exits the idle state to STATE_RUNNING, we should record
-    that so that the SDK does not terminate the agent process early.
-    """
+  async def test_main_agent_running_clears_idle_state(self):
+    """Verifies that when the main agent is RUNNING, the connection is not idle."""
     processor = event_processor.LocalHarnessEventProcessor(
         send_input_event_fn=mock.AsyncMock()
     )
     processor.main_trajectory_id = MAIN_TRAJECTORY_ID
-    processor.parent_idle = True
     processor.is_idle.set()
 
     event = localharness_pb2.OutputEvent(
@@ -289,70 +331,16 @@ class LocalHarnessEventProcessorTest(unittest.IsolatedAsyncioTestCase):
     )
     await processor.process_event(event)
 
-    self.assertFalse(processor.parent_idle)
     self.assertFalse(processor.is_idle.is_set())
 
-  async def test_subagent_trajectory_step_update_resets_idle_state(self):
-    """Verifies that when a subagent transitions to RUNNING, idleness resets.
-
-    Why: A subagent transitioning to STATE_RUNNING should reset idleness, but
-    not the state of the parent.
-    """
+  async def test_main_agent_idle_sets_idle_state(self):
+    """Verifies that when the main agent is IDLE, the connection is idle."""
     processor = event_processor.LocalHarnessEventProcessor(
         send_input_event_fn=mock.AsyncMock()
     )
     processor.main_trajectory_id = MAIN_TRAJECTORY_ID
-    processor.parent_idle = True
-    processor.is_idle.set()
+    processor.is_idle.clear()
 
-    event = localharness_pb2.OutputEvent(
-        trajectory_state_update=localharness_pb2.TrajectoryStateUpdate(
-            state=localharness_pb2.TrajectoryStateUpdate.State.STATE_RUNNING,
-            trajectory_id=SUBAGENT_TRAJECTORY_ID,
-        )
-    )
-    await processor.process_event(event)
-
-    self.assertTrue(processor.parent_idle)  # The parent remains idle
-    self.assertFalse(processor.is_idle.is_set())
-    self.assertIn(SUBAGENT_TRAJECTORY_ID, processor.active_subagent_ids)
-
-  async def test_trajectory_remains_active_if_any_agent_is_running(self):
-    """Verifies that when any agent is RUNNING, the trajectory is not idle.
-
-    Why: As agents transistion from IDLE to RUNNING, the trajectory should be
-    considered active.
-    """
-
-    processor = event_processor.LocalHarnessEventProcessor(
-        send_input_event_fn=mock.AsyncMock()
-    )
-    processor.main_trajectory_id = MAIN_TRAJECTORY_ID
-
-    # 1) Main agent starts, assert trajectory is active
-    event = localharness_pb2.OutputEvent(
-        trajectory_state_update=localharness_pb2.TrajectoryStateUpdate(
-            state=localharness_pb2.TrajectoryStateUpdate.State.STATE_RUNNING,
-            trajectory_id=MAIN_TRAJECTORY_ID,
-        )
-    )
-    await processor.process_event(event)
-    self.assertFalse(processor.parent_idle)
-    self.assertFalse(processor.is_idle.is_set())
-
-    # 2) Subagent starts, assert trajectory is still active
-    event = localharness_pb2.OutputEvent(
-        trajectory_state_update=localharness_pb2.TrajectoryStateUpdate(
-            state=localharness_pb2.TrajectoryStateUpdate.State.STATE_RUNNING,
-            trajectory_id=SUBAGENT_TRAJECTORY_ID,
-        )
-    )
-    await processor.process_event(event)
-    self.assertFalse(processor.parent_idle)
-    self.assertFalse(processor.is_idle.is_set())
-    self.assertIn(SUBAGENT_TRAJECTORY_ID, processor.active_subagent_ids)
-
-    # 3) Main agent goes idle, assert trajectory is still active
     event = localharness_pb2.OutputEvent(
         trajectory_state_update=localharness_pb2.TrajectoryStateUpdate(
             state=localharness_pb2.TrajectoryStateUpdate.State.STATE_IDLE,
@@ -360,46 +348,196 @@ class LocalHarnessEventProcessorTest(unittest.IsolatedAsyncioTestCase):
         )
     )
     await processor.process_event(event)
-    self.assertTrue(processor.parent_idle)
-    self.assertFalse(processor.is_idle.is_set())
-    self.assertIn(SUBAGENT_TRAJECTORY_ID, processor.active_subagent_ids)
 
-    # 4) Main agent starts again, assert trajectory is still active
-    event = localharness_pb2.OutputEvent(
-        trajectory_state_update=localharness_pb2.TrajectoryStateUpdate(
-            state=localharness_pb2.TrajectoryStateUpdate.State.STATE_RUNNING,
-            trajectory_id=MAIN_TRAJECTORY_ID,
-        )
-    )
-    await processor.process_event(event)
-    self.assertFalse(processor.parent_idle)
-    self.assertFalse(processor.is_idle.is_set())
-    self.assertIn(SUBAGENT_TRAJECTORY_ID, processor.active_subagent_ids)
-
-    # 5) Subagent goes idle, assert trajectory is still active
-    event = localharness_pb2.OutputEvent(
-        trajectory_state_update=localharness_pb2.TrajectoryStateUpdate(
-            state=localharness_pb2.TrajectoryStateUpdate.State.STATE_IDLE,
-            trajectory_id=SUBAGENT_TRAJECTORY_ID,
-        )
-    )
-    await processor.process_event(event)
-    self.assertFalse(processor.parent_idle)
-    self.assertFalse(processor.is_idle.is_set())
-    self.assertNotIn(SUBAGENT_TRAJECTORY_ID, processor.active_subagent_ids)
-
-    # 6) Main agent goes idle, assert trajectory is now idle
-    # (since all agents are idle)
-    event = localharness_pb2.OutputEvent(
-        trajectory_state_update=localharness_pb2.TrajectoryStateUpdate(
-            state=localharness_pb2.TrajectoryStateUpdate.State.STATE_IDLE,
-            trajectory_id=MAIN_TRAJECTORY_ID,
-        )
-    )
-    await processor.process_event(event)
-    self.assertTrue(processor.parent_idle)
     self.assertTrue(processor.is_idle.is_set())
+    self.assertEqual(processor.step_queue.qsize(), 1)
+    self.assertIs(
+        await processor.step_queue.get(), event_processor.IDLE_SENTINEL
+    )
 
+  async def test_main_agent_idle_with_error_sets_idle_state(self):
+    """Verifies that when the main agent goes IDLE with an error, the error is enqueued before the sentinel."""
+    processor = event_processor.LocalHarnessEventProcessor(
+        send_input_event_fn=mock.AsyncMock()
+    )
+    processor.main_trajectory_id = MAIN_TRAJECTORY_ID
+    processor.is_idle.clear()
+
+    event = localharness_pb2.OutputEvent(
+        trajectory_state_update=localharness_pb2.TrajectoryStateUpdate(
+            state=localharness_pb2.TrajectoryStateUpdate.State.STATE_IDLE,
+            trajectory_id=MAIN_TRAJECTORY_ID,
+            error="Failed turn execution",
+        )
+    )
+    await processor.process_event(event)
+
+    self.assertTrue(processor.is_idle.is_set())
+    self.assertEqual(processor.step_queue.qsize(), 2)  # error + IDLE_SENTINEL
+    err = await processor.step_queue.get()
+    self.assertIsInstance(err, types.AntigravityExecutionError)
+    self.assertEqual(str(err), "Failed turn execution")
+    self.assertIs(
+        await processor.step_queue.get(), event_processor.IDLE_SENTINEL
+    )
+
+  async def test_main_agent_cancelled_sets_idle_state(self):
+    """Verifies that when the main agent is CANCELLED, the connection is idle with error."""
+    processor = event_processor.LocalHarnessEventProcessor(
+        send_input_event_fn=mock.AsyncMock()
+    )
+    processor.main_trajectory_id = MAIN_TRAJECTORY_ID
+    processor.is_idle.clear()
+
+    event = localharness_pb2.OutputEvent(
+        trajectory_state_update=localharness_pb2.TrajectoryStateUpdate(
+            state=localharness_pb2.TrajectoryStateUpdate.State.STATE_CANCELLED,
+            trajectory_id=MAIN_TRAJECTORY_ID,
+            error="Cancelled by user",
+        )
+    )
+    await processor.process_event(event)
+
+    self.assertTrue(processor.is_idle.is_set())
+    self.assertEqual(processor.step_queue.qsize(), 2)  # error + IDLE_SENTINEL
+    err = await processor.step_queue.get()
+    self.assertIsInstance(err, types.AntigravityExecutionError)
+    self.assertEqual(str(err), "Cancelled by user")
+    self.assertIs(
+        await processor.step_queue.get(), event_processor.IDLE_SENTINEL
+    )
+
+  async def test_subagent_state_ignored_for_idle(self):
+    """Verifies that subagent state updates do not directly affect connection idleness."""
+    processor = event_processor.LocalHarnessEventProcessor(
+        send_input_event_fn=mock.AsyncMock()
+    )
+    processor.main_trajectory_id = MAIN_TRAJECTORY_ID
+    processor.is_idle.clear()
+
+    # Subagent running shouldn't affect anything
+    event = localharness_pb2.OutputEvent(
+        trajectory_state_update=localharness_pb2.TrajectoryStateUpdate(
+            state=localharness_pb2.TrajectoryStateUpdate.State.STATE_RUNNING,
+            trajectory_id=SUBAGENT_TRAJECTORY_ID,
+        )
+    )
+    await processor.process_event(event)
+    self.assertFalse(processor.is_idle.is_set())
+
+    # Subagent idle shouldn't affect anything
+    event = localharness_pb2.OutputEvent(
+        trajectory_state_update=localharness_pb2.TrajectoryStateUpdate(
+            state=localharness_pb2.TrajectoryStateUpdate.State.STATE_IDLE,
+            trajectory_id=SUBAGENT_TRAJECTORY_ID,
+        )
+    )
+    await processor.process_event(event)
+    self.assertFalse(processor.is_idle.is_set())
+    self.assertTrue(processor.step_queue.empty())
+
+  @mock.patch.object(event_processor, "logging")
+  async def test_subagent_error_logged_but_ignored_for_idle(self, mock_logging):
+    """Verifies that subagent failures log errors but do not affect idle state."""
+    processor = event_processor.LocalHarnessEventProcessor(
+        send_input_event_fn=mock.AsyncMock()
+    )
+    processor.main_trajectory_id = MAIN_TRAJECTORY_ID
+    processor.is_idle.clear()
+
+    event = localharness_pb2.OutputEvent(
+        trajectory_state_update=localharness_pb2.TrajectoryStateUpdate(
+            state=localharness_pb2.TrajectoryStateUpdate.State.STATE_IDLE,
+            trajectory_id=SUBAGENT_TRAJECTORY_ID,
+            error="Subagent failure",
+        )
+    )
+    await processor.process_event(event)
+
+    mock_logging.info.assert_called_once_with(
+        "Subagent trajectory failed with error: %s", "Subagent failure"
+    )
+    self.assertFalse(processor.is_idle.is_set())
+    self.assertTrue(processor.step_queue.empty())
+
+  async def test_process_event_skips_local_custom_tool_in_step_update(self):
+    """Verifies that process_event removes custom_tool if it is a local tool."""
+    mock_tool_runner = mock.MagicMock()
+    mock_tool_runner.tool_names = ["my_local_tool"]
+    mock_hook_runner = mock.AsyncMock()
+    processor = event_processor.LocalHarnessEventProcessor(
+        send_input_event_fn=mock.AsyncMock(),
+        tool_runner=mock_tool_runner,
+        hook_runner=mock_hook_runner,
+    )
+
+    step_update_pb = localharness_pb2.StepUpdate()
+    json_format.ParseDict(
+        {
+            "trajectory_id": "traj_123",
+            "step_index": 5,
+            "source": "SOURCE_MODEL",
+            "state": "STATE_DONE",
+            "custom_tool": {
+                "tool_call": {
+                    "name": "my_local_tool",
+                    "arguments_json": "{}",
+                },
+            },
+        },
+        step_update_pb,
+    )
+    event = localharness_pb2.OutputEvent(step_update=step_update_pb)
+
+    await processor.process_event(event)
+
+    self.assertEqual(processor.step_queue.qsize(), 1)
+    step = await processor.step_queue.get()
+    self.assertEqual(len(step.tool_calls), 0)
+    self.assertEqual(step.type, types.StepType.TOOL_CALL)
+
+    mock_hook_runner.dispatch_pre_step.assert_called_once()
+    called_step = mock_hook_runner.dispatch_pre_step.call_args[0][1]
+    self.assertEqual(called_step.type, types.StepType.TOOL_CALL)
+    self.assertEqual(len(called_step.tool_calls), 1)
+    self.assertEqual(called_step.tool_calls[0].name, "my_local_tool")
+
+  async def test_process_event_does_not_skip_remote_custom_tool_in_step_update(
+      self,
+  ):
+    """Verifies that process_event keeps custom_tool if it is not a local tool."""
+    mock_tool_runner = mock.MagicMock()
+    mock_tool_runner.tool_names = ["some_other_tool"]
+    processor = event_processor.LocalHarnessEventProcessor(
+        send_input_event_fn=mock.AsyncMock(),
+        tool_runner=mock_tool_runner,
+    )
+
+    step_update_pb = localharness_pb2.StepUpdate()
+    json_format.ParseDict(
+        {
+            "trajectory_id": "traj_123",
+            "step_index": 5,
+            "source": "SOURCE_MODEL",
+            "state": "STATE_DONE",
+            "custom_tool": {
+                "tool_call": {
+                    "name": "my_remote_tool",
+                    "arguments_json": "{}",
+                },
+            },
+        },
+        step_update_pb,
+    )
+    event = localharness_pb2.OutputEvent(step_update=step_update_pb)
+
+    await processor.process_event(event)
+
+    self.assertEqual(processor.step_queue.qsize(), 1)
+    step = await processor.step_queue.get()
+    self.assertEqual(len(step.tool_calls), 1)
+    self.assertEqual(step.tool_calls[0].name, "my_remote_tool")
+    self.assertEqual(step.type, types.StepType.TOOL_CALL)
 
 if __name__ == "__main__":
   absltest.main()

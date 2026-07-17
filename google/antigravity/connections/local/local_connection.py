@@ -28,18 +28,19 @@ import struct
 import subprocess
 import sys
 import threading
-from typing import Any, AsyncIterator, Callable, Sequence, cast
+from typing import Any, AsyncIterator, Callable, cast, Sequence
 
 from google.genai import types as genai_types
 from google.protobuf import json_format
 import websockets
 
+from google.antigravity.connections.local import localharness_pb2
 from google.antigravity import types
 from google.antigravity.connections import connection
-from google.antigravity.connections.local import localharness_pb2
 from google.antigravity.connections.local import event_processor
 from google.antigravity.hooks import hook_runner as h_runner
 from google.antigravity.tools import tool_runner as t_runner
+
 
 LocalConnectionStep = event_processor.LocalConnectionStep
 IDLE_SENTINEL = event_processor.IDLE_SENTINEL
@@ -48,6 +49,26 @@ CLOSE_SENTINEL = event_processor.CLOSE_SENTINEL
 # shutdown cleanly. So we give it ample time. This constant is needed to make
 # tests fast.
 _PROCESS_WAIT_TIMEOUT_SECONDS = 3 * 60
+_MAX_WEBSOCKET_CONNECT_RETRIES = 5
+
+
+_SESSION_CONTINUATION_MODE_MAP = {
+    types.SessionContinuationMode.RESUME: localharness_pb2.HarnessConfig.RESUME,
+    types.SessionContinuationMode.CREATE_OR_RESUME: (
+        localharness_pb2.HarnessConfig.CREATE_OR_RESUME
+    ),
+    types.SessionContinuationMode.CREATE_ONLY: (
+        localharness_pb2.HarnessConfig.CREATE_ONLY
+    ),
+}
+
+
+def to_proto_session_continuation_mode(
+    mode: types.SessionContinuationMode | None,
+) -> localharness_pb2.HarnessConfig.SessionContinuationMode:
+  if mode in _SESSION_CONTINUATION_MODE_MAP:
+    return _SESSION_CONTINUATION_MODE_MAP[mode]
+  return localharness_pb2.HarnessConfig.SESSION_CONTINUATION_MODE_UNSPECIFIED
 
 
 def to_proto_model_type(
@@ -436,17 +457,7 @@ class LocalConnection(connection.Connection):
   def _is_idle(self) -> asyncio.Event:
     return self._processor.is_idle
 
-  @property
-  def _active_subagent_ids(self) -> set[str]:
-    return self._processor.active_subagent_ids
 
-  @property
-  def _parent_idle(self) -> bool:
-    return self._processor.parent_idle
-
-  @_parent_idle.setter
-  def _parent_idle(self, val: bool) -> None:
-    self._processor.parent_idle = val
 
   @property
   def _main_trajectory_id(self) -> str | None:
@@ -621,6 +632,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
       system_instructions: str | types.SystemInstructions | None = None,
       capabilities_config: types.CapabilitiesConfig | None = None,
       conversation_id: str | None = None,
+      session_continuation_mode: types.SessionContinuationMode | None = None,
       save_dir: str | None = None,
       workspaces: list[str] | None = None,
       app_data_dir: str | None = None,
@@ -638,6 +650,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
       system_instructions: Optional SystemInstructions or string shorthand.
       capabilities_config: Optional CapabilitiesConfig to configure tools.
       conversation_id: Optional conversation identifier.
+      session_continuation_mode: Optional mode for establishing a connection.
       save_dir: Optional directory to save trajectories.
       workspaces: Optional list of workspace paths.
       app_data_dir: Optional directory for harness app data.
@@ -666,6 +679,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
         capabilities_config or types.CapabilitiesConfig()
     )
     self._conversation_id = conversation_id
+    self._session_continuation_mode = session_continuation_mode
     self._save_dir = save_dir
     self._workspaces = [
         event_processor.normalize_wire_path(ws) for ws in workspaces or []
@@ -886,6 +900,9 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
         tools=list(main_agent_tool_protos.values()),
         system_instructions=system_instructions_proto,
         cascade_id=self._conversation_id or "",
+        session_continuation_mode=to_proto_session_continuation_mode(
+            self._session_continuation_mode
+        ),
         models=models_protos,
         workspaces=workspace_protos,
         skills_paths=self._skills_paths or [],
@@ -968,6 +985,32 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
             f"Model '{m.name}' must have an endpoint configured."
         )
 
+  async def _connect_websocket(
+      self, port: int, api_key: str, process: subprocess.Popen[bytes]
+  ) -> tuple[Any, str]:
+    """Attempts to connect to the local harness WebSocket with backoff."""
+    for attempt in range(_MAX_WEBSOCKET_CONNECT_RETRIES):
+      for host in ("localhost", "127.0.0.1"):
+        ws_url = f"ws://{host}:{port}/"
+        try:
+          ws = await websockets.connect(
+              ws_url,
+              additional_headers={"x-goog-api-key": api_key},
+          )
+          return ws, ws_url
+        except (OSError, websockets.WebSocketException) as e:
+          last_exception = e
+      await asyncio.sleep(0.1 * (2**attempt))
+
+    process.kill()
+    stderr = ""
+    if process.stderr is not None:
+      stderr = process.stderr.read().decode("utf-8")
+    raise RuntimeError(
+        f"Failed to connect to WebSocket at {ws_url} after"
+        f" {_MAX_WEBSOCKET_CONNECT_RETRIES} attempts. Stderr: {stderr}"
+    ) from last_exception
+
   async def __aenter__(self) -> None:
     """Starts the backend."""
     self._validate_connection()
@@ -1014,30 +1057,14 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
     length = struct.unpack("<I", raw_len)[0]
     output_config = localharness_pb2.OutputConfig()
     output_config.ParseFromString(process.stdout.read(length))
-    ws_url = f"ws://localhost:{output_config.port}/"
-
     # Retry the WebSocket connection with backoff. The harness process may
-    # need a moment to start listening after writing its OutputConfig.
-    max_retries = 5
-    ws = None
-    for attempt in range(max_retries):
-      try:
-        ws = await websockets.connect(
-            ws_url,
-            additional_headers={"x-goog-api-key": output_config.api_key},
-        )
-        break
-      except (OSError, websockets.WebSocketException) as e:
-        if attempt == max_retries - 1:
-          process.kill()
-          stderr_output = process.stderr.read().decode("utf-8")
-          raise RuntimeError(
-              f"Failed to connect to WebSocket at {ws_url} after"
-              f" {max_retries} attempts. Stderr: {stderr_output}"
-          ) from e
-        await asyncio.sleep(0.1 * (2**attempt))
+    # need a moment to start listening after writing its OutputConfig. We try
+    # localhost first and fall back to 127.0.0.1, as some environments may not
+    # resolve localhost.
+    ws, ws_url = await self._connect_websocket(
+        output_config.port, output_config.api_key, process
+    )
 
-    assert ws is not None
     try:
       init_event = localharness_pb2.InitializeConversationEvent(
           config=harness_config
@@ -1061,8 +1088,8 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
       process.kill()
       stderr_output = process.stderr.read().decode("utf-8")
       raise RuntimeError(
-          f"Failed to initialize conversation at {ws_url}."
-          f" Stderr: {stderr_output}"
+          f"Failed to initialize conversation at {ws_url}. Stderr:"
+          f" {stderr_output}"
       ) from e
     self._connection = LocalConnection(
         process=process,

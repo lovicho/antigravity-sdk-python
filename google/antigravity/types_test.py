@@ -1544,5 +1544,52 @@ class SubagentConfigTest(unittest.TestCase):
       types.SubagentConfig(**{"description": "helpful agent"})  # Missing name
 
 
+class UsageMetadataTest(unittest.TestCase):
+  """Tests for the UsageMetadata class."""
+
+  def test_add_operator(self):
+    """Verifies that __add__ sums token usage fields correctly."""
+    u1 = types.UsageMetadata(
+        prompt_token_count=100,
+        cached_content_token_count=50,
+        candidates_token_count=30,
+        thoughts_token_count=20,
+        total_token_count=150,
+    )
+    u2 = types.UsageMetadata(
+        prompt_token_count=200,
+        cached_content_token_count=10,
+        candidates_token_count=40,
+        thoughts_token_count=5,
+        total_token_count=245,
+    )
+    res = u1 + u2
+    self.assertEqual(res.prompt_token_count, 300)
+    self.assertEqual(res.cached_content_token_count, 60)
+    self.assertEqual(res.candidates_token_count, 70)
+    self.assertEqual(res.thoughts_token_count, 25)
+    self.assertEqual(res.total_token_count, 395)
+
+  def test_add_operator_with_none(self):
+    """Verifies that __add__ treats None fields as zero."""
+    u1 = types.UsageMetadata(
+        prompt_token_count=100,
+    )
+    u2 = types.UsageMetadata(
+        candidates_token_count=50,
+    )
+    res = u1 + u2
+    self.assertEqual(res.prompt_token_count, 100)
+    self.assertEqual(res.cached_content_token_count, 0)
+    self.assertEqual(res.candidates_token_count, 50)
+    self.assertEqual(res.thoughts_token_count, 0)
+    self.assertEqual(res.total_token_count, 0)
+
+  def test_add_operator_invalid_type(self):
+    """Verifies that __add__ returns NotImplemented for invalid types."""
+    u = types.UsageMetadata(prompt_token_count=10)
+    self.assertEqual(u.__add__(1), NotImplemented)
+
+
 if __name__ == "__main__":
   absltest.main()

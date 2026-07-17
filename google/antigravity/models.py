@@ -23,6 +23,7 @@ from __future__ import annotations
 import abc
 import enum
 import os
+from typing import Any
 
 import pydantic
 
@@ -32,7 +33,7 @@ import pydantic
 # =============================================================================
 
 DEFAULT_MODEL = "gemini-3.5-flash"
-DEFAULT_IMAGE_GENERATION_MODEL = "gemini-3.1-flash-image-preview"
+DEFAULT_IMAGE_GENERATION_MODEL = "gemini-3.1-flash-lite-image"
 
 
 # =============================================================================
@@ -111,6 +112,16 @@ class VertexEndpoint(ModelEndpoint):
   project: str | None = None
   location: str | None = None
   options: GeminiModelOptions | None = None
+
+  @pydantic.model_validator(mode="before")
+  @classmethod
+  def _populate_env_vars(cls, data: Any) -> Any:
+    if isinstance(data, dict):
+      if data.get("project") is None:
+        data["project"] = os.environ.get("GOOGLE_CLOUD_PROJECT")
+      if data.get("location") is None:
+        data["location"] = os.environ.get("GOOGLE_CLOUD_LOCATION")
+    return data
 
   def validate_endpoint(self) -> None:
     if not (self.project and self.location):

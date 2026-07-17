@@ -54,6 +54,7 @@ __all__ = [
     "SubagentCapabilities",
     "BuiltinTools",
     "CapabilitiesConfig",
+    "SessionContinuationMode",
     "BaseMcpServerConfig",
     "McpStdioServer",
     "McpStreamableHttpServer",
@@ -516,6 +517,22 @@ class UsageMetadata(pydantic.BaseModel):
   # Total tokens (prompt + candidates + thoughts).
   total_token_count: int | None = None
 
+  def __add__(self, other: UsageMetadata) -> UsageMetadata:
+    if not isinstance(other, UsageMetadata):
+      return NotImplemented
+    return UsageMetadata(
+        prompt_token_count=(self.prompt_token_count or 0)
+        + (other.prompt_token_count or 0),
+        cached_content_token_count=(self.cached_content_token_count or 0)
+        + (other.cached_content_token_count or 0),
+        candidates_token_count=(self.candidates_token_count or 0)
+        + (other.candidates_token_count or 0),
+        thoughts_token_count=(self.thoughts_token_count or 0)
+        + (other.thoughts_token_count or 0),
+        total_token_count=(self.total_token_count or 0)
+        + (other.total_token_count or 0),
+    )
+
 
 class StepType(str, enum.Enum):
   """High-level type of a step."""
@@ -556,6 +573,20 @@ class StepStatus(str, enum.Enum):
   ERROR = "ERROR"
   CANCELED = "CANCELED"
   UNKNOWN = "UNKNOWN"
+
+
+class SessionContinuationMode(str, enum.Enum):
+  """Mode for establishing a connection to an agent session.
+
+  Attributes:
+    RESUME: Resume an existing session. Fail if it doesn't exist.
+    CREATE_OR_RESUME: Resume if exists, create a new one if missing.
+    CREATE_ONLY: Create a new session. Fail if it already exists.
+  """
+
+  RESUME = "resume"
+  CREATE_OR_RESUME = "create_or_resume"
+  CREATE_ONLY = "create_only"
 
 
 class Step(pydantic.BaseModel):

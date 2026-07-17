@@ -226,6 +226,7 @@ class LocalConnectionStep(types.Step):
     active_tool_args = sub_msg if isinstance(sub_msg, dict) else {}
 
     active_server_name = None
+    active_tool_id = None
     # Reconstruct the step's tool name and arguments from the Go-native McpTool
     # proto format to maintain Python-side trajectory parity.
     if not active_tool_name and _MCP_TOOL_PROTO_FIELD in step_dict:
@@ -237,6 +238,19 @@ class LocalConnectionStep(types.Step):
         active_server_name = server_name
         arguments_json = mcp_dict.get("arguments_json") or "{}"
         active_tool_args = json.loads(arguments_json)
+
+    if not active_tool_name and "custom_tool" in step_dict:
+      ct_dict = step_dict["custom_tool"]
+      if isinstance(ct_dict, dict) and "tool_call" in ct_dict:
+        tc_dict = ct_dict["tool_call"]
+        if isinstance(tc_dict, dict):
+          active_tool_name = tc_dict.get("name", "")
+          active_tool_id = tc_dict.get("id")
+          arguments_json = tc_dict.get("arguments_json") or "{}"
+          try:
+            active_tool_args = json.loads(arguments_json)
+          except json.JSONDecodeError:
+            active_tool_args = {}
 
     if active_tool_name:
       canonical_path = None
@@ -253,7 +267,7 @@ class LocalConnectionStep(types.Step):
           types.ToolCall(
               name=active_tool_name,
               args=active_tool_args,
-              id=_make_step_id(traj_id, step_idx),
+              id=active_tool_id or _make_step_id(traj_id, step_idx),
               canonical_path=canonical_path,
               server_name=active_server_name,
           )
@@ -354,8 +368,6 @@ class LocalHarnessEventProcessor:
     self.is_idle.set()
     self.session_end_done = asyncio.Event()
     self.main_trajectory_id = None
-    self.active_subagent_ids: set[str] = set()
-    self.parent_idle = True
     self._step_trackers: dict[tuple[str, int], _StepTracker] = {}
     self._background_tasks = set()
     self._hook_router = (
@@ -366,8 +378,6 @@ class LocalHarnessEventProcessor:
 
   def reset_for_turn(self) -> None:
     self.is_idle.clear()
-    self.parent_idle = False
-    self.active_subagent_ids.clear()
     self.main_trajectory_id = None
 
   async def cancel_background_tasks(self) -> None:
@@ -435,7 +445,30 @@ class LocalHarnessEventProcessor:
         )
       else:
         step_obj = parsed_step
-      await self.step_queue.put(step_obj)
+
+      step_obj_for_queue = step_obj
+      if self._tool_runner and step_obj.tool_calls:
+        is_local_custom_tool = False
+        for tc in step_obj.tool_calls:
+          if tc.name in self._tool_runner.tool_names:
+            is_local_custom_tool = True
+            break
+
+        if is_local_custom_tool:
+          # During live execution of a local custom tool, the Go harness
+          # sends both a StepUpdate event with custom_tool and a websocket
+          # tool_call event. To prevent duplicate ToolCallStart events on the
+          # client, we suppress the tool calls from this StepUpdate before
+          # putting it in the queue.
+          #
+          # This filtering is done here rather than in from_dict() because
+          # during history resumption, from_dict() is called directly to load
+          # historical steps. Since no websocket tool_call events are replayed
+          # during resumption, from_dict() must parse the custom_tool from the
+          # history payload to reconstruct the steps in the session.
+          step_obj_for_queue = step_obj.model_copy(update={"tool_calls": []})
+
+      await self.step_queue.put(step_obj_for_queue)
 
       # Record the main trajectory ID on the first step we see
       if self.main_trajectory_id is None and step_update.trajectory_id:
@@ -494,38 +527,29 @@ class LocalHarnessEventProcessor:
           and tsu.trajectory_id != self.main_trajectory_id
       )
 
+      # Subagent execution is coordinated by the harness. The Python client
+      # only tracks the main trajectory's idle state and ignores subagent
+      # trajectory events (except for logging failures on exit).
+      if is_subagent:
+        if tsu.HasField("error"):
+          logging.info("Subagent trajectory failed with error: %s", tsu.error)
+        return
+
       if (
           tsu.state
           == localharness_pb2.TrajectoryStateUpdate.State.STATE_RUNNING
       ):
-        # If any trajectory is running, the connection is not idle.
         if self.is_idle.is_set():
           self.is_idle.clear()
-        if is_subagent:
-          self.active_subagent_ids.add(tsu.trajectory_id)
-        else:
-          # Note: the main trajectory seems to switch from RUNNING -> IDLE ->
-          # RUNNING as it invokes subagents.
-          self.parent_idle = False
 
       elif tsu.state == localharness_pb2.TrajectoryStateUpdate.State.STATE_IDLE:
-        if is_subagent:
-          self.active_subagent_ids.discard(tsu.trajectory_id)
-        else:
-          self.parent_idle = True
-
-        if self.parent_idle and not self.active_subagent_ids:
-          if not self.is_idle.is_set():
-            self.is_idle.set()
-            await self.step_queue.put(IDLE_SENTINEL)
-
         if tsu.HasField("error"):
-          if is_subagent:
-            logging.info("Subagent trajectory failed with error: %s", tsu.error)
-          else:
-            await self.step_queue.put(
-                types.AntigravityExecutionError(tsu.error)
-            )
+          await self.step_queue.put(
+              types.AntigravityExecutionError(tsu.error)
+          )
+        if not self.is_idle.is_set():
+          self.is_idle.set()
+          await self.step_queue.put(IDLE_SENTINEL)
 
       elif (
           tsu.state

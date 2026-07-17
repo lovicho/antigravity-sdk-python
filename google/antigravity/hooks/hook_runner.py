@@ -286,7 +286,7 @@ class HookRunner:
 
   # Compaction
   async def dispatch_compaction(
-      self, turn_context: hooks_base.TurnContext, data: Any
+      self, turn_context: hooks_base.TurnContext, data: types.Step
   ) -> None:
     """Dispatches compaction events.
 

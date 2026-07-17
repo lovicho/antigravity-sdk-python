@@ -115,14 +115,18 @@ class BaseLocalAgentConfig(connection.AgentConfig):
   @pydantic.model_validator(mode="after")
   def _apply_workspace_policies(self) -> "BaseLocalAgentConfig":
     """Prepends workspace-scoping policies when workspaces are configured."""
+    other_policies = [
+        p for p in self.policies if getattr(p, "name", "") != "workspace_only"
+    ]
     if self.workspaces:
       app_data_path = self.app_data_dir or DEFAULT_APP_DATA_DIR
       resolved_app_data_dir = pathlib.Path(app_data_path).expanduser().resolve()
       allowed_paths = [*self.workspaces, str(resolved_app_data_dir)]
-
       self.__dict__["policies"] = (
-          policy.workspace_only(allowed_paths) + self.policies
+          policy.workspace_only(allowed_paths) + other_policies
       )
+    else:
+      self.__dict__["policies"] = other_policies
     return self
 
   def _get_system_instructions(self) -> types.SystemInstructions | None:
@@ -180,6 +184,7 @@ class LocalAgentConfig(BaseLocalAgentConfig):
       workspaces: list[str] | None = None,
       env: dict[str, str] | None = None,
       conversation_id: str | None = None,
+      session_continuation_mode: types.SessionContinuationMode | None = None,
       save_dir: str | None = None,
       app_data_dir: str | None = None,
       response_schema: (
@@ -194,6 +199,12 @@ class LocalAgentConfig(BaseLocalAgentConfig):
       location: str | None = None,
       **kwargs: Any,
   ):
+    if vertex is None and (
+        os.environ.get("GOOGLE_GENAI_USE_VERTEXAI", "").lower() in ("true", "1")
+        or os.environ.get("GOOGLE_GENAI_USE_ENTERPRISE", "").lower()
+        in ("true", "1")
+    ):
+      vertex = True
 
     init_data = {
         k: v
@@ -302,6 +313,7 @@ class LocalAgentConfig(BaseLocalAgentConfig):
         system_instructions=self._get_system_instructions(),
         capabilities_config=self.capabilities,
         conversation_id=self.conversation_id,
+        session_continuation_mode=self.session_continuation_mode,
         save_dir=self._get_or_create_save_dir(),
         workspaces=self.workspaces,
         app_data_dir=self.app_data_dir,

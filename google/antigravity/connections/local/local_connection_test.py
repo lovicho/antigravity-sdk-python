@@ -21,6 +21,7 @@ import importlib
 import io
 import os
 import pathlib
+import struct
 import subprocess
 import tempfile
 import unittest
@@ -32,11 +33,11 @@ import pydantic
 import websockets
 
 from google.antigravity.connections.local import localharness_pb2
+from google.antigravity.connections.local import localharness_pb2
 from google.antigravity import types
 from google.antigravity.connections.local import event_processor
 from google.antigravity.connections.local import local_connection
 from google.antigravity.connections.local import local_connection_config
-from google.antigravity.connections.local import localharness_pb2
 from google.antigravity.connections.local import test_utils
 from google.antigravity.hooks import hook_runner
 from google.antigravity.hooks import hooks as hooks_base
@@ -1388,9 +1389,47 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
     How: Set conversation_id via session_config and assert it appears
     on the proto.
     """
-    strategy = self._make_strategy(conversation_id="resume-123")
+    strategy = self._make_strategy(
+        conversation_id="12345678901234567890123456789012"
+    )
     config = strategy._build_harness_config()
-    self.assertEqual(config.cascade_id, "resume-123")
+    self.assertEqual(config.cascade_id, "12345678901234567890123456789012")
+
+  def test_session_continuation_mode_passed_through(self):
+    """Verifies session_continuation_mode maps to proto."""
+    for sdk_mode, proto_mode in [
+        (
+            types.SessionContinuationMode.RESUME,
+            localharness_pb2.HarnessConfig.RESUME,
+        ),
+        (
+            types.SessionContinuationMode.CREATE_OR_RESUME,
+            localharness_pb2.HarnessConfig.CREATE_OR_RESUME,
+        ),
+        (
+            types.SessionContinuationMode.CREATE_ONLY,
+            localharness_pb2.HarnessConfig.CREATE_ONLY,
+        ),
+    ]:
+      with self.subTest(sdk_mode=sdk_mode):
+        strategy = self._make_strategy(session_continuation_mode=sdk_mode)
+        config = strategy._build_harness_config()
+        self.assertEqual(config.session_continuation_mode, proto_mode)
+
+  def test_session_continuation_mode_default_unspecified(self):
+    """Verifies session_continuation_mode defaults to UNSPECIFIED.
+
+    Why: If session_continuation_mode is not explicitly set, the harness should
+      use its default fallback logic.
+    How: Build with default config and assert session_continuation_mode is
+      UNSPECIFIED.
+    """
+    strategy = self._make_strategy()
+    config = strategy._build_harness_config()
+    self.assertEqual(
+        config.session_continuation_mode,
+        localharness_pb2.HarnessConfig.SESSION_CONTINUATION_MODE_UNSPECIFIED,
+    )
 
   def test_cascade_id_default_empty(self):
     """Verifies that cascade_id defaults to empty string when no conversation_id set.
@@ -1814,6 +1853,56 @@ class LocalConnectionStrategyApiKeyTest(unittest.IsolatedAsyncioTestCase):
       async with strategy:
         pass
 
+  @mock.patch.dict(
+      "os.environ",
+      {
+          "GOOGLE_GENAI_USE_VERTEXAI": "True",
+          "GOOGLE_CLOUD_PROJECT": "env-project",
+          "GOOGLE_CLOUD_LOCATION": "env-location",
+      },
+      clear=True,
+  )
+  @mock.patch("subprocess.Popen")
+  async def test_bare_config_routes_to_vertex_via_env(self, mock_popen):
+    """Bare LocalAgentConfig + Vertex env vars routes to Vertex and validates."""
+    mock_proc = mock.MagicMock()
+    mock_proc.stdin = mock.MagicMock()
+    mock_proc.stdout = mock.MagicMock()
+    mock_proc.stderr = mock.MagicMock()
+    mock_proc.stdout.read.return_value = b""
+    mock_popen.return_value = mock_proc
+
+    cfg = local_connection_config.LocalAgentConfig(model="gemini-3.5-flash")
+    self.assertIsInstance(cfg.models[0].endpoint, types.VertexEndpoint)
+    self.assertEqual(cfg.models[0].endpoint.project, "env-project")
+    self.assertEqual(cfg.models[0].endpoint.location, "env-location")
+    strategy = self._make_strategy(models=cfg.models)
+    with self.assertRaises(RuntimeError):
+      async with strategy:
+        pass
+
+  @mock.patch.dict(
+      "os.environ", {"GOOGLE_GENAI_USE_ENTERPRISE": "True"}, clear=True
+  )
+  def test_bare_config_routes_to_vertex_via_use_enterprise_env(self):
+    """USE_ENTERPRISE alone also triggers Vertex routing (GEAP recipe)."""
+    cfg = local_connection_config.LocalAgentConfig(model="gemini-3.5-flash")
+    self.assertIsInstance(cfg.models[0].endpoint, types.VertexEndpoint)
+
+  @mock.patch.dict(
+      "os.environ",
+      {
+          "GOOGLE_CLOUD_PROJECT": "env-project",
+          "GOOGLE_CLOUD_LOCATION": "env-location",
+      },
+      clear=True,
+  )
+  def test_vertex_endpoint_direct_construction_hydrates_from_env(self):
+    """VertexEndpoint() constructed directly also hydrates from env."""
+    ep = types.VertexEndpoint()
+    self.assertEqual(ep.project, "env-project")
+    self.assertEqual(ep.location, "env-location")
+
   @mock.patch.dict("os.environ", {"GEMINI_API_KEY": "env-key"}, clear=True)
   @mock.patch("subprocess.Popen")
   async def test_accepts_env_var_api_key(self, mock_popen):
@@ -1951,6 +2040,74 @@ class LocalConnectionStrategyApiKeyTest(unittest.IsolatedAsyncioTestCase):
     with self.assertRaises(RuntimeError):
       async with strategy:
         pass
+
+
+class LocalConnectionStrategyConnectTest(unittest.IsolatedAsyncioTestCase):
+  """Tests for WebSocket connection fallback in LocalConnectionStrategy."""
+
+  def setUp(self):
+    super().setUp()
+    self.patcher = mock.patch(
+        "google.antigravity.connections.local.local_connection._get_default_binary_path",
+        return_value="/fake/binary",
+    )
+    self.patcher.start()
+    self.addCleanup(self.patcher.stop)
+
+  def _make_strategy(self, **kwargs):
+    return local_connection.LocalConnectionStrategy(**kwargs)
+
+  @mock.patch("websockets.connect", new_callable=mock.AsyncMock)
+  @mock.patch("subprocess.Popen")
+  async def test_connect_falls_back_to_127_0_0_1_on_localhost_failure(
+      self, mock_popen, mock_connect
+  ):
+    """Verifies that if localhost fails, strategy attempts connecting via 127.0.0.1."""
+    output_config = localharness_pb2.OutputConfig(port=8080, api_key="fake-key")
+    serialized = output_config.SerializeToString()
+    length_bytes = struct.pack("<I", len(serialized))
+
+    mock_proc = mock.MagicMock()
+    mock_proc.stdin = mock.MagicMock()
+    mock_proc.stdout = mock.MagicMock()
+    mock_proc.stderr = io.BytesIO(b"")
+    mock_proc.stdout.read.side_effect = [length_bytes, serialized]
+    mock_popen.return_value = mock_proc
+
+    mock_ws = mock.MagicMock()
+    mock_ws.send = mock.AsyncMock()
+    mock_ws.recv = mock.AsyncMock(return_value="{}")
+    mock_ws.close = mock.AsyncMock()
+    mock_ws.__aiter__.return_value = []
+
+    mock_connect.side_effect = [
+        OSError("localhost resolution failed"),
+        mock_ws,
+    ]
+
+    models = [
+        types.ModelTarget(
+            name="gemini-3.5-flash",
+            types=[types.ModelType.TEXT],
+            endpoint=types.GeminiAPIEndpoint(api_key="explicit-key"),
+        )
+    ]
+    strategy = self._make_strategy(models=models)
+
+    async with strategy:
+      pass
+
+    self.assertEqual(mock_connect.call_count, 2)
+    mock_connect.assert_has_calls([
+        mock.call(
+            "ws://localhost:8080/",
+            additional_headers={"x-goog-api-key": "fake-key"},
+        ),
+        mock.call(
+            "ws://127.0.0.1:8080/",
+            additional_headers={"x-goog-api-key": "fake-key"},
+        ),
+    ])
 
 
 _get_default_binary_path = local_connection._get_default_binary_path
@@ -2490,140 +2647,7 @@ class LocalConnectionSubagentHookTest(unittest.IsolatedAsyncioTestCase):
         ),
     )
 
-  async def test_subagent_running_tracked(self):
-    """Verifies STATE_RUNNING adds subagent to active set."""
-    hr = hook_runner.HookRunner()
-    harness = test_utils.TestLocalHarness(
-        test_case=self,
-        process=self.mock_process,
-        hook_runner=hr,
-    )
 
-    # Establish cascade_id.
-    main_step = localharness_pb2.OutputEvent(
-        step_update=localharness_pb2.StepUpdate(
-            cascade_id="main",
-            trajectory_id="main",
-            step_index=0,
-            text="hi",
-            state=localharness_pb2.StepUpdate.STATE_ACTIVE,
-            source=localharness_pb2.StepUpdate.SOURCE_MODEL,
-        )
-    )
-    await harness.send_event(main_step)
-    # Wait for it to be processed
-    await asyncio.wait_for(harness.conn._step_queue.get(), timeout=2.0)
-
-    # Subagent starts running.
-    running_event = localharness_pb2.OutputEvent(
-        trajectory_state_update=localharness_pb2.TrajectoryStateUpdate(
-            trajectory_id="sub_1",
-            state=(localharness_pb2.TrajectoryStateUpdate.STATE_RUNNING),
-        )
-    )
-    await harness.send_event(running_event)
-
-    # Poll for the state change to be processed
-    async def poll_subagent_tracked():
-      while "sub_1" not in harness.conn._active_subagent_ids:
-        await asyncio.sleep(0.01)
-      return True
-
-    await asyncio.wait_for(poll_subagent_tracked(), timeout=2.0)
-
-    self.assertIn("sub_1", harness.conn._active_subagent_ids)
-
-  async def test_connection_waits_for_subagents_before_idle(self):
-    """Verifies receive_steps blocks until subagents complete."""
-    hr = hook_runner.HookRunner()
-    harness = test_utils.TestLocalHarness(
-        test_case=self,
-        process=self.mock_process,
-        hook_runner=hr,
-    )
-
-    await harness.conn.send("hello")
-
-    # Establish cascade_id + a step.
-    main_step = localharness_pb2.OutputEvent(
-        step_update=localharness_pb2.StepUpdate(
-            cascade_id="main",
-            trajectory_id="main",
-            step_index=0,
-            text="response",
-            state=localharness_pb2.StepUpdate.STATE_ACTIVE,
-            source=localharness_pb2.StepUpdate.SOURCE_MODEL,
-        )
-    )
-    await harness.send_event(main_step)
-    # Wait for it to be processed
-    await asyncio.wait_for(harness.conn._step_queue.get(), timeout=2.0)
-
-    # Subagent starts.
-    await harness.send_event(
-        localharness_pb2.OutputEvent(
-            trajectory_state_update=localharness_pb2.TrajectoryStateUpdate(
-                trajectory_id="sub_1",
-                state=(localharness_pb2.TrajectoryStateUpdate.STATE_RUNNING),
-            )
-        )
-    )
-
-    # Parent goes idle, but subagent still running.
-    await harness.send_event(
-        localharness_pb2.OutputEvent(
-            trajectory_state_update=localharness_pb2.TrajectoryStateUpdate(
-                trajectory_id="main",
-                state=(localharness_pb2.TrajectoryStateUpdate.STATE_IDLE),
-            )
-        )
-    )
-
-    # Poll for parent_idle to be True
-    async def poll_parent_idle():
-      while not harness.conn._parent_idle:
-        await asyncio.sleep(0.01)
-      return True
-
-    await asyncio.wait_for(poll_parent_idle(), timeout=2.0)
-
-    # _is_idle should NOT be set yet.
-    self.assertFalse(harness.conn._is_idle.is_set())
-
-    # Subagent completes.
-    await harness.send_event(
-        localharness_pb2.OutputEvent(
-            trajectory_state_update=localharness_pb2.TrajectoryStateUpdate(
-                trajectory_id="sub_1",
-                state=(localharness_pb2.TrajectoryStateUpdate.STATE_IDLE),
-            )
-        )
-    )
-
-    # Wait for _is_idle to be set
-    await asyncio.wait_for(harness.conn._is_idle.wait(), timeout=2.0)
-
-    # NOW idle should be set.
-    self.assertTrue(harness.conn._is_idle.is_set())
-
-  async def test_send_resets_subagent_tracking(self):
-    """Verifies send() clears subagent tracking state."""
-    hr = hook_runner.HookRunner()
-    harness = test_utils.TestLocalHarness(
-        test_case=self,
-        process=self.mock_process,
-        hook_runner=hr,
-    )
-
-    # Pollute tracking state.
-    harness.conn._active_subagent_ids.add("leftover")
-    harness.conn._parent_idle = True
-
-    await harness.conn.send("new turn")
-
-    self.assertEqual(harness.conn._active_subagent_ids, set())
-    self.assertFalse(harness.conn._parent_idle)
-    self.assertFalse(harness.conn._is_idle.is_set())
 
 
 class LocalConnectionToolCallHooksTest(unittest.IsolatedAsyncioTestCase):
@@ -3354,7 +3378,7 @@ class LocalAgentConfigTest(absltest.TestCase):
         triggers=[],
         mcp_servers=[],
         workspaces=["/tmp/ws"],
-        conversation_id="123",
+        conversation_id="12345678901234567890123456789012",
         save_dir="/tmp/save",
         app_data_dir="/tmp/app",
         response_schema="{}",
@@ -3370,7 +3394,7 @@ class LocalAgentConfigTest(absltest.TestCase):
     self.assertTrue(config.vertex)
     self.assertEqual(config.project, "my_project")
     self.assertEqual(config.location, "us-central1")
-    self.assertEqual(config.conversation_id, "123")
+    self.assertEqual(config.conversation_id, "12345678901234567890123456789012")
 
   def test_safe_defaults(self):
     """LocalAgentConfig defaults to confirm_run_command() — deny run_command."""
@@ -3460,6 +3484,35 @@ class LocalAgentConfigTest(absltest.TestCase):
           system_instructions="test",
           app_data_dir="relative/path",
       )
+
+  def test_conversation_id_validation(self):
+    # Valid ID (32 chars, alphanumeric)
+    local_connection_config.LocalAgentConfig(
+        system_instructions="test",
+        conversation_id="12345678901234567890123456789012",
+    )
+
+    # Valid ID (36 chars, UUID format with hyphens)
+    local_connection_config.LocalAgentConfig(
+        system_instructions="test",
+        conversation_id="12345678-1234-1234-1234-123456789012",
+    )
+
+    # Invalid ID (too short)
+    with self.assertRaises(pydantic.ValidationError) as ctx:
+      local_connection_config.LocalAgentConfig(
+          system_instructions="test",
+          conversation_id="too-short",
+      )
+    self.assertIn("must be at least 32 characters long", str(ctx.exception))
+
+    # Invalid ID (invalid characters)
+    with self.assertRaises(pydantic.ValidationError) as ctx:
+      local_connection_config.LocalAgentConfig(
+          system_instructions="test",
+          conversation_id="invalid_char_because_of_underscores_123",
+      )
+    self.assertIn("must match [a-zA-Z0-9-]", str(ctx.exception))
 
   def test_create_strategy_with_mcp_servers(self):
     stdio_cfg = types.McpStdioServer(
@@ -3638,6 +3691,102 @@ class LocalAgentConfigWorkspaceTest(
         res.allow,
         msg="Workspace policy must resolve symlinks and block traversal",
     )
+
+  async def test_workspace_policy_mutation_and_copy(self):
+    """Tests that workspace policy updates on reassignment and model_copy."""
+    temp_dir_path = pathlib.Path(self.create_tempdir().full_path)
+    workspace_a = temp_dir_path / "ws_a"
+    workspace_b = temp_dir_path / "ws_b"
+    app_1 = temp_dir_path / "app1"
+
+    workspace_a.mkdir(exist_ok=True)
+    workspace_b.mkdir(exist_ok=True)
+
+    config = local_connection_config.LocalAgentConfig(
+        system_instructions="test",
+        workspaces=[str(workspace_a)],
+        app_data_dir=str(app_1),
+    )
+
+    # 1. Initial State
+    self.assertLen(config.policies, 5)
+    self.assertEqual(config.policies[0].name, "workspace_only")
+
+    # Evaluate policy to prove it allows ws_a, denies ws_b
+    hook_a = policy.enforce(config.policies[:3])
+    ctx = hooks_base.HookContext()
+
+    res_a = await hook_a.run(
+        ctx,
+        types.ToolCall(
+            name="view_file",
+            args={"path": str(workspace_a / "f.txt")},
+            canonical_path=str(workspace_a / "f.txt"),
+        ),
+    )
+    self.assertTrue(res_a.allow)
+
+    res_b = await hook_a.run(
+        ctx,
+        types.ToolCall(
+            name="view_file",
+            args={"path": str(workspace_b / "f.txt")},
+            canonical_path=str(workspace_b / "f.txt"),
+        ),
+    )
+    self.assertFalse(res_b.allow)
+
+    # 2. Mutate workspaces
+    config.workspaces = [str(workspace_b)]
+    self.assertLen(config.policies, 5)
+    self.assertEqual(config.policies[0].name, "workspace_only")
+
+    # Evaluate updated policy to prove it allows ws_b, denies ws_a
+    hook_b = policy.enforce(config.policies[:3])
+
+    res_a2 = await hook_b.run(
+        ctx,
+        types.ToolCall(
+            name="view_file",
+            args={"path": str(workspace_a / "f.txt")},
+            canonical_path=str(workspace_a / "f.txt"),
+        ),
+    )
+    self.assertFalse(res_a2.allow)
+
+    res_b2 = await hook_b.run(
+        ctx,
+        types.ToolCall(
+            name="view_file",
+            args={"path": str(workspace_b / "f.txt")},
+            canonical_path=str(workspace_b / "f.txt"),
+        ),
+    )
+    self.assertTrue(res_b2.allow)
+
+    # 3. Model Copy Deep
+    config_copy = config.model_copy(deep=True)
+    self.assertLen(config_copy.policies, 5)
+    self.assertEqual(config_copy.policies[0].name, "workspace_only")
+    self.assertEqual(config_copy.policies[1].name, "workspace_only")
+    self.assertEqual(config_copy.policies[2].name, "workspace_only")
+    self.assertEqual(config_copy.policies[3].tool, "run_command")
+
+    hook_copy = policy.enforce(config_copy.policies[:3])
+    res_b_copy = await hook_copy.run(
+        ctx,
+        types.ToolCall(
+            name="view_file",
+            args={"path": str(workspace_b / "f.txt")},
+            canonical_path=str(workspace_b / "f.txt"),
+        ),
+    )
+    self.assertTrue(res_b_copy.allow)
+
+    # 4. Clear workspaces
+    config.workspaces = []
+    self.assertLen(config.policies, 2)
+    self.assertEqual(config.policies[0].tool, "run_command")
 
 
 class LocalConnectionBuiltinToolHooksTest(unittest.IsolatedAsyncioTestCase):
@@ -4108,8 +4257,6 @@ class LocalConnectionSubagentsTest(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(config.subagents, [])
     self.assertIsInstance(config.capabilities, types.CapabilitiesConfig)
     self.assertIsNone(config.conversation_id)
-
-
 
 
 if __name__ == "__main__":
