@@ -273,6 +273,53 @@ class LocalConnectionTest(unittest.IsolatedAsyncioTestCase):
       async for _ in harness.conn.receive_steps():
         pass
 
+  async def test_receive_steps_multiple_idle_state_updates_hang(self):
+    """Verifies receive_steps does not hang on multiple STATE_IDLE events."""
+    harness = self._make_harness()
+
+    await harness.conn.send("Hello")
+    init_data = await harness.wait_for_response()
+    self.assertEqual(init_data.get("userInput"), "Hello")
+
+    # 1. Harness sends STATE_IDLE (e.g. while processing tool call)
+    event1 = localharness_pb2.OutputEvent(
+        trajectory_state_update=localharness_pb2.TrajectoryStateUpdate(
+            trajectory_id="my_cascade",
+            state=localharness_pb2.TrajectoryStateUpdate.STATE_IDLE,
+        )
+    )
+    await harness.send_event(event1)
+
+    # 2. Additional step arrives after first STATE_IDLE
+    event2 = localharness_pb2.OutputEvent(
+        step_update=localharness_pb2.StepUpdate(
+            trajectory_id="my_cascade",
+            step_index=1,
+            state=localharness_pb2.StepUpdate.STATE_DONE,
+            source=localharness_pb2.StepUpdate.SOURCE_MODEL,
+            text="Step content after idle",
+        )
+    )
+    await harness.send_event(event2)
+
+    # 3. Final STATE_IDLE for turn completion
+    event3 = localharness_pb2.OutputEvent(
+        trajectory_state_update=localharness_pb2.TrajectoryStateUpdate(
+            trajectory_id="my_cascade",
+            state=localharness_pb2.TrajectoryStateUpdate.STATE_IDLE,
+        )
+    )
+    await harness.send_event(event3)
+
+    steps = []
+    async def _collect():
+      async for step in harness.conn.receive_steps():
+        steps.append(step)
+
+    await asyncio.wait_for(_collect(), timeout=1.0)
+    self.assertEqual(len(steps), 1)
+    self.assertEqual(steps[0].content, "Step content after idle")
+
   def test_local_connection_step_from_dict(self):
     """Tests that LocalConnectionStep maps fields correctly."""
     step_dict = {

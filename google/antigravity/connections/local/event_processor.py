@@ -379,6 +379,11 @@ class LocalHarnessEventProcessor:
   def reset_for_turn(self) -> None:
     self.is_idle.clear()
     self.main_trajectory_id = None
+    while not self.step_queue.empty():
+      try:
+        self.step_queue.get_nowait()
+      except asyncio.QueueEmpty:
+        break
 
   async def cancel_background_tasks(self) -> None:
     for task in self._background_tasks:
@@ -547,9 +552,8 @@ class LocalHarnessEventProcessor:
           await self.step_queue.put(
               types.AntigravityExecutionError(tsu.error)
           )
-        if not self.is_idle.is_set():
-          self.is_idle.set()
-          await self.step_queue.put(IDLE_SENTINEL)
+        self.is_idle.set()
+        await self.step_queue.put(IDLE_SENTINEL)
 
       elif (
           tsu.state
@@ -557,9 +561,8 @@ class LocalHarnessEventProcessor:
       ):
         msg = tsu.error if tsu.HasField("error") else "Turn cancelled"
         await self.step_queue.put(types.AntigravityExecutionError(msg))
-        if not self.is_idle.is_set():
-          self.is_idle.set()
-          await self.step_queue.put(IDLE_SENTINEL)
+        self.is_idle.set()
+        await self.step_queue.put(IDLE_SENTINEL)
       return
 
     if event.HasField("tool_call"):
