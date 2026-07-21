@@ -1548,6 +1548,27 @@ class SubagentConfigTest(unittest.TestCase):
     self.assertIsNone(sub.capabilities)
     self.assertEqual(sub.tools, [])
 
+  def test_custom_system_instructions(self):
+    custom_si = types.CustomSystemInstructions(text="Full custom prompt")
+    sub = types.SubagentConfig(
+        name="custom_helper",
+        description="custom helper agent",
+        system_instructions=custom_si,
+    )
+    self.assertEqual(sub.system_instructions, custom_si)
+
+  def test_templated_system_instructions(self):
+    templated_si = types.TemplatedSystemInstructions(
+        identity="Helper identity",
+        sections=[types.SystemInstructionSection(content="Section 1")],
+    )
+    sub = types.SubagentConfig(
+        name="templated_helper",
+        description="templated helper agent",
+        system_instructions=templated_si,
+    )
+    self.assertEqual(sub.system_instructions, templated_si)
+
   def test_required_fields(self):
     with self.assertRaises(pydantic.ValidationError):
       types.SubagentConfig(**{"name": "helper"})  # Missing description

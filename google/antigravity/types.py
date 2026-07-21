@@ -28,6 +28,7 @@ import pathlib
 from typing import Annotated, Any, AsyncIterator, Callable, Literal, TypeVar, cast
 
 import pydantic
+
 from google.antigravity.models import GeminiAPIEndpoint
 from google.antigravity.models import GeminiModelOptions
 from google.antigravity.models import ModelEndpoint
@@ -165,8 +166,11 @@ class SubagentConfig(pydantic.BaseModel):
   Attributes:
     name: Unique name of the subagent.
     description: Description of the subagent.
-    system_instructions: Optional system instructions for the subagent. Note
-      that these will be appended to the subagent's default system instructions.
+    system_instructions: Optional system instructions for the subagent. Supports
+      a string or a SystemInstructions. Note that string and
+      TemplatedSystemInstructions inputs will be appended to the subagent's
+      default system instructions, whereas CustomSystemInstructions will
+      completely replace them.
     capabilities: Optional capabilities config controlling allowed tools. If
       None, defaults to read-only tools.
     tools: Optional list of additional custom tools (callable functions or
@@ -177,7 +181,7 @@ class SubagentConfig(pydantic.BaseModel):
 
   name: str
   description: str
-  system_instructions: str | list[SystemInstructionSection] | None = None
+  system_instructions: str | SystemInstructions | None = None
   capabilities: SubagentCapabilities | None = None
   tools: list[Callable[..., Any] | str] = pydantic.Field(default_factory=list)
 

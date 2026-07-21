@@ -757,16 +757,35 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
 
   def _to_subagent_system_instructions_proto(
       self,
-      instructions: str | list[types.SystemInstructionSection] | None,
+      instructions: str | types.SystemInstructions | None,
   ) -> localharness_pb2.SystemInstructions | None:
     if not instructions:
       return None
+    if isinstance(instructions, types.CustomSystemInstructions):
+      proto = localharness_pb2.SystemInstructions()
+      proto.custom.CopyFrom(
+          localharness_pb2.CustomSystemInstructions(
+              part=[
+                  localharness_pb2.CustomSystemInstructions.Part(
+                      text=instructions.text
+                  )
+              ]
+          )
+      )
+      return proto
+    if isinstance(instructions, types.TemplatedSystemInstructions):
+      appended = localharness_pb2.AppendedSystemInstructions()
+      if instructions.identity:
+        appended.custom_identity = instructions.identity
+      for sec in instructions.sections:
+        appended.appended_sections.add(title=sec.title, content=sec.content)
+      proto = localharness_pb2.SystemInstructions()
+      proto.appended.CopyFrom(appended)
+      return proto
+
     appended = localharness_pb2.AppendedSystemInstructions()
     if isinstance(instructions, str):
       appended.appended_sections.add(title="System", content=instructions)
-    elif isinstance(instructions, list):
-      for sec in instructions:
-        appended.appended_sections.add(title=sec.title, content=sec.content)
 
     proto = localharness_pb2.SystemInstructions()
     proto.appended.CopyFrom(appended)

@@ -4233,14 +4233,16 @@ class LocalConnectionSubagentsTest(unittest.IsolatedAsyncioTestCase):
     subagent = types.SubagentConfig(
         name="test_helper",
         description="A helpful subagent for testing",
-        system_instructions=[
-            types.SystemInstructionSection(
-                title="Identity", content="You are a helper agent."
-            ),
-            types.SystemInstructionSection(
-                title="Guidelines", content="Keep responses short."
-            ),
-        ],
+        system_instructions=types.TemplatedSystemInstructions(
+            sections=[
+                types.SystemInstructionSection(
+                    title="Identity", content="You are a helper agent."
+                ),
+                types.SystemInstructionSection(
+                    title="Guidelines", content="Keep responses short."
+                ),
+            ]
+        ),
     )
 
     strategy = local_connection.LocalConnectionStrategy(
@@ -4259,6 +4261,59 @@ class LocalConnectionSubagentsTest(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(sections[0].content, "You are a helper agent.")
     self.assertEqual(sections[1].title, "Guidelines")
     self.assertEqual(sections[1].content, "Keep responses short.")
+
+  def test_builds_subagents_proto_with_custom_system_instructions(self):
+    subagent = types.SubagentConfig(
+        name="custom_helper",
+        description="A subagent with custom instructions",
+        system_instructions=types.CustomSystemInstructions(
+            text="Fully custom subagent instructions."
+        ),
+    )
+
+    strategy = local_connection.LocalConnectionStrategy(
+        subagents=[subagent],
+        workspaces=[str(self.workspace)],
+    )
+
+    harness_config = strategy._build_harness_config()
+
+    self.assertEqual(len(harness_config.custom_subagents), 1)
+    custom_agent = harness_config.custom_subagents[0]
+    self.assertEqual(custom_agent.name, "custom_helper")
+    parts = custom_agent.system_instructions.custom.part
+    self.assertEqual(len(parts), 1)
+    self.assertEqual(parts[0].text, "Fully custom subagent instructions.")
+
+  def test_builds_subagents_proto_with_templated_system_instructions(self):
+    subagent = types.SubagentConfig(
+        name="templated_helper",
+        description="A subagent with templated instructions",
+        system_instructions=types.TemplatedSystemInstructions(
+            identity="Subagent identity",
+            sections=[
+                types.SystemInstructionSection(
+                    title="Section1", content="Content1"
+                )
+            ],
+        ),
+    )
+
+    strategy = local_connection.LocalConnectionStrategy(
+        subagents=[subagent],
+        workspaces=[str(self.workspace)],
+    )
+
+    harness_config = strategy._build_harness_config()
+
+    self.assertEqual(len(harness_config.custom_subagents), 1)
+    custom_agent = harness_config.custom_subagents[0]
+    self.assertEqual(custom_agent.name, "templated_helper")
+    appended = custom_agent.system_instructions.appended
+    self.assertEqual(appended.custom_identity, "Subagent identity")
+    self.assertEqual(len(appended.appended_sections), 1)
+    self.assertEqual(appended.appended_sections[0].title, "Section1")
+    self.assertEqual(appended.appended_sections[0].content, "Content1")
 
   def test_subagent_tool_not_registered_raises(self):
     def unregistered_tool():
