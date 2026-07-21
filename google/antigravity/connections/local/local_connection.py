@@ -23,6 +23,7 @@ import logging
 import os
 import pathlib
 import platform
+import re
 import shutil
 import struct
 import subprocess
@@ -182,6 +183,22 @@ def callable_to_tool_proto(
       description=decl.description or "",
       parameters_json_schema=json.dumps(parameters),
   )
+
+
+# Strip null bytes and replace dangerous control characters before protobuf
+# serialization so C-extension string bindings do not raise or truncate.
+# Note: Canonical sanitization is enforced at the Go localharness ingress layer.
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+
+
+def _sanitize_prompt(text: str) -> str:
+  """Strips null bytes and replaces dangerous control characters with spaces."""
+  if not text:
+    return ""
+  sanitized = _CONTROL_CHAR_RE.sub(" ", text)
+  if not sanitized.strip():
+    return " "
+  return sanitized
 
 
 class LocalConnection(connection.Connection):
@@ -495,7 +512,7 @@ def to_proto_input_content(
 ) -> localharness_pb2.UserInput.Part:
   """Converts dynamic prompt fragments into proto Parts."""
   if isinstance(content, str):
-    return localharness_pb2.UserInput.Part(text=content)
+    return localharness_pb2.UserInput.Part(text=_sanitize_prompt(content))
 
   if isinstance(content, types.SlashCommand):
     sc_pb = localharness_pb2.UserInput.SlashCommand(

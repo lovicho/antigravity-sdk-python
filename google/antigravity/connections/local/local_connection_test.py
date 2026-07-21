@@ -47,6 +47,26 @@ from google.antigravity.tools import tool_runner
 from google.antigravity.types import QuestionResponse
 
 
+class PromptSanitizationTest(unittest.TestCase):
+  """Tests for _sanitize_prompt and to_proto_input_content."""
+
+  def test_sanitize_prompt_null_bytes_and_control_chars(self):
+    sanitized = local_connection._sanitize_prompt("Hello\x00World\x07!\x7f\x80")
+    self.assertEqual(sanitized, "Hello World !  ")
+
+  def test_sanitize_prompt_preserves_whitespace(self):
+    sanitized = local_connection._sanitize_prompt("Line1\nLine2\r\tTab")
+    self.assertEqual(sanitized, "Line1\nLine2\r\tTab")
+
+  def test_sanitize_prompt_empty_or_whitespace_fallback(self):
+    self.assertEqual(local_connection._sanitize_prompt(""), "")
+    self.assertEqual(local_connection._sanitize_prompt("\x00\x00"), " ")
+
+  def test_to_proto_input_content_sanitizes_strings(self):
+    part = local_connection.to_proto_input_content("Bad\x00Input\x7f")
+    self.assertEqual(part.text, "Bad Input ")
+
+
 class LocalConnectionTest(unittest.IsolatedAsyncioTestCase):
 
   def setUp(self):
