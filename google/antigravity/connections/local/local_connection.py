@@ -29,19 +29,19 @@ import struct
 import subprocess
 import sys
 import threading
-from typing import Any, AsyncIterator, Callable, cast, Sequence
+from typing import Any, AsyncIterator, Callable, Sequence, cast
 
 from google.genai import types as genai_types
 from google.protobuf import json_format
 import websockets
 
-from google.antigravity.connections.local import localharness_pb2
+from google.antigravity.proto import localharness_pb2
+
 from google.antigravity import types
 from google.antigravity.connections import connection
 from google.antigravity.connections.local import event_processor
 from google.antigravity.hooks import hook_runner as h_runner
 from google.antigravity.tools import tool_runner as t_runner
-
 
 LocalConnectionStep = event_processor.LocalConnectionStep
 IDLE_SENTINEL = event_processor.IDLE_SENTINEL
@@ -473,8 +473,6 @@ class LocalConnection(connection.Connection):
   @property
   def _is_idle(self) -> asyncio.Event:
     return self._processor.is_idle
-
-
 
   @property
   def _main_trajectory_id(self) -> str | None:

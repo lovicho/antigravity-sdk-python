@@ -18,7 +18,7 @@ import json
 import logging
 from typing import Any, Callable, Coroutine
 
-from google.antigravity.connections.local import localharness_pb2
+from google.antigravity.proto import localharness_pb2
 from google.antigravity import types
 from google.antigravity.connections.local.local_connection_config import normalize_wire_path
 from google.antigravity.connections.local.local_connection_config import PROTO_FIELD_TO_SDK_NAME

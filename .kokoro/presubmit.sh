@@ -50,6 +50,10 @@ python3 -m pip install \
   --no-deps \
   -r "${SCRIPT_DIR}/requirements-test.txt"
 
+echo "--- Compiling localharness.proto ---"
+python3 -m grpc_tools.protoc -I. --python_out=. google/antigravity/proto/localharness.proto
+touch google/antigravity/proto/__init__.py
+
 echo "--- Installing package under test ---"
 # Install the package itself with --no-deps --no-index since all
 # dependencies are already installed above with hash verification.

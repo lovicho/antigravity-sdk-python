@@ -24,11 +24,11 @@ import threading
 from typing import Any
 import urllib.request
 
+from google.antigravity.proto import localharness_pb2
 from google.antigravity import types
 from google.antigravity.connections.local import litert_connection_config
 from google.antigravity.connections.local import litert_server
 from google.antigravity.connections.local import local_connection
-from google.antigravity.connections.local import localharness_pb2
 
 try:
   # pylint: disable=g-import-not-at-top
@@ -342,9 +342,7 @@ class LiteRTConnectionStrategy(LocalOpenAIConnectionStrategy):
         )
       # pylint: disable=broad-exception-caught
       except Exception as e:  # pylint: disable=broad-exception-caught  # pylint: disable=broad-exception-caught
-        logging.warning(
-            "LiteRT warm-up request timed out or failed: %s", e
-        )
+        logging.warning("LiteRT warm-up request timed out or failed: %s", e)
 
       # Start Go localharness Subprocess via parent
       await super().__aenter__()

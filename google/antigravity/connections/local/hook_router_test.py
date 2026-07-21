@@ -17,7 +17,7 @@
 import asyncio
 from typing import Any
 from absl.testing import absltest
-from google.antigravity.connections.local import localharness_pb2
+from google.antigravity.proto import localharness_pb2
 from google.antigravity import types
 from google.antigravity.connections.local import event_processor
 from google.antigravity.connections.local import types as local_types

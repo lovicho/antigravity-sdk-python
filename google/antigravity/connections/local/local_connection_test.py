@@ -32,8 +32,7 @@ from absl.testing import parameterized
 import pydantic
 import websockets
 
-from google.antigravity.connections.local import localharness_pb2
-from google.antigravity.connections.local import localharness_pb2
+from google.antigravity.proto import localharness_pb2
 from google.antigravity import types
 from google.antigravity.connections.local import event_processor
 from google.antigravity.connections.local import local_connection

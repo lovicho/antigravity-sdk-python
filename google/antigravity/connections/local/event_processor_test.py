@@ -20,7 +20,7 @@ from unittest import mock
 from absl.testing import absltest
 from google.protobuf import json_format
 
-from google.antigravity.connections.local import localharness_pb2
+from google.antigravity.proto import localharness_pb2
 from google.antigravity import types
 from google.antigravity.connections.local import event_processor
 

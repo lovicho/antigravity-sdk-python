@@ -167,6 +167,11 @@ if [[ -z "${PUBLISH_PREBUILT_VERSION:-}" ]]; then
     fi
   done
 
+  # Compile localharness.proto to python stub
+  echo "--- Compiling localharness.proto ---"
+  python3 -m grpc_tools.protoc -I. --python_out=. google/antigravity/proto/localharness.proto
+  touch google/antigravity/proto/__init__.py
+
   # --- Build platform-specific wheels ---
   BUILT_ANY=false
 
