@@ -7,6 +7,62 @@ All notable changes to the Google Antigravity Python SDK will be documented in t
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.1.8] - 2026-07-21
+
+Release 0.1.8 of the Google Antigravity Python SDK updates the default text model to Gemini 3.6 Flash, adds support for custom subagent instructions, and implements automatic Pydantic argument coercion for tool calls. It also brings defensive prompt sanitization, configurable tool retries, and comprehensive stability improvements for local agent execution.
+
+### 🌟 Key Highlights
+
+- **Default Model Upgrade to Gemini 3.6 Flash**: Upgrades the default generative text model in the Python SDK to `gemini-3.6-flash`.
+  ```python
+  from google.antigravity import LocalAgentConfig, models
+
+  # Defaults to models.DEFAULT_MODEL ("gemini-3.6-flash")
+  config = LocalAgentConfig()
+  ```
+
+- **Pydantic TypeAdapter Tool Argument Coercion**: Automatically coerces stringified numbers, booleans, and nested models returned by LLMs into strict Python types declared in tool signatures.
+  ```python
+  def calculate_scale(factor: int, active: bool = True) -> float:
+      return factor * 1.5 if active else 0.0
+  # Automatically converts {"factor": "5", "active": "true"} to int and bool
+  ```
+
+- **Custom Subagent Instructions**: Adds capability to specify custom system instructions for spawned subagents in multi-agent workflows.
+  ```python
+  from google.antigravity import LocalAgentConfig, SubagentConfig
+
+  config = LocalAgentConfig(
+      subagents=[SubagentConfig(name="researcher", system_instructions="You are a research specialist.")]
+  )
+  ```
+
+- **Prompt Sanitization**: Strips null bytes and non-printable control characters from incoming user prompts at the wire boundary to prevent HTTP 400 errors and terminal corruption.
+
+---
+
+### 📋 Detailed Changes
+
+#### Features & Enhancements
+- **Custom Subagent Instructions**: Allow subagents to receive isolated system instructions and allowlisted tool configurations during execution.
+- **Pydantic Argument Coercion**: Use `pydantic.TypeAdapter` in `ToolRunner` to seamlessly validate and parse `Optional`, `Union`, list, and primitive tool arguments.
+- **Prompt Sanitization**: Automatically strip control codes (`DEL`, `BEL`, `C1`) and null bytes (`\x00`) from user inputs.
+- **Configurable Tool Retries**: Add `RetryConfig` definitions in local configuration to allow fine-tuned model and output retry policies.
+- **Operating System Telemetry**: Populate client OS and version information in telemetry headers to improve diagnostic tracking.
+- **Native Usage Accumulation**: Enable native addition (`+` and `+=`) operations on `UsageMetadata` instances.
+
+#### Model & Default Changes
+- **Default Text Model**: Update default text model from `gemini-1.5-flash` to `gemini-3.6-flash` across SDK interfaces. To override, specify `model="gemini-1.5-pro"` (or your preferred endpoint) in `LocalAgentConfig`.
+
+#### Bug Fixes & Stability
+- **Large Tool Output Handling**: Dynamic output truncation and removal of WebSocket frame limits to resolve connection termination on large tool responses.
+- **Subagent Idle Synchronization**: Fix race conditions where multiple idle states could cause `receive_steps()` to hang indefinitely.
+- **Custom Tool Policy Enforcement**: Ensure custom tools properly trigger pre-tool policy checks and cleanly report denials.
+- **Media MIME Type Inference**: Raise `ValueError` instead of Pydantic validation failures when media MIME types cannot be inferred from file extensions.
+- **LiteRT Log Noise**: Suppress verbose C++ LiteRT engine diagnostic output by default.
+- **Policy Copy Idempotency**: Prevent duplicate workspace policy prepending during deep copies of `BaseLocalAgentConfig`.
+- **Type Safety**: Enforce typed `types.Step` arguments in `OnCompactionHook`.
+
 ## [0.1.7] - 2026-07-14
 
 Release 0.1.7 of the Google Antigravity Python SDK expands end-user control over agent execution environments, strengthens concurrency safety for stateful tools, and introduces deeper reasoning capabilities. Key highlights include atomic multi-threaded state handling for tools and hooks, customizable subprocess environment variable isolation, support for an "extra_high" thinking severity level, and full Model Context Protocol (MCP) and subagent support across local model backends. This release also resolves interactive console prompt clobbering and improves socket discovery under containerized setups.
