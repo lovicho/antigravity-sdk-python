@@ -33,6 +33,7 @@ from typing import Any, AsyncIterator, Callable, Sequence, cast
 
 from google.genai import types as genai_types
 from google.protobuf import json_format
+from typing_extensions import override
 import websockets
 
 from google.antigravity.proto import localharness_pb2
@@ -212,12 +213,14 @@ class LocalConnection(connection.Connection):
       hook_runner: h_runner.HookRunner | None = None,
       initial_history: Sequence[types.Step] | None = None,
       env: dict[str, str] | None = None,
+      debug_config: connection.DebugConfig | None = None,
   ):
     self._hook_runner = hook_runner
     self._process = process
     self._ws = ws
     self._tool_runner = tool_runner
     self._env = env
+    self._debug_config = debug_config
     self.__initial_history = initial_history or []
     self._client_cancelled = False
     self._is_receiving = False
@@ -249,6 +252,12 @@ class LocalConnection(connection.Connection):
   def _initial_history(self) -> Sequence[types.Step]:
     """Returns the pre-existing session steps restored during handshake."""
     return self.__initial_history
+
+  @property
+  @override
+  def debug_config(self) -> connection.DebugConfig | None:
+    """Returns the debug configuration for this connection."""
+    return self._debug_config
 
   @property
   def conversation_id(self) -> str:
@@ -654,6 +663,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
       mcp_servers: Sequence[types.McpServerConfig] | None = None,
       env: dict[str, str] | None = None,
       subagents: list[types.SubagentConfig] | None = None,
+      debug_config: connection.DebugConfig | None = None,
   ):
     """Initializes the instance.
 
@@ -672,6 +682,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
       mcp_servers: Optional sequence of MCP server configurations.
       env: Optional dictionary of custom environment variables.
       subagents: Optional list of static subagent configurations.
+      debug_config: Optional debug configuration for the connection.
     """
     self._binary_path = _get_default_binary_path()
     self._tool_runner = tool_runner
@@ -681,6 +692,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
     self._models: list[types.ModelTarget] = models or []
     self._skills_paths = skills_paths
     self._env = env
+    self._debug_config = debug_config
 
     # Normalize str shorthand to SystemInstructions model.
     self._system_instructions: types.SystemInstructions | None = None
@@ -995,6 +1007,12 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
         enabled_hooks.append(hook_type)
     return enabled_hooks
 
+  @property
+  @override
+  def debug_config(self) -> connection.DebugConfig | None:
+    """Returns the debug configuration for this strategy."""
+    return self._debug_config
+
   def connect(self) -> connection.Connection:
     """Returns the established Connection."""
     if not hasattr(self, "_connection") or self._connection is None:
@@ -1135,6 +1153,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
         hook_runner=self._hook_runner,
         initial_history=initial_history,
         env=self._env,
+        debug_config=self._debug_config,
     )
     self._connection._start_stderr_reader(process.stderr)
 

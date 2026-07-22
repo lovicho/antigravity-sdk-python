@@ -22,8 +22,11 @@ A ConnectionStrategy knows how to establish a Connection for a specific
 backend type and how to tear it down.
 """
 
+from __future__ import annotations
+
 import abc
 import json
+import logging
 import re
 from typing import Any, AsyncIterator, Callable, Mapping, Sequence
 
@@ -66,6 +69,24 @@ class AgentConfig(abc.ABC, pydantic.BaseModel):
   response_schema: dict[str, Any] | type[pydantic.BaseModel] | str | None = None
   skills_paths: list[str] = pydantic.Field(default_factory=list)
   subagents: list[types.SubagentConfig] = pydantic.Field(default_factory=list)
+  debug_config: DebugConfig | None = None
+
+  @pydantic.field_validator("debug_config", mode="before")
+  @classmethod
+  def _validate_debug_config(cls, v: Any) -> DebugConfig | None:
+    if isinstance(v, bool):
+      return DebugConfig() if v else None
+    if isinstance(v, dict):
+      return DebugConfig(**v)
+    return v
+
+  @pydantic.model_validator(mode="after")
+  def _apply_debug_settings(self) -> "AgentConfig":
+    if self.debug_config is not None and isinstance(
+        self.debug_config, DebugConfig
+    ):
+      self.debug_config.apply_logging()
+    return self
 
   @pydantic.field_validator("conversation_id")
   @classmethod
@@ -199,6 +220,11 @@ class Connection(abc.ABC):
     """Returns the conversation identifier, or empty string if unset."""
     return ""
 
+  @property
+  def debug_config(self) -> DebugConfig | None:
+    """Returns the debug configuration for this connection, or None if disabled."""
+    return None
+
   @abc.abstractmethod
   async def send(self, prompt: types.Content | None, **kwargs: Any) -> None:
     """Sends a prompt to the agent.
@@ -303,3 +329,31 @@ class ConnectionStrategy(abc.ABC):
       exc_tb: The traceback, if any.
     """
     ...
+
+  @property
+  def debug_config(self) -> DebugConfig | None:
+    """Returns the debug configuration for this strategy, or None if disabled."""
+    return None
+
+
+class DebugConfig(pydantic.BaseModel):
+  """Configuration for client-side and server-side debugging and observability.
+
+  When instantiated with default parameters (`DebugConfig()`), all debug
+  features and detailed logging (`logging.DEBUG`) are enabled by default.
+  """
+
+  model_config = pydantic.ConfigDict(arbitrary_types_allowed=True)
+
+  # Whether to enable server-side distributed tracing in the backend.
+  enable_server_side_tracing: bool = True
+  # Python logging level to apply across SDK modules.
+  logging_level: int | str | None = logging.DEBUG
+
+  def apply_logging(self) -> None:
+    """Applies the configured logging level to the SDK loggers."""
+    if self.logging_level is not None:
+      logging.getLogger("google.antigravity").setLevel(self.logging_level)
+
+
+AgentConfig.model_rebuild()

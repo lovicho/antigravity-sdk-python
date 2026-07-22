@@ -114,4 +114,5 @@ class LocalOpenAIAgentConfig(BaseLocalAgentConfig):
         mcp_servers=self.mcp_servers,
         subagents=self.subagents,
         env=self.env,
+        debug_config=self.debug_config,
     )

@@ -324,4 +324,5 @@ class LocalAgentConfig(BaseLocalAgentConfig):
         mcp_servers=self.mcp_servers,
         env=self.env,
         subagents=self.subagents,
+        debug_config=self.debug_config,
     )
