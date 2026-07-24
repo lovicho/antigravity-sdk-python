@@ -28,6 +28,7 @@ import pathlib
 from typing import Annotated, Any, AsyncIterator, Callable, Literal, TypeVar, cast
 
 import pydantic
+
 from google.antigravity.models import GeminiAPIEndpoint
 from google.antigravity.models import GeminiModelOptions
 from google.antigravity.models import ModelEndpoint
@@ -77,6 +78,7 @@ __all__ = [
     "AntigravityCancelledError",
     "AntigravityValidationError",
     "AntigravityExecutionError",
+    "ToolExecutionError",
     "StreamChunk",
     "Thought",
     "Text",
@@ -165,8 +167,11 @@ class SubagentConfig(pydantic.BaseModel):
   Attributes:
     name: Unique name of the subagent.
     description: Description of the subagent.
-    system_instructions: Optional system instructions for the subagent. Note
-      that these will be appended to the subagent's default system instructions.
+    system_instructions: Optional system instructions for the subagent. Supports
+      a string or a SystemInstructions. Note that string and
+      TemplatedSystemInstructions inputs will be appended to the subagent's
+      default system instructions, whereas CustomSystemInstructions will
+      completely replace them.
     capabilities: Optional capabilities config controlling allowed tools. If
       None, defaults to read-only tools.
     tools: Optional list of additional custom tools (callable functions or
@@ -177,7 +182,7 @@ class SubagentConfig(pydantic.BaseModel):
 
   name: str
   description: str
-  system_instructions: str | list[SystemInstructionSection] | None = None
+  system_instructions: str | SystemInstructions | None = None
   capabilities: SubagentCapabilities | None = None
   tools: list[Callable[..., Any] | str] = pydantic.Field(default_factory=list)
 
@@ -736,6 +741,20 @@ class AntigravityExecutionError(Exception):
   """
 
 
+class ToolExecutionError(RuntimeError):
+  """Raised when a tool execution fails, carrying tool metadata."""
+
+  tool_name: str
+  server_name: str | None
+
+  def __init__(
+      self, message: str, tool_name: str, server_name: str | None = None
+  ):
+    super().__init__(message)
+    self.tool_name = tool_name
+    self.server_name = server_name
+
+
 class AntigravityValidationError(Exception):
   """Wraps Pydantic ValidationError at the SDK boundary.
 
@@ -1052,9 +1071,14 @@ class _BaseMedia(pydantic.BaseModel):
     file_path = pathlib.Path(path)
     data = _read_file_safely(file_path)
     mime_guess, _ = mimetypes.guess_type(file_path)
+    if not mime_guess:
+      raise ValueError(
+          "Could not infer a valid MIME type for extension: "
+          f"'{file_path.suffix}'"
+      )
     return cls(
         data=data,
-        mime_type=mime_guess or "",
+        mime_type=mime_guess,
         description=description,
     )
 

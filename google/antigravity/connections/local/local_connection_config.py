@@ -121,7 +121,10 @@ class BaseLocalAgentConfig(connection.AgentConfig):
     if self.workspaces:
       app_data_path = self.app_data_dir or DEFAULT_APP_DATA_DIR
       resolved_app_data_dir = pathlib.Path(app_data_path).expanduser().resolve()
-      allowed_paths = [*self.workspaces, str(resolved_app_data_dir)]
+      normalized_workspaces = [
+          normalize_wire_path(ws) for ws in self.workspaces
+      ]
+      allowed_paths = [*normalized_workspaces, str(resolved_app_data_dir)]
       self.__dict__["policies"] = (
           policy.workspace_only(allowed_paths) + other_policies
       )
@@ -321,4 +324,5 @@ class LocalAgentConfig(BaseLocalAgentConfig):
         mcp_servers=self.mcp_servers,
         env=self.env,
         subagents=self.subagents,
+        debug_config=self.debug_config,
     )

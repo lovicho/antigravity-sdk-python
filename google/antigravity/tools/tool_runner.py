@@ -35,6 +35,7 @@ import types as std_types
 import typing
 from typing import Any, Callable
 
+import pydantic
 from google.antigravity import types
 from google.antigravity.tools import tool_context as tool_context_module
 
@@ -268,6 +269,47 @@ class ToolRunner:
         return {**kwargs, ctx_param: self._context}
     return kwargs
 
+  def _coerce_args(
+      self, fn: Callable[..., Any], kwargs: dict[str, Any]
+  ) -> dict[str, Any]:
+    """Coerces keyword arguments to match function type annotations using pydantic."""
+    target = fn
+    while isinstance(target, ToolWithSchema):
+      target = target.fn
+    try:
+      sig = inspect.signature(target)
+    except (ValueError, TypeError):
+      return kwargs
+
+    coerced = {}
+    for name, param in sig.parameters.items():
+      if name not in kwargs:
+        continue
+      if param.kind in (
+          inspect.Parameter.VAR_POSITIONAL,
+          inspect.Parameter.VAR_KEYWORD,
+      ):
+        coerced[name] = kwargs[name]
+        continue
+      val = kwargs[name]
+      ann = param.annotation
+      if ann is inspect.Parameter.empty or val is None:
+        coerced[name] = val
+        continue
+
+      try:
+        adapter = pydantic.TypeAdapter(ann)
+        coerced[name] = adapter.validate_python(val)
+      except Exception:  # pylint: disable=broad-except
+        coerced[name] = val
+
+    # Retain any extra arguments passed that were not in signature (e.g. kwargs)
+    for k, v in kwargs.items():
+      if k not in coerced:
+        coerced[k] = v
+
+    return coerced
+
   async def execute(self, tool_name: str, **kwargs: Any) -> Any:
     """Executes a registered tool by name.
 
@@ -288,6 +330,7 @@ class ToolRunner:
       raise KeyError(f"Tool '{tool_name}' is not registered.")
 
     tool_fn = self._tools[tool_name]
+    kwargs = self._coerce_args(tool_fn, kwargs)
     kwargs = self._inject_context(tool_name, kwargs)
     return await self._execute_fn(tool_fn, **kwargs)
 
@@ -320,7 +363,8 @@ class ToolRunner:
               name=tc.name, error=f"Unknown tool: '{tc.name}'"
           )
         tool_fn = self._tools[tc.name]
-        injected_args = self._inject_context(tc.name, tc.args)
+        coerced_args = self._coerce_args(tool_fn, tc.args)
+        injected_args = self._inject_context(tc.name, coerced_args)
         result = await self._execute_fn(tool_fn, **injected_args)
         return types.ToolResult(name=tc.name, result=result)
       except Exception as e:  # pylint: disable=broad-except

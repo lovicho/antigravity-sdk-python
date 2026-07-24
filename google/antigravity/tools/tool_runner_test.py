@@ -16,6 +16,7 @@
 
 import asyncio
 import threading
+from typing import Optional, Union
 from unittest import mock
 
 from absl.testing import absltest
@@ -245,6 +246,68 @@ class ToolRunnerTest(absltest.TestCase):
 
     result = asyncio.run(runner.execute("sync_callable", arg1="World"))
     self.assertEqual(result, "Callable World")
+
+  def test_coerce_args_basic_types(self):
+    """Verifies that _coerce_args converts strings to basic Python types."""
+
+    def _typed_fn(a: int, b: float, c: bool, d: str) -> None:
+      del a, b, c, d
+
+    runner = tool_runner.ToolRunner([_typed_fn])
+    coerced = runner._coerce_args(
+        _typed_fn, {"a": "5", "b": "2.5", "c": "true", "d": "hello"}
+    )
+    self.assertEqual(coerced, {"a": 5, "b": 2.5, "c": True, "d": "hello"})
+    self.assertIsInstance(coerced["a"], int)
+    self.assertIsInstance(coerced["b"], float)
+    self.assertIsInstance(coerced["c"], bool)
+    self.assertIsInstance(coerced["d"], str)
+
+  def test_coerce_args_optional_and_union(self):
+    """Verifies that _coerce_args handles Optional and Union types."""
+
+    def _complex_fn(x: Optional[int], y: Union[int, float]) -> None:
+      del x, y
+
+    runner = tool_runner.ToolRunner([_complex_fn])
+    coerced = runner._coerce_args(_complex_fn, {"x": "10", "y": "3.14"})
+    self.assertEqual(coerced, {"x": 10, "y": 3.14})
+    self.assertIsInstance(coerced["x"], int)
+    self.assertIsInstance(coerced["y"], float)
+
+    coerced_none = runner._coerce_args(_complex_fn, {"x": None, "y": 42})
+    self.assertEqual(coerced_none, {"x": None, "y": 42})
+
+  def test_coerce_args_fallback_on_error(self):
+    """Verifies that _coerce_args retains original values when conversion fails."""
+
+    def _int_fn(count: int) -> None:
+      del count
+
+    runner = tool_runner.ToolRunner([_int_fn])
+    coerced = runner._coerce_args(_int_fn, {"count": "not_an_int"})
+    self.assertEqual(coerced, {"count": "not_an_int"})
+
+  def test_coerce_args_with_tool_with_schema(self):
+    """Verifies that _coerce_args unwraps ToolWithSchema."""
+
+    def _typed_tool(val: int) -> int:
+      return val * 2
+
+    wrapped = tool_runner.ToolWithSchema(_typed_tool, {"type": "object"})
+    runner = tool_runner.ToolRunner([wrapped])
+    coerced = runner._coerce_args(wrapped, {"val": "21"})
+    self.assertEqual(coerced, {"val": 21})
+
+  def test_execute_coerces_arguments(self):
+    """Verifies that execute() automatically coerces argument types."""
+
+    def _sum_tool(x: int, y: float) -> float:
+      return x + y
+
+    runner = tool_runner.ToolRunner([_sum_tool])
+    result = asyncio.run(runner.execute("_sum_tool", x="10", y="5.5"))
+    self.assertEqual(result, 15.5)
 
 
 class ProcessToolCallsTest(absltest.TestCase):

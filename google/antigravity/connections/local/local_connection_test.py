@@ -32,8 +32,7 @@ from absl.testing import parameterized
 import pydantic
 import websockets
 
-from google.antigravity.connections.local import localharness_pb2
-from google.antigravity.connections.local import localharness_pb2
+from google.antigravity.proto import localharness_pb2
 from google.antigravity import types
 from google.antigravity.connections.local import event_processor
 from google.antigravity.connections.local import local_connection
@@ -45,6 +44,26 @@ from google.antigravity.hooks import policy
 from google.antigravity.models import DEFAULT_MODEL
 from google.antigravity.tools import tool_runner
 from google.antigravity.types import QuestionResponse
+
+
+class PromptSanitizationTest(unittest.TestCase):
+  """Tests for _sanitize_prompt and to_proto_input_content."""
+
+  def test_sanitize_prompt_null_bytes_and_control_chars(self):
+    sanitized = local_connection._sanitize_prompt("Hello\x00World\x07!\x7f\x80")
+    self.assertEqual(sanitized, "Hello World !  ")
+
+  def test_sanitize_prompt_preserves_whitespace(self):
+    sanitized = local_connection._sanitize_prompt("Line1\nLine2\r\tTab")
+    self.assertEqual(sanitized, "Line1\nLine2\r\tTab")
+
+  def test_sanitize_prompt_empty_or_whitespace_fallback(self):
+    self.assertEqual(local_connection._sanitize_prompt(""), "")
+    self.assertEqual(local_connection._sanitize_prompt("\x00\x00"), " ")
+
+  def test_to_proto_input_content_sanitizes_strings(self):
+    part = local_connection.to_proto_input_content("Bad\x00Input\x7f")
+    self.assertEqual(part.text, "Bad Input ")
 
 
 class LocalConnectionTest(unittest.IsolatedAsyncioTestCase):
@@ -188,7 +207,7 @@ class LocalConnectionTest(unittest.IsolatedAsyncioTestCase):
     event2 = localharness_pb2.OutputEvent(
         trajectory_state_update=localharness_pb2.TrajectoryStateUpdate(
             trajectory_id=mock_trajectory_id,
-            state=localharness_pb2.TrajectoryStateUpdate.STATE_IDLE,
+            state=localharness_pb2.TrajectoryStateUpdate.STATE_FULLY_IDLE,
             error="executor run failed: Resource exhausted",
         )
     )
@@ -231,7 +250,7 @@ class LocalConnectionTest(unittest.IsolatedAsyncioTestCase):
     event2 = localharness_pb2.OutputEvent(
         trajectory_state_update=localharness_pb2.TrajectoryStateUpdate(
             trajectory_id="my_cascade",
-            state=localharness_pb2.TrajectoryStateUpdate.STATE_IDLE,
+            state=localharness_pb2.TrajectoryStateUpdate.STATE_FULLY_IDLE,
             error="Trajectory execution failed",
         )
     )
@@ -259,7 +278,7 @@ class LocalConnectionTest(unittest.IsolatedAsyncioTestCase):
     event = localharness_pb2.OutputEvent(
         trajectory_state_update=localharness_pb2.TrajectoryStateUpdate(
             trajectory_id="my_cascade",
-            state=localharness_pb2.TrajectoryStateUpdate.STATE_IDLE,
+            state=localharness_pb2.TrajectoryStateUpdate.STATE_FULLY_IDLE,
             error="MCP load failed for dead_server: connection refused",
         )
     )
@@ -272,6 +291,53 @@ class LocalConnectionTest(unittest.IsolatedAsyncioTestCase):
     ):
       async for _ in harness.conn.receive_steps():
         pass
+
+  async def test_receive_steps_multiple_idle_state_updates_hang(self):
+    """Verifies receive_steps does not hang on multiple STATE_IDLE events."""
+    harness = self._make_harness()
+
+    await harness.conn.send("Hello")
+    init_data = await harness.wait_for_response()
+    self.assertEqual(init_data.get("userInput"), "Hello")
+
+    # 1. Harness sends STATE_IDLE (e.g. while processing tool call)
+    event1 = localharness_pb2.OutputEvent(
+        trajectory_state_update=localharness_pb2.TrajectoryStateUpdate(
+            trajectory_id="my_cascade",
+            state=localharness_pb2.TrajectoryStateUpdate.STATE_FULLY_IDLE,
+        )
+    )
+    await harness.send_event(event1)
+
+    # 2. Additional step arrives after first STATE_IDLE
+    event2 = localharness_pb2.OutputEvent(
+        step_update=localharness_pb2.StepUpdate(
+            trajectory_id="my_cascade",
+            step_index=1,
+            state=localharness_pb2.StepUpdate.STATE_DONE,
+            source=localharness_pb2.StepUpdate.SOURCE_MODEL,
+            text="Step content after idle",
+        )
+    )
+    await harness.send_event(event2)
+
+    # 3. Final STATE_IDLE for turn completion
+    event3 = localharness_pb2.OutputEvent(
+        trajectory_state_update=localharness_pb2.TrajectoryStateUpdate(
+            trajectory_id="my_cascade",
+            state=localharness_pb2.TrajectoryStateUpdate.STATE_FULLY_IDLE,
+        )
+    )
+    await harness.send_event(event3)
+
+    steps = []
+    async def _collect():
+      async for step in harness.conn.receive_steps():
+        steps.append(step)
+
+    await asyncio.wait_for(_collect(), timeout=1.0)
+    self.assertEqual(len(steps), 1)
+    self.assertEqual(steps[0].content, "Step content after idle")
 
   def test_local_connection_step_from_dict(self):
     """Tests that LocalConnectionStep maps fields correctly."""
@@ -604,6 +670,25 @@ class LocalConnectionTest(unittest.IsolatedAsyncioTestCase):
         b"\xff\xd8\xff\xd9",
     )
 
+  async def test_large_tool_result_handled(self):
+    def large_tool():
+      return "X" * (5 * 1024 * 1024)
+
+    self.tool_runner.register(large_tool, name="large_tool")
+    harness = self._make_harness()
+
+    await harness.send_event(
+        localharness_pb2.OutputEvent(
+            tool_call=localharness_pb2.ToolCall(
+                id="call_large", name="large_tool", arguments_json="{}"
+            )
+        )
+    )
+
+    sent_data = await harness.wait_for_response()
+    resp = sent_data["toolResponse"]
+    self.assertEqual(resp["id"], "call_large")
+    self.assertGreaterEqual(len(resp["responseJson"]), 5 * 1024 * 1024)
 
   async def test_question_hook_integration(self):
     hr = hook_runner.HookRunner()
@@ -812,7 +897,7 @@ class LocalConnectionTest(unittest.IsolatedAsyncioTestCase):
     event2 = localharness_pb2.OutputEvent(
         trajectory_state_update=localharness_pb2.TrajectoryStateUpdate(
             trajectory_id="my_cascade",
-            state=localharness_pb2.TrajectoryStateUpdate.STATE_IDLE,
+            state=localharness_pb2.TrajectoryStateUpdate.STATE_FULLY_IDLE,
         )
     )
     await harness.send_event(event2)
@@ -904,7 +989,7 @@ class LocalConnectionTest(unittest.IsolatedAsyncioTestCase):
         localharness_pb2.OutputEvent(
             trajectory_state_update=localharness_pb2.TrajectoryStateUpdate(
                 trajectory_id="parent_traj",
-                state=localharness_pb2.TrajectoryStateUpdate.State.STATE_IDLE,
+                state=localharness_pb2.TrajectoryStateUpdate.State.STATE_FULLY_IDLE,
             )
         )
     )
@@ -949,7 +1034,7 @@ class LocalConnectionTest(unittest.IsolatedAsyncioTestCase):
         localharness_pb2.OutputEvent(
             trajectory_state_update=localharness_pb2.TrajectoryStateUpdate(
                 trajectory_id="traj_1",
-                state=localharness_pb2.TrajectoryStateUpdate.STATE_IDLE,
+                state=localharness_pb2.TrajectoryStateUpdate.STATE_FULLY_IDLE,
             )
         )
     )
@@ -1114,14 +1199,14 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
     """Verifies that None fields on ModelConfig are not set on the proto."""
     models = [
         types.ModelTarget(
-            name="gemini-3.5-flash",
+            name="gemini-3.6-flash",
             types=[types.ModelType.TEXT],
             endpoint=types.GeminiAPIEndpoint(),
         )
     ]
     strategy = self._make_strategy(models=models)
     config = strategy._build_harness_config()
-    self.assertEqual(config.models[0].name, "gemini-3.5-flash")
+    self.assertEqual(config.models[0].name, "gemini-3.6-flash")
     # api_key should not be set (proto default empty string).
     self.assertEqual(config.models[0].gemini_api_endpoint.api_key, "")
 
@@ -1536,7 +1621,7 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
     """Verifies that Vertex configuration fields propagate to proto."""
     models = [
         types.ModelTarget(
-            name="gemini-3.5-flash",
+            name="gemini-3.6-flash",
             types=[types.ModelType.TEXT],
             endpoint=types.VertexEndpoint(
                 project="my-project",
@@ -1782,7 +1867,7 @@ class LocalConnectionStrategyApiKeyTest(unittest.IsolatedAsyncioTestCase):
     """
     models = [
         types.ModelTarget(
-            name="gemini-3.5-flash",
+            name="gemini-3.6-flash",
             types=[types.ModelType.TEXT],
         )
     ]
@@ -1800,7 +1885,7 @@ class LocalConnectionStrategyApiKeyTest(unittest.IsolatedAsyncioTestCase):
     """
     models = [
         types.ModelTarget(
-            name="gemini-3.5-flash",
+            name="gemini-3.6-flash",
             types=[types.ModelType.TEXT],
             endpoint=types.GeminiAPIEndpoint(api_key=None),
         )
@@ -1816,7 +1901,7 @@ class LocalConnectionStrategyApiKeyTest(unittest.IsolatedAsyncioTestCase):
     """Verifies strategy raises validation error when Vertex is set but no project/location provided."""
     models = [
         types.ModelTarget(
-            name="gemini-3.5-flash",
+            name="gemini-3.6-flash",
             types=[types.ModelType.TEXT],
             endpoint=types.VertexEndpoint(project=None, location=None),
         )
@@ -1840,7 +1925,7 @@ class LocalConnectionStrategyApiKeyTest(unittest.IsolatedAsyncioTestCase):
 
     models = [
         types.ModelTarget(
-            name="gemini-3.5-flash",
+            name="gemini-3.6-flash",
             types=[types.ModelType.TEXT],
             endpoint=types.VertexEndpoint(
                 project="my-project",
@@ -1872,7 +1957,7 @@ class LocalConnectionStrategyApiKeyTest(unittest.IsolatedAsyncioTestCase):
     mock_proc.stdout.read.return_value = b""
     mock_popen.return_value = mock_proc
 
-    cfg = local_connection_config.LocalAgentConfig(model="gemini-3.5-flash")
+    cfg = local_connection_config.LocalAgentConfig(model="gemini-3.6-flash")
     self.assertIsInstance(cfg.models[0].endpoint, types.VertexEndpoint)
     self.assertEqual(cfg.models[0].endpoint.project, "env-project")
     self.assertEqual(cfg.models[0].endpoint.location, "env-location")
@@ -1886,7 +1971,7 @@ class LocalConnectionStrategyApiKeyTest(unittest.IsolatedAsyncioTestCase):
   )
   def test_bare_config_routes_to_vertex_via_use_enterprise_env(self):
     """USE_ENTERPRISE alone also triggers Vertex routing (GEAP recipe)."""
-    cfg = local_connection_config.LocalAgentConfig(model="gemini-3.5-flash")
+    cfg = local_connection_config.LocalAgentConfig(model="gemini-3.6-flash")
     self.assertIsInstance(cfg.models[0].endpoint, types.VertexEndpoint)
 
   @mock.patch.dict(
@@ -2031,7 +2116,7 @@ class LocalConnectionStrategyApiKeyTest(unittest.IsolatedAsyncioTestCase):
     mock_popen.return_value = mock_proc
     models = [
         types.ModelTarget(
-            name="gemini-3.5-flash",
+            name="gemini-3.6-flash",
             types=[types.ModelType.TEXT],
             endpoint=types.GeminiAPIEndpoint(api_key="explicit-key"),
         )
@@ -2102,10 +2187,12 @@ class LocalConnectionStrategyConnectTest(unittest.IsolatedAsyncioTestCase):
         mock.call(
             "ws://localhost:8080/",
             additional_headers={"x-goog-api-key": "fake-key"},
+            max_size=None,
         ),
         mock.call(
             "ws://127.0.0.1:8080/",
             additional_headers={"x-goog-api-key": "fake-key"},
+            max_size=None,
         ),
     ])
 
@@ -2341,7 +2428,7 @@ class LocalConnectionPostTurnHookTest(unittest.IsolatedAsyncioTestCase):
     idle_event = localharness_pb2.OutputEvent(
         trajectory_state_update=localharness_pb2.TrajectoryStateUpdate(
             trajectory_id="test_traj",
-            state=localharness_pb2.TrajectoryStateUpdate.STATE_IDLE,
+            state=localharness_pb2.TrajectoryStateUpdate.STATE_FULLY_IDLE,
         )
     )
     await harness.send_event(idle_event)
@@ -2407,7 +2494,7 @@ class LocalConnectionPostTurnHookTest(unittest.IsolatedAsyncioTestCase):
     idle_event = localharness_pb2.OutputEvent(
         trajectory_state_update=localharness_pb2.TrajectoryStateUpdate(
             trajectory_id="test_traj",
-            state=localharness_pb2.TrajectoryStateUpdate.STATE_IDLE,
+            state=localharness_pb2.TrajectoryStateUpdate.STATE_FULLY_IDLE,
         )
     )
 
@@ -2484,7 +2571,7 @@ class LocalConnectionPostTurnHookTest(unittest.IsolatedAsyncioTestCase):
     idle_event = localharness_pb2.OutputEvent(
         trajectory_state_update=localharness_pb2.TrajectoryStateUpdate(
             trajectory_id="test_traj",
-            state=localharness_pb2.TrajectoryStateUpdate.STATE_IDLE,
+            state=localharness_pb2.TrajectoryStateUpdate.STATE_FULLY_IDLE,
         )
     )
 
@@ -2646,8 +2733,6 @@ class LocalConnectionSubagentHookTest(unittest.IsolatedAsyncioTestCase):
             total_token_count=250,
         ),
     )
-
-
 
 
 class LocalConnectionToolCallHooksTest(unittest.IsolatedAsyncioTestCase):
@@ -4147,14 +4232,16 @@ class LocalConnectionSubagentsTest(unittest.IsolatedAsyncioTestCase):
     subagent = types.SubagentConfig(
         name="test_helper",
         description="A helpful subagent for testing",
-        system_instructions=[
-            types.SystemInstructionSection(
-                title="Identity", content="You are a helper agent."
-            ),
-            types.SystemInstructionSection(
-                title="Guidelines", content="Keep responses short."
-            ),
-        ],
+        system_instructions=types.TemplatedSystemInstructions(
+            sections=[
+                types.SystemInstructionSection(
+                    title="Identity", content="You are a helper agent."
+                ),
+                types.SystemInstructionSection(
+                    title="Guidelines", content="Keep responses short."
+                ),
+            ]
+        ),
     )
 
     strategy = local_connection.LocalConnectionStrategy(
@@ -4173,6 +4260,59 @@ class LocalConnectionSubagentsTest(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(sections[0].content, "You are a helper agent.")
     self.assertEqual(sections[1].title, "Guidelines")
     self.assertEqual(sections[1].content, "Keep responses short.")
+
+  def test_builds_subagents_proto_with_custom_system_instructions(self):
+    subagent = types.SubagentConfig(
+        name="custom_helper",
+        description="A subagent with custom instructions",
+        system_instructions=types.CustomSystemInstructions(
+            text="Fully custom subagent instructions."
+        ),
+    )
+
+    strategy = local_connection.LocalConnectionStrategy(
+        subagents=[subagent],
+        workspaces=[str(self.workspace)],
+    )
+
+    harness_config = strategy._build_harness_config()
+
+    self.assertEqual(len(harness_config.custom_subagents), 1)
+    custom_agent = harness_config.custom_subagents[0]
+    self.assertEqual(custom_agent.name, "custom_helper")
+    parts = custom_agent.system_instructions.custom.part
+    self.assertEqual(len(parts), 1)
+    self.assertEqual(parts[0].text, "Fully custom subagent instructions.")
+
+  def test_builds_subagents_proto_with_templated_system_instructions(self):
+    subagent = types.SubagentConfig(
+        name="templated_helper",
+        description="A subagent with templated instructions",
+        system_instructions=types.TemplatedSystemInstructions(
+            identity="Subagent identity",
+            sections=[
+                types.SystemInstructionSection(
+                    title="Section1", content="Content1"
+                )
+            ],
+        ),
+    )
+
+    strategy = local_connection.LocalConnectionStrategy(
+        subagents=[subagent],
+        workspaces=[str(self.workspace)],
+    )
+
+    harness_config = strategy._build_harness_config()
+
+    self.assertEqual(len(harness_config.custom_subagents), 1)
+    custom_agent = harness_config.custom_subagents[0]
+    self.assertEqual(custom_agent.name, "templated_helper")
+    appended = custom_agent.system_instructions.appended
+    self.assertEqual(appended.custom_identity, "Subagent identity")
+    self.assertEqual(len(appended.appended_sections), 1)
+    self.assertEqual(appended.appended_sections[0].title, "Section1")
+    self.assertEqual(appended.appended_sections[0].content, "Content1")
 
   def test_subagent_tool_not_registered_raises(self):
     def unregistered_tool():

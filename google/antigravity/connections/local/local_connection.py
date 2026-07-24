@@ -23,24 +23,26 @@ import logging
 import os
 import pathlib
 import platform
+import re
 import shutil
 import struct
 import subprocess
 import sys
 import threading
-from typing import Any, AsyncIterator, Callable, cast, Sequence
+from typing import Any, AsyncIterator, Callable, Sequence, cast
 
 from google.genai import types as genai_types
 from google.protobuf import json_format
+from typing_extensions import override
 import websockets
 
-from google.antigravity.connections.local import localharness_pb2
+from google.antigravity.proto import localharness_pb2
+
 from google.antigravity import types
 from google.antigravity.connections import connection
 from google.antigravity.connections.local import event_processor
 from google.antigravity.hooks import hook_runner as h_runner
 from google.antigravity.tools import tool_runner as t_runner
-
 
 LocalConnectionStep = event_processor.LocalConnectionStep
 IDLE_SENTINEL = event_processor.IDLE_SENTINEL
@@ -184,6 +186,22 @@ def callable_to_tool_proto(
   )
 
 
+# Strip null bytes and replace dangerous control characters before protobuf
+# serialization so C-extension string bindings do not raise or truncate.
+# Note: Canonical sanitization is enforced at the Go localharness ingress layer.
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+
+
+def _sanitize_prompt(text: str) -> str:
+  """Strips null bytes and replaces dangerous control characters with spaces."""
+  if not text:
+    return ""
+  sanitized = _CONTROL_CHAR_RE.sub(" ", text)
+  if not sanitized.strip():
+    return " "
+  return sanitized
+
+
 class LocalConnection(connection.Connection):
   """Connection to the Go-based local harness."""
 
@@ -195,12 +213,14 @@ class LocalConnection(connection.Connection):
       hook_runner: h_runner.HookRunner | None = None,
       initial_history: Sequence[types.Step] | None = None,
       env: dict[str, str] | None = None,
+      debug_config: connection.DebugConfig | None = None,
   ):
     self._hook_runner = hook_runner
     self._process = process
     self._ws = ws
     self._tool_runner = tool_runner
     self._env = env
+    self._debug_config = debug_config
     self.__initial_history = initial_history or []
     self._client_cancelled = False
     self._is_receiving = False
@@ -232,6 +252,12 @@ class LocalConnection(connection.Connection):
   def _initial_history(self) -> Sequence[types.Step]:
     """Returns the pre-existing session steps restored during handshake."""
     return self.__initial_history
+
+  @property
+  @override
+  def debug_config(self) -> connection.DebugConfig | None:
+    """Returns the debug configuration for this connection."""
+    return self._debug_config
 
   @property
   def conversation_id(self) -> str:
@@ -457,8 +483,6 @@ class LocalConnection(connection.Connection):
   def _is_idle(self) -> asyncio.Event:
     return self._processor.is_idle
 
-
-
   @property
   def _main_trajectory_id(self) -> str | None:
     return self._processor.main_trajectory_id
@@ -495,7 +519,7 @@ def to_proto_input_content(
 ) -> localharness_pb2.UserInput.Part:
   """Converts dynamic prompt fragments into proto Parts."""
   if isinstance(content, str):
-    return localharness_pb2.UserInput.Part(text=content)
+    return localharness_pb2.UserInput.Part(text=_sanitize_prompt(content))
 
   if isinstance(content, types.SlashCommand):
     sc_pb = localharness_pb2.UserInput.SlashCommand(
@@ -639,6 +663,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
       mcp_servers: Sequence[types.McpServerConfig] | None = None,
       env: dict[str, str] | None = None,
       subagents: list[types.SubagentConfig] | None = None,
+      debug_config: connection.DebugConfig | None = None,
   ):
     """Initializes the instance.
 
@@ -657,6 +682,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
       mcp_servers: Optional sequence of MCP server configurations.
       env: Optional dictionary of custom environment variables.
       subagents: Optional list of static subagent configurations.
+      debug_config: Optional debug configuration for the connection.
     """
     self._binary_path = _get_default_binary_path()
     self._tool_runner = tool_runner
@@ -666,6 +692,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
     self._models: list[types.ModelTarget] = models or []
     self._skills_paths = skills_paths
     self._env = env
+    self._debug_config = debug_config
 
     # Normalize str shorthand to SystemInstructions model.
     self._system_instructions: types.SystemInstructions | None = None
@@ -740,16 +767,35 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
 
   def _to_subagent_system_instructions_proto(
       self,
-      instructions: str | list[types.SystemInstructionSection] | None,
+      instructions: str | types.SystemInstructions | None,
   ) -> localharness_pb2.SystemInstructions | None:
     if not instructions:
       return None
+    if isinstance(instructions, types.CustomSystemInstructions):
+      proto = localharness_pb2.SystemInstructions()
+      proto.custom.CopyFrom(
+          localharness_pb2.CustomSystemInstructions(
+              part=[
+                  localharness_pb2.CustomSystemInstructions.Part(
+                      text=instructions.text
+                  )
+              ]
+          )
+      )
+      return proto
+    if isinstance(instructions, types.TemplatedSystemInstructions):
+      appended = localharness_pb2.AppendedSystemInstructions()
+      if instructions.identity:
+        appended.custom_identity = instructions.identity
+      for sec in instructions.sections:
+        appended.appended_sections.add(title=sec.title, content=sec.content)
+      proto = localharness_pb2.SystemInstructions()
+      proto.appended.CopyFrom(appended)
+      return proto
+
     appended = localharness_pb2.AppendedSystemInstructions()
     if isinstance(instructions, str):
       appended.appended_sections.add(title="System", content=instructions)
-    elif isinstance(instructions, list):
-      for sec in instructions:
-        appended.appended_sections.add(title=sec.title, content=sec.content)
 
     proto = localharness_pb2.SystemInstructions()
     proto.appended.CopyFrom(appended)
@@ -961,6 +1007,12 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
         enabled_hooks.append(hook_type)
     return enabled_hooks
 
+  @property
+  @override
+  def debug_config(self) -> connection.DebugConfig | None:
+    """Returns the debug configuration for this strategy."""
+    return self._debug_config
+
   def connect(self) -> connection.Connection:
     """Returns the established Connection."""
     if not hasattr(self, "_connection") or self._connection is None:
@@ -996,6 +1048,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
           ws = await websockets.connect(
               ws_url,
               additional_headers={"x-goog-api-key": api_key},
+              max_size=None,
           )
           return ws, ws_url
         except (OSError, websockets.WebSocketException) as e:
@@ -1021,6 +1074,8 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
         language="python",
         version=sdk_version,
         language_version=platform.python_version(),
+        os=platform.system().lower(),
+        os_version=platform.release(),
     )
     env_map = (
         {str(k): str(v) for k, v in self._env.items()} if self._env else {}
@@ -1098,6 +1153,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
         hook_runner=self._hook_runner,
         initial_history=initial_history,
         env=self._env,
+        debug_config=self._debug_config,
     )
     self._connection._start_stderr_reader(process.stderr)
 

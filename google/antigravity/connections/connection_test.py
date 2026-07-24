@@ -48,6 +48,34 @@ class ConnectionTest(unittest.IsolatedAsyncioTestCase):
     await conn.wait_for_idle()
     self.assertFalse(await conn.wait_for_wakeup())
     await conn._send_tool_results([])
+    self.assertIsNone(conn.debug_config)
+
+
+class DebugConfigTest(unittest.TestCase):
+
+  def test_debug_config_defaults(self):
+    cfg = connection.DebugConfig()
+    self.assertTrue(cfg.enable_server_side_tracing)
+    self.assertIsNotNone(cfg.logging_level)
+
+  def test_agent_config_debug_validation(self):
+    class ConcreteConfig(connection.AgentConfig):
+
+      def create_strategy(self, *, tool_runner, hook_runner):
+        return None
+
+    cfg_bool = ConcreteConfig(debug_config=True)
+    self.assertIsInstance(cfg_bool.debug_config, connection.DebugConfig)
+    self.assertTrue(cfg_bool.debug_config.enable_server_side_tracing)
+
+    cfg_false = ConcreteConfig(debug_config=False)
+    self.assertIsNone(cfg_false.debug_config)
+
+    cfg_dict = ConcreteConfig(
+        debug_config={"enable_server_side_tracing": False}
+    )
+    self.assertIsInstance(cfg_dict.debug_config, connection.DebugConfig)
+    self.assertFalse(cfg_dict.debug_config.enable_server_side_tracing)
 
 
 class AgentConfigTest(unittest.TestCase):

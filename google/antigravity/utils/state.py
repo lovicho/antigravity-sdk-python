@@ -38,7 +38,6 @@ class StateStore:
     """
     self.parent = parent
     self._store: dict[str, Any] = {}
-    self._state: dict[str, Any] = self._store
     self._lock = threading.RLock()
 
   def get_state(self, key: str, default: Any = None) -> Any:

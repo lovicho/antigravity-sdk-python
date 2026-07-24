@@ -714,6 +714,28 @@ class AntigravityConnectionErrorTest(unittest.TestCase):
     self.assertEqual(str(err), "timeout")
 
 
+class ToolExecutionErrorTest(unittest.TestCase):
+  """Validates the ToolExecutionError exception class."""
+
+  def test_basic_construction(self):
+    """Verifies construction with required arguments and default server_name=None."""
+    err = types.ToolExecutionError("command failed", tool_name="run_command")
+    self.assertIsInstance(err, RuntimeError)
+    self.assertEqual(str(err), "command failed")
+    self.assertEqual(err.tool_name, "run_command")
+    self.assertIsNone(err.server_name)
+
+  def test_explicit_server_name(self):
+    """Verifies construction with explicit server_name."""
+    err = types.ToolExecutionError(
+        "query failed", tool_name="mcp_tool", server_name="mcp_server"
+    )
+    self.assertIsInstance(err, RuntimeError)
+    self.assertEqual(str(err), "query failed")
+    self.assertEqual(err.tool_name, "mcp_tool")
+    self.assertEqual(err.server_name, "mcp_server")
+
+
 class ImageTest(unittest.TestCase):
   """Tests for the Image content attachment primitive and its validators."""
 
@@ -742,6 +764,18 @@ class ImageTest(unittest.TestCase):
       self.assertEqual(img.data, fake_bytes)
       self.assertEqual(img.mime_type, "image/png")
       self.assertEqual(img.description, "profile photo")
+
+  def test_from_file_inference_failure_raises(self):
+    """Verifies that from_file loader raises ValueError when extension is unknown."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+      tmp_file = pathlib.Path(tmpdir) / "photo.unknown"
+      fake_bytes = b"some_bytes"
+      tmp_file.write_bytes(fake_bytes)
+
+      with self.assertRaisesRegex(
+          ValueError, "Could not infer a valid MIME type"
+      ):
+        types.Image.from_file(tmp_file)
 
 
 class AudioTest(unittest.TestCase):
@@ -1535,6 +1569,27 @@ class SubagentConfigTest(unittest.TestCase):
     self.assertEqual(sub.system_instructions, "always help")
     self.assertIsNone(sub.capabilities)
     self.assertEqual(sub.tools, [])
+
+  def test_custom_system_instructions(self):
+    custom_si = types.CustomSystemInstructions(text="Full custom prompt")
+    sub = types.SubagentConfig(
+        name="custom_helper",
+        description="custom helper agent",
+        system_instructions=custom_si,
+    )
+    self.assertEqual(sub.system_instructions, custom_si)
+
+  def test_templated_system_instructions(self):
+    templated_si = types.TemplatedSystemInstructions(
+        identity="Helper identity",
+        sections=[types.SystemInstructionSection(content="Section 1")],
+    )
+    sub = types.SubagentConfig(
+        name="templated_helper",
+        description="templated helper agent",
+        system_instructions=templated_si,
+    )
+    self.assertEqual(sub.system_instructions, templated_si)
 
   def test_required_fields(self):
     with self.assertRaises(pydantic.ValidationError):

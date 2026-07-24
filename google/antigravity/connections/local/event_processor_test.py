@@ -20,7 +20,7 @@ from unittest import mock
 from absl.testing import absltest
 from google.protobuf import json_format
 
-from google.antigravity.connections.local import localharness_pb2
+from google.antigravity.proto import localharness_pb2
 from google.antigravity import types
 from google.antigravity.connections.local import event_processor
 
@@ -343,7 +343,7 @@ class LocalHarnessEventProcessorTest(unittest.IsolatedAsyncioTestCase):
 
     event = localharness_pb2.OutputEvent(
         trajectory_state_update=localharness_pb2.TrajectoryStateUpdate(
-            state=localharness_pb2.TrajectoryStateUpdate.State.STATE_IDLE,
+            state=localharness_pb2.TrajectoryStateUpdate.State.STATE_FULLY_IDLE,
             trajectory_id=MAIN_TRAJECTORY_ID,
         )
     )
@@ -365,7 +365,7 @@ class LocalHarnessEventProcessorTest(unittest.IsolatedAsyncioTestCase):
 
     event = localharness_pb2.OutputEvent(
         trajectory_state_update=localharness_pb2.TrajectoryStateUpdate(
-            state=localharness_pb2.TrajectoryStateUpdate.State.STATE_IDLE,
+            state=localharness_pb2.TrajectoryStateUpdate.State.STATE_FULLY_IDLE,
             trajectory_id=MAIN_TRAJECTORY_ID,
             error="Failed turn execution",
         )
@@ -428,7 +428,7 @@ class LocalHarnessEventProcessorTest(unittest.IsolatedAsyncioTestCase):
     # Subagent idle shouldn't affect anything
     event = localharness_pb2.OutputEvent(
         trajectory_state_update=localharness_pb2.TrajectoryStateUpdate(
-            state=localharness_pb2.TrajectoryStateUpdate.State.STATE_IDLE,
+            state=localharness_pb2.TrajectoryStateUpdate.State.STATE_FULLY_IDLE,
             trajectory_id=SUBAGENT_TRAJECTORY_ID,
         )
     )
@@ -447,7 +447,7 @@ class LocalHarnessEventProcessorTest(unittest.IsolatedAsyncioTestCase):
 
     event = localharness_pb2.OutputEvent(
         trajectory_state_update=localharness_pb2.TrajectoryStateUpdate(
-            state=localharness_pb2.TrajectoryStateUpdate.State.STATE_IDLE,
+            state=localharness_pb2.TrajectoryStateUpdate.State.STATE_FULLY_IDLE,
             trajectory_id=SUBAGENT_TRAJECTORY_ID,
             error="Subagent failure",
         )
