@@ -574,6 +574,7 @@ class BuiltinToolsTest(parameterized.TestCase):
   @parameterized.named_parameters(
       ("list_dir", types.BuiltinTools.LIST_DIR, "list_directory"),
       ("search_dir", types.BuiltinTools.SEARCH_DIR, "search_directory"),
+      ("find_file", types.BuiltinTools.FIND_FILE, "find_file"),
       ("view_file", types.BuiltinTools.VIEW_FILE, "view_file"),
       ("create_file", types.BuiltinTools.CREATE_FILE, "create_file"),
       ("edit_file", types.BuiltinTools.EDIT_FILE, "edit_file"),
@@ -587,6 +588,7 @@ class BuiltinToolsTest(parameterized.TestCase):
       ),
       ("start_subagent", types.BuiltinTools.START_SUBAGENT, "start_subagent"),
       ("generate_image", types.BuiltinTools.GENERATE_IMAGE, "generate_image"),
+      ("finish", types.BuiltinTools.FINISH, "finish"),
   )
   def test_enum_values(self, enum_member, expected_value):
     """Verifies each enum member has the expected string value."""
@@ -778,7 +780,7 @@ class ImageTest(unittest.TestCase):
         types.Image.from_file(tmp_file)
 
 
-class AudioTest(unittest.TestCase):
+class AudioTest(parameterized.TestCase):
   """Validates the Audio content attachment primitive and its validators."""
 
   def test_basic_construction(self):
@@ -786,6 +788,27 @@ class AudioTest(unittest.TestCase):
     audio = types.Audio(data=b"mp3_data", mime_type="audio/mp3")
     self.assertEqual(audio.data, b"mp3_data")
     self.assertEqual(audio.mime_type, "audio/mp3")
+
+  @parameterized.parameters(
+      "audio/wav",
+      "audio/x-wav",
+      "audio/wave",
+      "audio/vnd.wave",
+      "audio/mp3",
+      "audio/mp4",
+      "audio/webm",
+      "audio/aac",
+      "audio/ogg",
+      "audio/flac",
+      "audio/opus",
+      "audio/mpeg",
+      "audio/m4a",
+      "audio/l16",
+  )
+  def test_supported_mime_types(self, mime_type: str):
+    """Verifies that all supported Audio MIME types pass validation."""
+    audio = types.Audio(data=b"sample_data", mime_type=mime_type)
+    self.assertEqual(audio.mime_type, mime_type)
 
   def test_unsupported_mime_type_raises(self):
     """Verifies that an unsupported Audio MIME type triggers ValidationError."""
@@ -1644,6 +1667,35 @@ class UsageMetadataTest(unittest.TestCase):
     """Verifies that __add__ returns NotImplemented for invalid types."""
     u = types.UsageMetadata(prompt_token_count=10)
     self.assertEqual(u.__add__(1), NotImplemented)
+
+
+class RetryConfigTest(unittest.TestCase):
+  """Tests for RetryConfig presets and explicit configuration."""
+
+  def test_benchmark_preset(self):
+    cfg = types.RetryConfig.benchmark()
+    self.assertIsNotNone(cfg.api_retry)
+    self.assertEqual(cfg.api_retry.max_retries, 2**32 - 1)
+    self.assertEqual(cfg.api_retry.initial_sleep_duration_ms, 1000)
+    self.assertIsNone(cfg.model_output_retry)
+
+  def test_explicit_models(self):
+    cfg = types.RetryConfig(
+        api_retry=types.ModelAPIRetryConfig(max_retries=5),
+        model_output_retry=types.ModelOutputRetryConfig(max_retries=3),
+    )
+    self.assertEqual(cfg.api_retry.max_retries, 5)
+    self.assertEqual(cfg.model_output_retry.max_retries, 3)
+
+  def test_uint32_validation(self):
+    with self.assertRaises(pydantic.ValidationError):
+      types.ModelAPIRetryConfig(max_retries=-1)
+    with self.assertRaises(pydantic.ValidationError):
+      types.ModelAPIRetryConfig(max_retries=2**32)
+    with self.assertRaises(pydantic.ValidationError):
+      types.ModelOutputRetryConfig(max_retries=-5)
+    with self.assertRaises(pydantic.ValidationError):
+      types.ModelOutputRetryConfig(max_retries=2**32)
 
 
 if __name__ == "__main__":

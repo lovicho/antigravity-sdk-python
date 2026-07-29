@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""LiteRT Local and generic Local OpenAI connection strategies."""
+"""LiteRT Local connection strategy."""
 
 import asyncio
 import json
@@ -24,11 +24,10 @@ import threading
 from typing import Any
 import urllib.request
 
-from google.antigravity.proto import localharness_pb2
 from google.antigravity import types
 from google.antigravity.connections.local import litert_connection_config
 from google.antigravity.connections.local import litert_server
-from google.antigravity.connections.local import local_connection
+from google.antigravity.connections.local import local_openai_connection
 
 try:
   # pylint: disable=g-import-not-at-top
@@ -39,45 +38,12 @@ except ImportError:
   litert_lm = None
   _LITERT_AVAILABLE = False
 
-_WARMUP_REQUEST_TIMEOUT_SECONDS = 60
+_WARMUP_REQUEST_TIMEOUT_SECONDS = 120
 
 
-class LocalOpenAIConnectionStrategy(local_connection.LocalConnectionStrategy):
-  """Lightweight strategy establishing connection to an external local OpenAI API (Ollama)."""
-
-  def __init__(
-      self,
-      *,
-      base_url: str,
-      model_name: str,
-      **kwargs: Any,
-  ):
-    self._base_url = base_url
-    self._model_name = model_name
-    super().__init__(**kwargs)
-
-  def _validate_connection(self) -> None:
-    """Validates that base_url is specified for OpenAI connection."""
-    if not self._base_url:
-      raise types.AntigravityValidationError(
-          "LocalOpenAIConnectionStrategy requires a non-empty 'base_url'."
-      )
-
-  def _build_harness_config(self) -> localharness_pb2.HarnessConfig:
-    """Clear Gemini config and populate external Gemma server details."""
-    harness_config = super()._build_harness_config()
-    model_cfg = localharness_pb2.ModelConfig(
-        name=self._model_name,
-        types=[localharness_pb2.MODEL_TYPE_TEXT],
-        gemma_endpoint=localharness_pb2.GemmaEndpoint(
-            base_url=self._base_url,
-        ),
-    )
-    harness_config.models.append(model_cfg)
-    return harness_config
-
-
-class LiteRTConnectionStrategy(LocalOpenAIConnectionStrategy):
+class LiteRTConnectionStrategy(
+    local_openai_connection.LocalOpenAIConnectionStrategy
+):
   """Strategy establishing connection to a local LiteRT loopback API server."""
 
   def __init__(
@@ -139,14 +105,14 @@ class LiteRTConnectionStrategy(LocalOpenAIConnectionStrategy):
             if hasattr(litert_lm, "LogSeverity")
             else 0
         )
-        litert_lm.set_min_log_severity(int(verbose_level))
+        litert_lm.set_min_log_severity(int(verbose_level))  # pytype: disable=bad-argument-type # Safe cast for dynamic LogSeverity enum value
       else:
         silent_level = (
             getattr(litert_lm.LogSeverity, "SILENT", 1000)
             if hasattr(litert_lm, "LogSeverity")
             else 1000
         )
-        litert_lm.set_min_log_severity(int(silent_level))
+        litert_lm.set_min_log_severity(int(silent_level))  # pytype: disable=bad-argument-type # Safe cast for dynamic LogSeverity enum value
     except Exception as e:  # pylint: disable=broad-exception-caught
       logging.debug("Failed to configure LiteRT min log severity: %s", e)
 
@@ -225,6 +191,10 @@ class LiteRTConnectionStrategy(LocalOpenAIConnectionStrategy):
           audio_backend=engine_audio,
           vision_backend=engine_vision,
           max_num_tokens=self._max_context_tokens,
+          # Since the Engine is used in a stateless OpenAI server, we can enable
+          # "use_ringbuffers_local_attention" to support larger context length
+          # with limited memory.
+          use_ringbuffers_local_attention=True,
       )
       self._engine_context = self._engine.__enter__()
 
@@ -311,6 +281,12 @@ class LiteRTConnectionStrategy(LocalOpenAIConnectionStrategy):
       logging.debug(
           "LiteRTConnectionStrategy __aenter__: Starting warm-up request"
       )
+      warmup_timeout = float(_WARMUP_REQUEST_TIMEOUT_SECONDS)
+      if self._max_context_tokens:
+        warmup_timeout = max(
+            warmup_timeout, float(self._max_context_tokens) / 250.0
+        )
+
       try:
         warmup_payload = {
             "model": self._model_name,
@@ -327,9 +303,7 @@ class LiteRTConnectionStrategy(LocalOpenAIConnectionStrategy):
           logging.debug(
               "LiteRTConnectionStrategy __aenter__: _warmup query start"
           )
-          with _urlopen_no_proxy(
-              req, timeout=_WARMUP_REQUEST_TIMEOUT_SECONDS
-          ) as r:
+          with _urlopen_no_proxy(req, timeout=warmup_timeout) as r:
             r.read()
           logging.debug(
               "LiteRTConnectionStrategy __aenter__: _warmup query complete"
@@ -343,6 +317,16 @@ class LiteRTConnectionStrategy(LocalOpenAIConnectionStrategy):
       # pylint: disable=broad-exception-caught
       except Exception as e:  # pylint: disable=broad-exception-caught  # pylint: disable=broad-exception-caught
         logging.warning("LiteRT warm-up request timed out or failed: %s", e)
+      finally:
+        # Ensure mid-stream warm-up handlers finish and release the engine
+        # lock before accepting real user requests from localharness.
+        if self._openai_server and hasattr(self._openai_server, "engine_lock"):
+
+          def _wait_for_engine():
+            with self._openai_server.engine_lock:
+              pass
+
+          await loop.run_in_executor(None, _wait_for_engine)
 
       # Start Go localharness Subprocess via parent
       await super().__aenter__()
