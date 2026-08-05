@@ -23,9 +23,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Sequence
 import enum
+import logging
 import mimetypes
 import pathlib
-from typing import Annotated, Any, AsyncIterator, Callable, Literal, TypeVar, cast
+from typing import Annotated, Any, AsyncIterator, Callable, ClassVar, Literal, TypeVar, cast
 
 import pydantic
 
@@ -34,6 +35,7 @@ from google.antigravity.models import GeminiModelOptions
 from google.antigravity.models import ModelEndpoint
 from google.antigravity.models import ModelTarget
 from google.antigravity.models import ModelType
+from google.antigravity.models import ServiceTier
 from google.antigravity.models import ThinkingLevel
 from google.antigravity.models import VertexEndpoint
 
@@ -41,6 +43,7 @@ _BaseMediaT = TypeVar("_BaseMediaT", bound="_BaseMedia")
 
 __all__ = [
     "ThinkingLevel",
+    "ServiceTier",
     "ModelType",
     "ModelEndpoint",
     "GeminiAPIEndpoint",
@@ -53,6 +56,7 @@ __all__ = [
     "SystemInstructions",
     "SubagentConfig",
     "SubagentCapabilities",
+    "AgentMode",
     "BuiltinTools",
     "CapabilitiesConfig",
     "ModelAPIRetryConfig",
@@ -144,16 +148,37 @@ class TemplatedSystemInstructions(pydantic.BaseModel):
 SystemInstructions = CustomSystemInstructions | TemplatedSystemInstructions
 
 
+class AgentMode(str, enum.Enum):
+  """Operational execution mode for an agent.
+
+  Attributes:
+    AUTONOMOUS: Non-interactive, automated execution. The agent must accomplish
+      the task on its own.
+    INTERACTIVE: The agent works collaboratively with a human, asking for
+      clarifications and keeping them in the loop if needed. Enables features
+      like slash commands and planning mode.
+  """
+
+  AUTONOMOUS = "autonomous"
+  INTERACTIVE = "interactive"
+
+
 class SubagentCapabilities(pydantic.BaseModel):
   """Capabilities configuration for subagents.
 
   Attributes:
+    agent_mode: Operational execution mode for the subagent. In particular,
+      AgentMode.AUTONOMOUS incentivizes the agent to solve the task on their
+      own from start to finish while AgentMode.INTERACTIVE makes the agent work
+      collaboratively with a human, asking for clarifications and keeping
+      them in the loop if needed. Defaults to AgentMode.AUTONOMOUS.
     enabled_tools: Explicit allowlist of builtin tools to enable. Mutually
       exclusive with disabled_tools. When None, the harness defaults are used.
     disabled_tools: Explicit denylist of builtin tools to disable. Mutually
       exclusive with enabled_tools. When None, the harness defaults are used.
   """
 
+  agent_mode: AgentMode = AgentMode.AUTONOMOUS
   enabled_tools: list[BuiltinTools] | None = None
   disabled_tools: list[BuiltinTools] | None = None
 
@@ -162,6 +187,21 @@ class SubagentCapabilities(pydantic.BaseModel):
     if self.enabled_tools is not None and self.disabled_tools is not None:
       raise ValueError(
           "enabled_tools and disabled_tools should be mutually exclusive."
+      )
+    return self
+
+  @pydantic.model_validator(mode="after")
+  def _validate_interactive_tools(self) -> "SubagentCapabilities":
+    if (
+        self.enabled_tools is not None
+        and BuiltinTools.ASK_QUESTION in self.enabled_tools
+        and self.agent_mode != AgentMode.INTERACTIVE
+    ):
+      logging.warning(
+          "BuiltinTools.ASK_QUESTION is enabled on subagent, but agent_mode is"
+          " not INTERACTIVE. Set"
+          " SubagentCapabilities(agent_mode=AgentMode.INTERACTIVE) if"
+          " interactive question-and-answer behavior is desired."
       )
     return self
 
@@ -323,6 +363,11 @@ class CapabilitiesConfig(pydantic.BaseModel):
 
   Attributes:
     enable_subagents: Whether the agent can spawn and delegate to sub-agents.
+    agent_mode: Operational execution mode for the agent. In particular,
+      AgentMode.AUTONOMOUS incentivizes the agent to solve the task on their
+      own from start to finish while AgentMode.INTERACTIVE makes the agent work
+      collaboratively with a human, asking for clarifications and keeping
+      them in the loop if needed. Defaults to AgentMode.AUTONOMOUS.
     enabled_tools: Explicit allowlist of builtin tools to enable. Mutually
       exclusive with disabled_tools. When None, the harness defaults are used
       (all tools enabled). Disabled tools are removed from the model's context,
@@ -337,6 +382,7 @@ class CapabilitiesConfig(pydantic.BaseModel):
   """
 
   enable_subagents: bool = True
+  agent_mode: AgentMode = AgentMode.AUTONOMOUS
   enabled_tools: list[BuiltinTools] | None = None
   disabled_tools: list[BuiltinTools] | None = None
   compaction_threshold: int | None = None
@@ -347,6 +393,21 @@ class CapabilitiesConfig(pydantic.BaseModel):
     if self.enabled_tools is not None and self.disabled_tools is not None:
       raise ValueError(
           "enabled_tools and disabled_tools should be mutually exclusive."
+      )
+    return self
+
+  @pydantic.model_validator(mode="after")
+  def _validate_interactive_tools(self) -> "CapabilitiesConfig":
+    if (
+        self.enabled_tools is not None
+        and BuiltinTools.ASK_QUESTION in self.enabled_tools
+        and self.agent_mode != AgentMode.INTERACTIVE
+    ):
+      logging.warning(
+          "BuiltinTools.ASK_QUESTION is enabled, but agent_mode is not"
+          " INTERACTIVE. Set"
+          " CapabilitiesConfig(agent_mode=AgentMode.INTERACTIVE) if interactive"
+          " question-and-answer behavior is desired."
       )
     return self
 
@@ -429,18 +490,24 @@ class BaseMcpServerConfig(pydantic.BaseModel):
       underscores are permitted).
     timeout_seconds: Optional timeout in seconds for connecting to the server
       and listing tools.
+    enabled_tools: Explicit allowlist of tools to enable. Mutually exclusive
+      with disabled_tools. When None, all tools from the server are enabled.
+      Only enabled tools are exposed to the model; others are hidden entirely
+      from the model's context, saving tokens.
+    disabled_tools: Explicit denylist of tools to disable. Mutually exclusive
+      with enabled_tools. When None, all tools from the server are enabled.
+      Disabled tools are removed from the model's context entirely, saving
+      tokens and preventing the model from even considering them.
   """
 
   name: Annotated[str, pydantic.Field(pattern=r"^[a-zA-Z0-9_-]+$")]
   timeout_seconds: int | None = None
+  enabled_tools: list[str] | None = None
+  disabled_tools: list[str] | None = None
 
   @pydantic.model_validator(mode="after")
   def _check_mutually_exclusive(self) -> "BaseMcpServerConfig":
-    # Use getattr to dynamically check subclass fields without causing pytype
-    # errors
-    enabled_tools = getattr(self, "enabled_tools", None)
-    disabled_tools = getattr(self, "disabled_tools", None)
-    if enabled_tools is not None and disabled_tools is not None:
+    if self.enabled_tools is not None and self.disabled_tools is not None:
       raise ValueError(
           "enabled_tools and disabled_tools should be mutually exclusive."
       )
@@ -457,22 +524,12 @@ class McpStdioServer(BaseMcpServerConfig):
     args: Arguments to pass to the command.
     env: Environment variables to merge into the spawned subprocess's
       environment.
-    enabled_tools: Explicit allowlist of tools to enable. Mutually exclusive
-      with disabled_tools. When None, all tools from the server are enabled.
-      Only enabled tools are exposed to the model; others are hidden entirely
-      from the model's context, saving tokens.
-    disabled_tools: Explicit denylist of tools to disable. Mutually exclusive
-      with enabled_tools. When None, all tools from the server are enabled.
-      Disabled tools are removed from the model's context entirely, saving
-      tokens and preventing the model from even considering them.
   """
 
   command: str
   type: Literal["stdio"] = "stdio"
   args: list[str] = pydantic.Field(default_factory=list)
   env: dict[str, str] | None = None
-  enabled_tools: list[str] | None = None
-  disabled_tools: list[str] | None = None
 
 
 class McpStreamableHttpServer(BaseMcpServerConfig):
@@ -486,14 +543,6 @@ class McpStreamableHttpServer(BaseMcpServerConfig):
     timeout: Connection timeout in seconds.
     sse_read_timeout: SSE read timeout in seconds.
     terminate_on_close: Whether to terminate the connection on close.
-    enabled_tools: Explicit allowlist of tools to enable. Mutually exclusive
-      with disabled_tools. When None, all tools from the server are enabled.
-      Only enabled tools are exposed to the model; others are hidden entirely
-      from the model's context, saving tokens.
-    disabled_tools: Explicit denylist of tools to disable. Mutually exclusive
-      with enabled_tools. When None, all tools from the server are enabled.
-      Disabled tools are removed from the model's context entirely, saving
-      tokens and preventing the model from even considering them.
   """
 
   url: str
@@ -502,8 +551,6 @@ class McpStreamableHttpServer(BaseMcpServerConfig):
   timeout: float = 30.0
   sse_read_timeout: float = 300.0
   terminate_on_close: bool = True
-  enabled_tools: list[str] | None = None
-  disabled_tools: list[str] | None = None
 
 
 McpServerConfig = McpStdioServer | McpStreamableHttpServer
@@ -582,6 +629,7 @@ class UsageMetadata(pydantic.BaseModel):
       (excluding thinking).
     thoughts_token_count: Number of tokens used for thinking/reasoning.
     total_token_count: Sum of prompt + candidates + thinking tokens.
+    service_tier: Service tier used for inference (e.g. "priority").
   """
 
   # Input tokens.
@@ -595,9 +643,19 @@ class UsageMetadata(pydantic.BaseModel):
   # Total tokens (prompt + candidates + thoughts).
   total_token_count: int | None = None
 
+  # Service tier.
+  service_tier: ServiceTier | None = None
+
   def __add__(self, other: UsageMetadata) -> UsageMetadata:
     if not isinstance(other, UsageMetadata):
       return NotImplemented
+    if self.service_tier == other.service_tier:
+      merged_tier = self.service_tier
+    elif self.service_tier is None or other.service_tier is None:
+      merged_tier = self.service_tier or other.service_tier
+    else:
+      # When combining different service tiers, default to STANDARD.
+      merged_tier = ServiceTier.STANDARD
     return UsageMetadata(
         prompt_token_count=(self.prompt_token_count or 0)
         + (other.prompt_token_count or 0),
@@ -609,6 +667,23 @@ class UsageMetadata(pydantic.BaseModel):
         + (other.thoughts_token_count or 0),
         total_token_count=(self.total_token_count or 0)
         + (other.total_token_count or 0),
+        service_tier=merged_tier,
+    )
+
+  def __sub__(self, other: UsageMetadata) -> UsageMetadata:
+    if not isinstance(other, UsageMetadata):
+      return NotImplemented
+    return UsageMetadata(
+        prompt_token_count=(self.prompt_token_count or 0)
+        - (other.prompt_token_count or 0),
+        cached_content_token_count=(self.cached_content_token_count or 0)
+        - (other.cached_content_token_count or 0),
+        candidates_token_count=(self.candidates_token_count or 0)
+        - (other.candidates_token_count or 0),
+        thoughts_token_count=(self.thoughts_token_count or 0)
+        - (other.thoughts_token_count or 0),
+        total_token_count=(self.total_token_count or 0)
+        - (other.total_token_count or 0),
     )
 
 
@@ -819,13 +894,19 @@ class ToolExecutionError(RuntimeError):
 
   tool_name: str
   server_name: str | None
+  call_id: str | None
 
   def __init__(
-      self, message: str, tool_name: str, server_name: str | None = None
+      self,
+      message: str,
+      tool_name: str,
+      server_name: str | None = None,
+      call_id: str | None = None,
   ):
     super().__init__(message)
     self.tool_name = tool_name
     self.server_name = server_name
+    self.call_id = call_id
 
 
 class AntigravityValidationError(Exception):
@@ -1027,7 +1108,7 @@ class ChatResponse:
   @property
   def usage_metadata(self) -> UsageMetadata | None:
     """Accumulated token usage across all model invocations in this turn."""
-    return self._conversation._last_turn_usage  # pylint: disable=protected-access
+    return self._conversation.last_turn_usage
 
   async def cancel(self) -> None:
     """Cancels the active execution turn and halts generation.
@@ -1124,12 +1205,49 @@ def _read_file_safely(path: str | pathlib.Path) -> bytes:
     raise OSError(f"Failed to read file at path '{file_path}': {exc}") from exc
 
 
+def _read_file_and_guess_mime(
+    path: str | pathlib.Path,
+) -> tuple[bytes, str]:
+  """Reads a file and guesses its MIME type.
+
+  Args:
+      path: The file path to read.
+
+  Returns:
+      A tuple containing the file contents as bytes and the guessed MIME type
+      as a string.
+
+  Raises:
+      ValueError: If the MIME type cannot be guessed.
+  """
+  file_path = pathlib.Path(path)
+  data = _read_file_safely(file_path)
+  mime_guess, _ = mimetypes.guess_type(file_path)
+  if not mime_guess:
+    raise ValueError(
+        f"Could not infer a valid MIME type for extension: '{file_path.suffix}'"
+    )
+  return data, mime_guess
+
+
 class _BaseMedia(pydantic.BaseModel):
   """Base class for all rich multimedia content attachment primitives."""
+
+  _SUPPORTED_MIMES: ClassVar[frozenset[str]] = frozenset()
 
   data: bytes
   mime_type: str
   description: str | None = None
+
+  @pydantic.field_validator("mime_type")
+  @classmethod
+  def _validate_mime_type(cls, v: str) -> str:
+    """Validates that the MIME type is supported for this media type."""
+    if cls is _BaseMedia:
+      return v
+    if v not in cls._SUPPORTED_MIMES:
+      raise ValueError(f"Unsupported {cls.__name__} MIME type: '{v}'")
+    return v
 
   @classmethod
   def from_file(
@@ -1146,17 +1264,10 @@ class _BaseMedia(pydantic.BaseModel):
     Returns:
         The instantiated media object.
     """
-    file_path = pathlib.Path(path)
-    data = _read_file_safely(file_path)
-    mime_guess, _ = mimetypes.guess_type(file_path)
-    if not mime_guess:
-      raise ValueError(
-          "Could not infer a valid MIME type for extension: "
-          f"'{file_path.suffix}'"
-      )
+    data, mime_type = _read_file_and_guess_mime(path)
     return cls(
         data=data,
-        mime_type=mime_guess,
+        mime_type=mime_type,
         description=description,
     )
 
@@ -1166,49 +1277,25 @@ class _BaseMedia(pydantic.BaseModel):
 class Image(_BaseMedia):
   """Image content attachment primitive."""
 
-  @pydantic.field_validator("mime_type")
-  @classmethod
-  def _validate_mime_type(cls, v: str) -> str:
-    """Validates that the MIME type is supported for Image content."""
-    if v not in SUPPORTED_IMAGE_MIMES:
-      raise ValueError(f"Unsupported Image MIME type: '{v}'")
-    return v
+  _SUPPORTED_MIMES: ClassVar[frozenset[str]] = SUPPORTED_IMAGE_MIMES
 
 
 class Document(_BaseMedia):
   """Document content attachment primitive."""
 
-  @pydantic.field_validator("mime_type")
-  @classmethod
-  def _validate_mime_type(cls, v: str) -> str:
-    """Validates that the MIME type is supported for Document content."""
-    if v not in SUPPORTED_DOCUMENT_MIMES:
-      raise ValueError(f"Unsupported Document MIME type: '{v}'")
-    return v
+  _SUPPORTED_MIMES: ClassVar[frozenset[str]] = SUPPORTED_DOCUMENT_MIMES
 
 
 class Audio(_BaseMedia):
   """Audio content attachment primitive."""
 
-  @pydantic.field_validator("mime_type")
-  @classmethod
-  def _validate_mime_type(cls, v: str) -> str:
-    """Validates that the MIME type is supported for Audio content."""
-    if v not in SUPPORTED_AUDIO_MIMES:
-      raise ValueError(f"Unsupported Audio MIME type: '{v}'")
-    return v
+  _SUPPORTED_MIMES: ClassVar[frozenset[str]] = SUPPORTED_AUDIO_MIMES
 
 
 class Video(_BaseMedia):
   """Video content attachment primitive."""
 
-  @pydantic.field_validator("mime_type")
-  @classmethod
-  def _validate_mime_type(cls, v: str) -> str:
-    """Validates that the MIME type is supported for Video content."""
-    if v not in SUPPORTED_VIDEO_MIMES:
-      raise ValueError(f"Unsupported Video MIME type: '{v}'")
-    return v
+  _SUPPORTED_MIMES: ClassVar[frozenset[str]] = SUPPORTED_VIDEO_MIMES
 
 
 class BuiltinSlashCommandName(str, enum.Enum):
@@ -1267,16 +1354,8 @@ def from_file(
   Raises:
       ValueError: If the MIME type cannot be inferred or is unsupported.
   """
-  file_path = pathlib.Path(path)
-  data = _read_file_safely(file_path)
-
-  mime_guess, _ = mimetypes.guess_type(file_path)
-  if not mime_guess:
-    raise ValueError(
-        f"Could not infer a valid MIME type for extension: '{file_path.suffix}'"
-    )
-
-  return from_bytes(data, mime_guess, description)
+  data, mime_type = _read_file_and_guess_mime(path)
+  return from_bytes(data, mime_type, description)
 
 
 def from_bytes(

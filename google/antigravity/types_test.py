@@ -658,6 +658,14 @@ class BuiltinToolsTest(parameterized.TestCase):
     self.assertEqual(types.BuiltinTools.none(), [])
 
 
+class AgentModeTest(unittest.TestCase):
+  """Tests for the AgentMode enum."""
+
+  def test_enum_values(self):
+    self.assertEqual(types.AgentMode.AUTONOMOUS, "autonomous")
+    self.assertEqual(types.AgentMode.INTERACTIVE, "interactive")
+
+
 class CapabilitiesConfigTest(unittest.TestCase):
   """Tests for the CapabilitiesConfig Pydantic model."""
 
@@ -665,10 +673,18 @@ class CapabilitiesConfigTest(unittest.TestCase):
     """Verifies defaults: subagents enabled, no tool lists, no threshold."""
     config = types.CapabilitiesConfig()
     self.assertTrue(config.enable_subagents)
+    self.assertEqual(config.agent_mode, types.AgentMode.AUTONOMOUS)
     self.assertIsNone(config.enabled_tools)
     self.assertIsNone(config.disabled_tools)
     self.assertIsNone(config.compaction_threshold)
     self.assertIsNone(config.finish_tool_schema_json)
+
+  def test_agent_mode_explicit(self):
+    """Verifies that agent_mode can be explicitly set via enum or string."""
+    config = types.CapabilitiesConfig(agent_mode=types.AgentMode.INTERACTIVE)
+    self.assertEqual(config.agent_mode, types.AgentMode.INTERACTIVE)
+    config_str = types.CapabilitiesConfig(agent_mode="interactive")
+    self.assertEqual(config_str.agent_mode, types.AgentMode.INTERACTIVE)
 
   def test_enabled_tools(self):
     """Verifies that enabled_tools accepts a list of BuiltinTools."""
@@ -701,6 +717,40 @@ class CapabilitiesConfigTest(unittest.TestCase):
     config = types.CapabilitiesConfig(compaction_threshold=50000)
     self.assertEqual(config.compaction_threshold, 50000)
 
+  def test_ask_question_warning_when_not_interactive(self):
+    """Verifies warning when ASK_QUESTION is enabled and not interactive."""
+    with self.assertLogs(level="WARNING") as log_cm:
+      types.CapabilitiesConfig(
+          enabled_tools=[types.BuiltinTools.ASK_QUESTION],
+          agent_mode=types.AgentMode.AUTONOMOUS,
+      )
+    self.assertTrue(
+        any("ASK_QUESTION is enabled" in msg for msg in log_cm.output)
+    )
+
+  def test_ask_question_no_warning_when_interactive(self):
+    """Verifies no warning when ASK_QUESTION is enabled in interactive mode."""
+    with mock.patch("logging.warning") as mock_warn:
+      types.CapabilitiesConfig(
+          enabled_tools=[types.BuiltinTools.ASK_QUESTION],
+          agent_mode=types.AgentMode.INTERACTIVE,
+      )
+      mock_warn.assert_not_called()
+
+  def test_subagent_ask_question_warning_when_not_interactive(self):
+    """Verifies that a warning is logged for SubagentCapabilities."""
+    with self.assertLogs(level="WARNING") as log_cm:
+      types.SubagentCapabilities(
+          enabled_tools=[types.BuiltinTools.ASK_QUESTION],
+          agent_mode=types.AgentMode.AUTONOMOUS,
+      )
+    self.assertTrue(
+        any(
+            "ASK_QUESTION is enabled on subagent" in msg
+            for msg in log_cm.output
+        )
+    )
+
 
 class AntigravityConnectionErrorTest(unittest.TestCase):
   """Validates the AntigravityConnectionError hierarchy."""
@@ -720,22 +770,27 @@ class ToolExecutionErrorTest(unittest.TestCase):
   """Validates the ToolExecutionError exception class."""
 
   def test_basic_construction(self):
-    """Verifies construction with required arguments and default server_name=None."""
+    """Verifies construction with required arguments and defaults."""
     err = types.ToolExecutionError("command failed", tool_name="run_command")
     self.assertIsInstance(err, RuntimeError)
     self.assertEqual(str(err), "command failed")
     self.assertEqual(err.tool_name, "run_command")
     self.assertIsNone(err.server_name)
+    self.assertIsNone(err.call_id)
 
-  def test_explicit_server_name(self):
-    """Verifies construction with explicit server_name."""
+  def test_explicit_server_name_and_call_id(self):
+    """Verifies construction with explicit server_name and call_id."""
     err = types.ToolExecutionError(
-        "query failed", tool_name="mcp_tool", server_name="mcp_server"
+        "query failed",
+        tool_name="mcp_tool",
+        server_name="mcp_server",
+        call_id="call_123",
     )
     self.assertIsInstance(err, RuntimeError)
     self.assertEqual(str(err), "query failed")
     self.assertEqual(err.tool_name, "mcp_tool")
     self.assertEqual(err.server_name, "mcp_server")
+    self.assertEqual(err.call_id, "call_123")
 
 
 class ImageTest(unittest.TestCase):
@@ -778,6 +833,52 @@ class ImageTest(unittest.TestCase):
           ValueError, "Could not infer a valid MIME type"
       ):
         types.Image.from_file(tmp_file)
+
+
+class DocumentTest(parameterized.TestCase):
+  """Tests for the Document content attachment primitive and its validators."""
+
+  def test_basic_construction(self):
+    """Verifies that a Document can be successfully constructed with valid arguments."""
+    doc = types.Document(
+        data=b"pdf_data", mime_type="application/pdf", description="report"
+    )
+    self.assertEqual(doc.data, b"pdf_data")
+    self.assertEqual(doc.mime_type, "application/pdf")
+    self.assertEqual(doc.description, "report")
+
+  @parameterized.parameters(
+      "application/pdf",
+      "application/json",
+      "text/css",
+      "text/csv",
+      "text/html",
+      "text/javascript",
+      "text/plain",
+      "text/rtf",
+      "text/xml",
+  )
+  def test_supported_mime_types(self, mime_type: str):
+    """Verifies that all supported Document MIME types pass validation."""
+    doc = types.Document(data=b"sample_data", mime_type=mime_type)
+    self.assertEqual(doc.mime_type, mime_type)
+
+  def test_unsupported_mime_type_raises(self):
+    """Verifies that an unsupported Document MIME type triggers ValidationError."""
+    with self.assertRaises(pydantic.ValidationError):
+      types.Document(data=b"image_bytes", mime_type="image/png")
+
+  def test_from_file_success(self):
+    """Verifies that from_file loader loads bytes and guesses MIME correctly."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+      tmp_file = pathlib.Path(tmpdir) / "report.pdf"
+      fake_bytes = b"pdf_file_content"
+      tmp_file.write_bytes(fake_bytes)
+
+      doc = types.Document.from_file(tmp_file, description="monthly report")
+      self.assertEqual(doc.data, fake_bytes)
+      self.assertEqual(doc.mime_type, "application/pdf")
+      self.assertEqual(doc.description, "monthly report")
 
 
 class AudioTest(parameterized.TestCase):
@@ -1288,11 +1389,12 @@ class ChatResponseStreamTest(unittest.IsolatedAsyncioTestCase):
       yield t_text
 
     mock_conv = mock.MagicMock(spec=conversation.Conversation)
-    mock_conv._last_turn_usage = types.UsageMetadata(
+    mock_conv.last_turn_usage = types.UsageMetadata(
         prompt_token_count=10,
         candidates_token_count=20,
         total_token_count=30,
     )
+    mock_conv._last_turn_usage = mock_conv.last_turn_usage
 
     response = types.ChatResponse(mock_stream(), conversation=mock_conv)
 
@@ -1471,6 +1573,28 @@ class McpServerConfigTest(parameterized.TestCase):
           "disabled_tools",
           ["tool2"],
       ),
+      (
+          "http_enabled",
+          types.McpStreamableHttpServer,
+          {
+              "name": "http_server",
+              "url": "http://localhost/http",
+              "enabled_tools": ["tool1"],
+          },
+          "enabled_tools",
+          ["tool1"],
+      ),
+      (
+          "http_disabled",
+          types.McpStreamableHttpServer,
+          {
+              "name": "http_server",
+              "url": "http://localhost/http",
+              "disabled_tools": ["tool2"],
+          },
+          "disabled_tools",
+          ["tool2"],
+      ),
   )
   def test_server_construction_with_filtering(
       self, server_cls, init_kwargs, expected_attr, expected_val
@@ -1496,6 +1620,26 @@ class McpServerConfigTest(parameterized.TestCase):
           {
               "name": "stdio_server",
               "command": "node",
+              "enabled_tools": ["tool1"],
+              "disabled_tools": ["tool1"],
+          },
+      ),
+      (
+          "http_different_tools",
+          types.McpStreamableHttpServer,
+          {
+              "name": "http_server",
+              "url": "http://localhost/http",
+              "enabled_tools": ["tool1"],
+              "disabled_tools": ["tool2"],
+          },
+      ),
+      (
+          "http_same_tool",
+          types.McpStreamableHttpServer,
+          {
+              "name": "http_server",
+              "url": "http://localhost/http",
               "enabled_tools": ["tool1"],
               "disabled_tools": ["tool1"],
           },
@@ -1553,8 +1697,15 @@ class SubagentCapabilitiesTest(unittest.TestCase):
 
   def test_defaults(self):
     sc = types.SubagentCapabilities()
+    self.assertEqual(sc.agent_mode, types.AgentMode.AUTONOMOUS)
     self.assertIsNone(sc.enabled_tools)
     self.assertIsNone(sc.disabled_tools)
+
+  def test_agent_mode_explicit(self):
+    sc = types.SubagentCapabilities(agent_mode=types.AgentMode.INTERACTIVE)
+    self.assertEqual(sc.agent_mode, types.AgentMode.INTERACTIVE)
+    sc_str = types.SubagentCapabilities(agent_mode="interactive")
+    self.assertEqual(sc_str.agent_mode, types.AgentMode.INTERACTIVE)
 
   def test_mutually_exclusive_ok_enabled(self):
     sc = types.SubagentCapabilities(
@@ -1662,6 +1813,21 @@ class UsageMetadataTest(unittest.TestCase):
     self.assertEqual(res.candidates_token_count, 50)
     self.assertEqual(res.thoughts_token_count, 0)
     self.assertEqual(res.total_token_count, 0)
+
+  def test_add_operator_service_tier(self):
+    """Verifies that __add__ merges service_tier commutatively."""
+    u_none = types.UsageMetadata()
+    u_std = types.UsageMetadata(service_tier=types.ServiceTier.STANDARD)
+    u_pri = types.UsageMetadata(service_tier=types.ServiceTier.PRIORITY)
+    u_flex = types.UsageMetadata(service_tier=types.ServiceTier.FLEX)
+
+    self.assertEqual((u_pri + u_pri).service_tier, types.ServiceTier.PRIORITY)
+    self.assertEqual((u_flex + u_flex).service_tier, types.ServiceTier.FLEX)
+    self.assertEqual((u_pri + u_none).service_tier, types.ServiceTier.PRIORITY)
+    self.assertEqual((u_none + u_flex).service_tier, types.ServiceTier.FLEX)
+    self.assertEqual((u_pri + u_flex).service_tier, types.ServiceTier.STANDARD)
+    self.assertEqual((u_flex + u_pri).service_tier, types.ServiceTier.STANDARD)
+    self.assertEqual((u_pri + u_std).service_tier, types.ServiceTier.STANDARD)
 
   def test_add_operator_invalid_type(self):
     """Verifies that __add__ returns NotImplemented for invalid types."""

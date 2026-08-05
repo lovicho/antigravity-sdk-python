@@ -37,11 +37,11 @@ from typing_extensions import override
 import websockets
 
 from google.antigravity.proto import localharness_pb2
-
 from google.antigravity import types
 from google.antigravity.connections import connection
 from google.antigravity.connections.local import event_processor
 from google.antigravity.hooks import hook_runner as h_runner
+from google.antigravity.hooks import policy
 from google.antigravity.tools import tool_runner as t_runner
 
 LocalConnectionStep = event_processor.LocalConnectionStep
@@ -73,6 +73,20 @@ def to_proto_session_continuation_mode(
   return localharness_pb2.HarnessConfig.SESSION_CONTINUATION_MODE_UNSPECIFIED
 
 
+_AGENT_MODE_MAP = {
+    types.AgentMode.AUTONOMOUS: localharness_pb2.AGENT_MODE_AUTONOMOUS,
+    types.AgentMode.INTERACTIVE: localharness_pb2.AGENT_MODE_INTERACTIVE,
+}
+
+
+def to_proto_agent_mode(
+    mode: types.AgentMode | None,
+) -> localharness_pb2.AgentMode:
+  if mode is not None and mode in _AGENT_MODE_MAP:
+    return _AGENT_MODE_MAP[mode]
+  return localharness_pb2.AGENT_MODE_AUTONOMOUS
+
+
 def to_proto_model_type(
     model_type: types.ModelType,
 ) -> localharness_pb2.ModelType:
@@ -86,11 +100,16 @@ def to_proto_model_type(
 def build_gemini_options_proto(
     options: types.GeminiModelOptions | None,
 ) -> localharness_pb2.GeminiModelOptions:
+  """Converts SDK GeminiModelOptions to localharness protobuf representation."""
   proto = localharness_pb2.GeminiModelOptions()
   if options:
-    proto.thinking_level = (
-        options.thinking_level.value if options.thinking_level else ""
-    )
+    if options.thinking_level:
+      proto.thinking_level = str(options.thinking_level.value)
+    if options.service_tier:
+      if hasattr(options.service_tier, "value"):
+        proto.service_tier = str(options.service_tier.value)
+      else:
+        proto.service_tier = str(options.service_tier)
   return proto
 
 
@@ -241,6 +260,9 @@ class LocalConnection(connection.Connection):
       initial_history: Sequence[types.Step] | None = None,
       env: dict[str, str] | None = None,
       debug_config: connection.DebugConfig | None = None,
+      dynamic_policy_map: dict[str, "policy.Policy"] | None = None,
+      initial_usage: types.UsageMetadata | None = None,
+      initial_trajectory_usages: dict[str, types.UsageMetadata] | None = None,
   ):
     self._hook_runner = hook_runner
     self._process = process
@@ -260,6 +282,9 @@ class LocalConnection(connection.Connection):
         send_input_event_fn=self._send_input_event,
         hook_runner=hook_runner,
         tool_runner=tool_runner,
+        dynamic_policy_map=dynamic_policy_map,
+        initial_usage=initial_usage,
+        initial_trajectory_usages=initial_trajectory_usages,
     )
 
     self._reader_task = asyncio.create_task(self._ws_reader_loop())
@@ -290,6 +315,16 @@ class LocalConnection(connection.Connection):
   def conversation_id(self) -> str:
     """Returns the conversation identifier, if one exists."""
     return self._processor.main_trajectory_id or ""
+
+  @property
+  def cumulative_usage(self) -> types.UsageMetadata:
+    """Returns total cumulative token usage from the backend."""
+    return self._processor.cumulative_usage
+
+  @property
+  def trajectory_usages(self) -> dict[str, types.UsageMetadata]:
+    """Returns per-trajectory cumulative token usage from the backend."""
+    return self._processor.trajectory_usages
 
   async def send(self, prompt: types.Content | None, **kwargs: Any) -> None:
     """Sends a prompt to the agent.
@@ -736,6 +771,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
       subagents: list[types.SubagentConfig] | None = None,
       debug_config: connection.DebugConfig | None = None,
       retry_config: types.RetryConfig | None = None,
+      policies: list[policy.Policy] | None = None,
   ):
     """Initializes the instance.
 
@@ -756,6 +792,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
       subagents: Optional list of static subagent configurations.
       debug_config: Optional debug configuration for the connection.
       retry_config: Optional retry configuration for model API and outputs.
+      policies: Optional list of policy rules for the Go evaluator.
     """
     self._binary_path = _get_default_binary_path()
     self._tool_runner = tool_runner
@@ -767,6 +804,9 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
     self._env = env
     self._debug_config = debug_config
     self._retry_config = retry_config
+    self._policies = policies or []
+    # Maps rule_id -> Policy for dynamic rules evaluated during tool execution.
+    self._dynamic_policy_map: dict[str, policy.Policy] = {}
 
     # Normalize str shorthand to SystemInstructions model.
     self._system_instructions: types.SystemInstructions | None = None
@@ -922,6 +962,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
                   capabilities, is_subagent=True
               ),
               tools=resolved_subagent_tools,
+              agent_mode=to_proto_agent_mode(capabilities.agent_mode),
           )
       )
     return custom_agents_protos
@@ -981,15 +1022,28 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
         finish_tool_schema_json=(
             self._capabilities_config.finish_tool_schema_json or ""
         ),
-        app_data_dir=self._app_data_dir or "",
+        app_data_dir=self._app_data_dir
+        or str(
+            (pathlib.Path("~") / ".gemini" / "antigravity")
+            .expanduser()
+            .resolve()
+        ),
         mcp_servers=mcp_server_protos,
         enabled_hooks=enabled_hooks,
         custom_subagents=custom_agents_protos,
+        agent_mode=to_proto_agent_mode(self._capabilities_config.agent_mode),
     )
     if self._retry_config:
       retry_proto = build_retry_config_proto(self._retry_config)
       if retry_proto:
         harness_config.retry_config.CopyFrom(retry_proto)
+
+    if self._policies:
+      policy_config, self._dynamic_policy_map = policy._to_policy_config_proto(
+          self._policies
+      )
+      harness_config.policy_config.CopyFrom(policy_config)
+
     return harness_config
 
   def _get_enabled_hooks(self) -> list[Any]:
@@ -1152,7 +1206,9 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
       )
       await ws.send(json_format.MessageToJson(init_event))
       raw_init_resp = await ws.recv()
-      initial_history = []
+      initial_history: list[types.Step] = []
+      initial_usage = None
+      initial_trajectory_usages = {}
       if isinstance(raw_init_resp, (str, bytes)):
         init_resp_event = localharness_pb2.OutputEvent()
         json_format.Parse(raw_init_resp, init_resp_event)
@@ -1165,6 +1221,15 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
             )
             for step_update_proto in init_resp.history
         ]
+        if init_resp.HasField("cumulative_usage"):
+          initial_usage = event_processor.parse_usage_metadata(
+              init_resp.cumulative_usage
+          )
+        for entry in init_resp.trajectory_usage:
+          if entry.trajectory_id and entry.HasField("usage"):
+            initial_trajectory_usages[entry.trajectory_id] = (
+                event_processor.parse_usage_metadata(entry.usage)
+            )
     except Exception as e:
       process.kill()
       stderr_output = process.stderr.read().decode("utf-8")
@@ -1180,6 +1245,9 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
         initial_history=initial_history,
         env=self._env,
         debug_config=self._debug_config,
+        dynamic_policy_map=self._dynamic_policy_map or None,
+        initial_usage=initial_usage,
+        initial_trajectory_usages=initial_trajectory_usages,
     )
     self._connection._start_stderr_reader(process.stderr)
 

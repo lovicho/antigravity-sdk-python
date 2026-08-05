@@ -31,6 +31,7 @@ from google.antigravity.connections.local.local_connection_config import normali
 from google.antigravity.connections.local.local_connection_config import WIRE_PATH_ARGUMENT_KEYS
 from google.antigravity.hooks import hook_runner as h_runner
 from google.antigravity.hooks import hooks
+from google.antigravity.hooks import policy as policy_lib
 from google.antigravity.tools import tool_runner as t_runner
 
 _ANY_ADAPTER = pydantic.TypeAdapter(Any)
@@ -167,7 +168,7 @@ def _make_step_id(trajectory_id: str, step_index: int) -> str:
   return f"{trajectory_id}:{step_index}" if trajectory_id else str(step_index)
 
 
-def _parse_usage_metadata(
+def parse_usage_metadata(
     usage_metadata: localharness_pb2.UsageMetadata,
 ) -> types.UsageMetadata:
   """Extracts UsageMetadata from proto message."""
@@ -186,6 +187,9 @@ def _parse_usage_metadata(
       else None,
       total_token_count=usage_metadata.total_token_count
       if usage_metadata.HasField("total_token_count")
+      else None,
+      service_tier=types.ServiceTier(usage_metadata.service_tier)
+      if usage_metadata.service_tier
       else None,
   )
 
@@ -359,10 +363,16 @@ class LocalHarnessEventProcessor:
       ],
       hook_runner: h_runner.HookRunner | None = None,
       tool_runner: t_runner.ToolRunner | None = None,
+      dynamic_policy_map: dict[str, policy_lib.Policy] | None = None,
+      initial_usage: types.UsageMetadata | None = None,
+      initial_trajectory_usages: dict[str, types.UsageMetadata] | None = None,
   ):
     self._send_input_event = send_input_event_fn
     self._hook_runner = hook_runner
     self._tool_runner = tool_runner
+    self._dynamic_policy_map: dict[str, policy_lib.Policy] = (
+        dynamic_policy_map or {}
+    )
     self.step_queue = asyncio.Queue()
     self.is_idle = asyncio.Event()
     self.is_idle.set()
@@ -375,6 +385,16 @@ class LocalHarnessEventProcessor:
         if hook_runner
         else None
     )
+    self._cumulative_usage: types.UsageMetadata = (
+        initial_usage.model_copy()
+        if initial_usage is not None
+        else types.UsageMetadata()
+    )
+    self._trajectory_usages: dict[str, types.UsageMetadata] = (
+        initial_trajectory_usages.copy()
+        if initial_trajectory_usages is not None
+        else {}
+    )
 
   def reset_for_turn(self) -> None:
     self.is_idle.clear()
@@ -384,6 +404,16 @@ class LocalHarnessEventProcessor:
         self.step_queue.get_nowait()
       except asyncio.QueueEmpty:
         break
+
+  @property
+  def cumulative_usage(self) -> types.UsageMetadata:
+    """Returns total cumulative token usage from the backend."""
+    return self._cumulative_usage
+
+  @property
+  def trajectory_usages(self) -> dict[str, types.UsageMetadata]:
+    """Returns per-trajectory cumulative token usage from the backend."""
+    return self._trajectory_usages.copy()
 
   async def cancel_background_tasks(self) -> None:
     for task in self._background_tasks:
@@ -405,6 +435,12 @@ class LocalHarnessEventProcessor:
 
   async def process_event(self, event: localharness_pb2.OutputEvent) -> None:
     """Processes OutputEvents from the harness, routes steps, and dispatches tools."""
+    if event.HasField("policy_decision_request"):
+      self._run_in_background(
+          self._handle_policy_decision_request(event.policy_decision_request)
+      )
+      return
+
     if event.HasField("call_hook_request"):
       if self._hook_router:
         self._run_in_background(
@@ -442,14 +478,7 @@ class LocalHarnessEventProcessor:
           event.step_update, preserving_proto_field_name=True
       )
       parsed_step = LocalConnectionStep.from_dict(step_dict)
-      if event.HasField("usage_metadata"):
-        step_obj = parsed_step.model_copy(
-            update={
-                "usage_metadata": _parse_usage_metadata(event.usage_metadata)
-            }
-        )
-      else:
-        step_obj = parsed_step
+      step_obj = parsed_step
 
       step_obj_for_queue = step_obj
       if self._tool_runner and step_obj.tool_calls:
@@ -523,6 +552,17 @@ class LocalHarnessEventProcessor:
             self._run_in_background(
                 self.handle_tool_confirmation_request(step_update)
             )
+      return
+
+    if event.HasField("usage_update"):
+      usage_update = event.usage_update
+      if usage_update.HasField("total"):
+        self._cumulative_usage = parse_usage_metadata(usage_update.total)
+      for entry in usage_update.agents:
+        if entry.trajectory_id and entry.HasField("usage"):
+          self._trajectory_usages[entry.trajectory_id] = parse_usage_metadata(
+              entry.usage
+          )
       return
 
     if event.HasField("trajectory_state_update"):
@@ -805,3 +845,93 @@ class LocalHarnessEventProcessor:
         )
       input_event = localharness_pb2.InputEvent(tool_response=response)
       await self._send_input_event(input_event)
+
+  # ---------------------------------------------------------------------------
+  # Dynamic policy evaluation
+  # ---------------------------------------------------------------------------
+
+  async def _handle_policy_decision_request(
+      self, request: localharness_pb2.PolicyDecisionRequest
+  ) -> None:
+    """Evaluates a dynamic policy rule and sends the decision response."""
+    rule_id = request.rule_id
+    p = self._dynamic_policy_map.get(rule_id)
+
+    if p is None:
+      logging.error("Unknown policy rule_id: %s", rule_id)
+      await self._send_policy_decision_response(
+          request.request_id,
+          outcome=localharness_pb2.POLICY_EVALUATION_OUTCOME_DENY,
+          deny_reason=f"Unknown rule_id: {rule_id}",
+      )
+      return
+
+    try:
+      args_dict = json.loads(request.tool_args.arguments_json or "{}")
+    except json.JSONDecodeError:
+      args_dict = {}
+
+    tool_call = types.ToolCall(
+        name=request.tool_args.tool_name,
+        args=args_dict,
+        server_name=request.tool_args.server_name or None,
+    )
+
+    try:
+      # Evaluate the `when` predicate if present.
+      if p.when is not None:
+        predicate_matched = await policy_lib._evaluate_predicate(p, tool_call)
+        if not predicate_matched:
+          await self._send_policy_decision_response(
+              request.request_id,
+              outcome=localharness_pb2.POLICY_EVALUATION_OUTCOME_NO_MATCH,
+          )
+          return
+
+      # Apply the decision.
+      if p.decision == policy_lib.Decision.ASK_USER:
+        allow = await policy_lib._execute_ask_user(p, tool_call)
+        await self._send_policy_decision_response(
+            request.request_id,
+            outcome=localharness_pb2.POLICY_EVALUATION_OUTCOME_ALLOW
+            if allow
+            else localharness_pb2.POLICY_EVALUATION_OUTCOME_DENY,
+            deny_reason=""
+            if allow
+            else f"Denied by user ({p.name or p.tool}).",
+        )
+      elif p.decision == policy_lib.Decision.DENY:
+        await self._send_policy_decision_response(
+            request.request_id,
+            outcome=localharness_pb2.POLICY_EVALUATION_OUTCOME_DENY,
+            deny_reason=f"Denied by policy '{p.name or p.tool}'.",
+        )
+      elif p.decision == policy_lib.Decision.APPROVE:
+        await self._send_policy_decision_response(
+            request.request_id,
+            outcome=localharness_pb2.POLICY_EVALUATION_OUTCOME_ALLOW,
+        )
+    except Exception as e:  # pylint: disable=broad-except
+      logging.exception("Policy evaluation failed for rule_id=%s", rule_id)
+      await self._send_policy_decision_response(
+          request.request_id,
+          outcome=localharness_pb2.POLICY_EVALUATION_OUTCOME_DENY,
+          deny_reason=f"Policy evaluation error: {e}",
+      )
+
+  async def _send_policy_decision_response(
+      self,
+      request_id: str,
+      *,
+      outcome: "localharness_pb2.PolicyEvaluationOutcome",
+      deny_reason: str = "",
+  ) -> None:
+    """Sends a PolicyDecisionResponse back to the localharness."""
+    resp = localharness_pb2.PolicyDecisionResponse(
+        request_id=request_id,
+        outcome=outcome,
+        deny_reason=deny_reason,
+    )
+    await self._send_input_event(
+        localharness_pb2.InputEvent(policy_decision_response=resp)
+    )

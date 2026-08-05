@@ -28,6 +28,11 @@ enum LifecycleHook {
   LIFECYCLE_HOOK_POST_TOOL = 6;
   LIFECYCLE_HOOK_ON_TOOL_ERROR = 7;
 }
+enum AgentMode {
+  AGENT_MODE_UNSPECIFIED = 0;
+  AGENT_MODE_AUTONOMOUS = 1;
+  AGENT_MODE_INTERACTIVE = 2;
+}
 enum ModelType {
   MODEL_TYPE_UNSPECIFIED = 0;
   MODEL_TYPE_TEXT = 1;
@@ -88,6 +93,7 @@ message HarnessConfig {
   .antigravity.localharness.ToolOutputTruncation tool_output_truncation = 18;
   .antigravity.localharness.RetryConfig retry_config = 20;
   .antigravity.localharness.PolicyConfig policy_config = 21;
+  .antigravity.localharness.AgentMode agent_mode = 22;
   extensions 1000 to 1999;
   extensions 2000 to max;
 }
@@ -114,6 +120,7 @@ message FilesystemWorkspace {
 }
 message GeminiModelOptions {
   string thinking_level = 1;
+  string service_tier = 2;
 }
 message GeminiAPIEndpoint {
   string base_url = 1;
@@ -269,14 +276,16 @@ message OutputEvent {
     bool session_end_response = 15;
     .antigravity.localharness.PolicyDecisionRequest policy_decision_request =
         16;
+    .antigravity.localharness.UsageUpdate usage_update = 17;
   }
   int64 seq_num = 1;
   int64 timestamp_micros = 2;
-  .antigravity.localharness.UsageMetadata usage_metadata = 20;
 }
 message InitializeConversationResponse {
   string cascade_id = 1;
   repeated .antigravity.localharness.StepUpdate history = 2;
+  .antigravity.localharness.UsageMetadata cumulative_usage = 3;
+  repeated .antigravity.localharness.TrajectoryUsageEntry trajectory_usage = 4;
 }
 message StepUpdate {
   enum State {
@@ -475,6 +484,14 @@ message TrajectoryStateUpdate {
   .antigravity.localharness.TrajectoryStateUpdate.State state = 3;
   string error = 4;
 }
+message TrajectoryUsageEntry {
+  string trajectory_id = 1;
+  .antigravity.localharness.UsageMetadata usage = 2;
+}
+message UsageUpdate {
+  repeated .antigravity.localharness.TrajectoryUsageEntry agents = 1;
+  .antigravity.localharness.UsageMetadata total = 2;
+}
 message ToolCall {
   string id = 1;
   string name = 2;
@@ -525,6 +542,7 @@ message UsageMetadata {
   uint64 candidates_token_count = 2;
   uint64 thoughts_token_count = 4;
   uint64 total_token_count = 3;
+  string service_tier = 6;
 }
 message McpServerConfig {
   enum AuthProviderType {
@@ -586,17 +604,20 @@ message PreToolArgs {
   string tool_name = 1;
   string arguments_json = 2;
   string server_name = 3;
+  string call_id = 4;
 }
 message PostToolArgs {
   string tool_name = 1;
   string result = 2;
   string error = 3;
   string server_name = 5;
+  string call_id = 6;
 }
 message OnToolErrorArgs {
   string tool_name = 1;
   string error_message = 2;
   string server_name = 4;
+  string call_id = 5;
 }
 message PreTurnArgs {
   .antigravity.localharness.UserInput user_input = 1;
@@ -627,12 +648,30 @@ message PreTurnResult {
   .antigravity.localharness.PreTurnResult.Decision decision = 1;
   string reason = 2;
 }
+message SubagentSkillsConfig {
+  message InheritConfig {
+    repeated string extra_skills_paths = 1;
+  }
+  message NoneConfig {}
+  message OverrideConfig {
+    repeated string skills_paths = 1;
+  }
+  oneof mode {
+    .antigravity.localharness.SubagentSkillsConfig.InheritConfig
+        inherit_config = 1;
+    .antigravity.localharness.SubagentSkillsConfig.NoneConfig none_config = 2;
+    .antigravity.localharness.SubagentSkillsConfig.OverrideConfig
+        override_config = 3;
+  }
+}
 message CustomAgent {
   string name = 1;
   string description = 2;
   .antigravity.localharness.SystemInstructions system_instructions = 3;
   .antigravity.localharness.HarnessSideTools harness_side_tools = 4;
   repeated .antigravity.localharness.Tool tools = 5;
+  .antigravity.localharness.SubagentSkillsConfig skills_config = 6;
+  .antigravity.localharness.AgentMode agent_mode = 7;
 }
 message ToolOutputTruncation {
   message TruncateStrategy {

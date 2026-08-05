@@ -473,29 +473,7 @@ class AgentTest(unittest.IsolatedAsyncioTestCase):
     # TriggerRunner.stop() called during __aexit__.
     mock_runner_instance.stop.assert_called_once()
 
-  @mock.patch(
-      "google.antigravity.connections."
-      "local.local_connection.LocalConnectionStrategy"
-  )
-  @mock.patch.object(conversation.Conversation, "create")
-  async def test_agent_with_policies(
-      self, mock_conv_create, mock_strategy_class
-  ):
-    del mock_conv_create  # Unused.
 
-    mock_strategy_instance = mock.MagicMock()
-    mock_strategy_instance.stop = mock.AsyncMock()
-    mock_strategy_class.return_value = mock_strategy_instance
-
-    my_policy = policy.allow("some_tool")
-
-    config = local_connection.LocalAgentConfig(
-        system_instructions="test",
-        capabilities=types.CapabilitiesConfig(),
-        policies=[my_policy],
-    )
-    async with agent.Agent(config) as ag:
-      self.assertEqual(len(ag._hook_runner.pre_tool_call_decide_hooks), 1)
 
   @mock.patch(
       "google.antigravity.connections."
@@ -798,14 +776,11 @@ class AgentConfigTest(unittest.TestCase):
     config = local_connection.LocalAgentConfig(system_instructions="test")
     self.assertIsNone(config.capabilities.enabled_tools)
     self.assertIsNone(config.capabilities.disabled_tools)
-    # Default includes 3 workspace_only policies (CWD) + 2
-    # confirm_run_command policies.
-    self.assertEqual(len(config.policies), 5)
-    for i in range(3):
-      self.assertEqual(config.policies[i].decision, policy.Decision.DENY)
-      self.assertEqual(config.policies[i].name, "workspace_only")
-    self.assertEqual(config.policies[3].tool, "run_command")
-    self.assertEqual(config.policies[4].tool, "*")
+    # Default includes only the 2 policies from policy.confirm_run_command();
+    # workspace containment is enforced natively by localharness.
+    self.assertEqual(len(config.policies), 2)
+    self.assertEqual(config.policies[0].tool, "run_command")
+    self.assertEqual(config.policies[1].tool, "*")
     self.assertIsNotNone(config.models)
     text_model = [m for m in config.models if types.ModelType.TEXT in m.types][
         0

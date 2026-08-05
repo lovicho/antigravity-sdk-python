@@ -30,6 +30,9 @@ ready:
         Instruct the user to run `gcloud auth application-default login` and
         configure the agent with `vertex=True` along with `project` and
         `location` in `LocalAgentConfig`.
+    -   **Note**: For local models (`LiteRTAgentConfig` or
+        `LocalOpenAIAgentConfig`), no API key or cloud credentials are needed.
+        See `references/local_models.md` for setup details.
 
 ## Routing Table
 
@@ -42,9 +45,11 @@ relevant information.
 -   If the user needs to understand the high-level overview and core concepts of
     the Google Antigravity SDK (Agent, Conversation, Connection), read
     `references/architecture.md`.
--   If the user needs to perform advanced agent configuration, select
-    appropriate models, or understand the critical rules for model identifiers
-    to avoid assumptions, read `references/agent_configuration.md`.
+-   If the user needs to perform advanced agent configuration (e.g., selecting
+    appropriate models, configuring execution mode via `agent_mode`—defaulting
+    to autonomous vs interactive—or configuring connection reliability), or
+    understand the critical rules for model identifiers to avoid assumptions,
+    read `references/agent_configuration.md`.
 -   If the user needs to extend an agent's capabilities by integrating Model
     Context Protocol (MCP) servers, or configure tool permissions for the agent,
     read `references/mcp_integration.md`.
@@ -58,6 +63,10 @@ relevant information.
     tokens), or build custom audit logs for advanced monitoring, read
     `references/observability.md`.
 -   If the user needs to see a list of built-in tools and understand their default state, read `references/built_in_tools.md`.
+-   If the user needs to run agents locally using on-device models (e.g., Gemma
+    via LiteRT, or via OpenAI-compatible APIs), understand hardware
+    requirements, or set up a local model environment, read
+    `references/local_models.md`.
 
 ### Examples
 
@@ -104,3 +113,7 @@ relevant information.
     `examples/getting_started/web_tools.md`. (Note: when fetching massive web
     pages or articles, pair `read_url_content` with `view_file` to inspect
     cached disk files).
+-   If the user needs to set up and run a local model agent (LiteRT with Gemma,
+    or an OpenAI-compatible server like Ollama), including model download,
+    hardware requirements, and context window configuration, read
+    `examples/getting_started/local_models.md`.

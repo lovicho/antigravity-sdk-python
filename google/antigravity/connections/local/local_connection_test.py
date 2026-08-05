@@ -579,6 +579,85 @@ class LocalConnectionTest(unittest.IsolatedAsyncioTestCase):
     await asyncio.sleep(0.05)
     self.assertEqual(captured, [""])
 
+  async def test_tool_hooks_receive_call_id(self):
+    hr = hook_runner.HookRunner()
+    pre_ids = []
+    post_ids = []
+    error_ids = []
+
+    @hooks_base.pre_tool_call_decide
+    async def capture_pre(data: types.ToolCall) -> hooks_base.HookResult:
+      pre_ids.append(data.id)
+      return hooks_base.HookResult(allow=True)
+
+    @hooks_base.post_tool_call
+    async def capture_post(data: types.ToolResult) -> None:
+      post_ids.append(data.id)
+
+    @hooks_base.on_tool_error
+    async def capture_error(data: Exception) -> None:
+      error_ids.append(getattr(data, "call_id", None))
+      return None
+
+    hr.register_hook(capture_pre)
+    hr.register_hook(capture_post)
+    hr.register_hook(capture_error)
+
+    harness = test_utils.TestLocalHarness(
+        test_case=self,
+        process=self.mock_process,
+        tool_runner=self.tool_runner,
+        hook_runner=hr,
+    )
+
+    # Simulate harness dispatching PreTool, PostTool, and OnToolError hooks
+    await harness.send_event(
+        localharness_pb2.OutputEvent(
+            call_hook_request=localharness_pb2.CallHookRequest(
+                request_id="req_pre",
+                name="PreTool",
+                type=localharness_pb2.LIFECYCLE_HOOK_PRE_TOOL,
+                pre_tool_args=localharness_pb2.PreToolArgs(
+                    tool_name="greet",
+                    arguments_json='{"name": "Alice"}',
+                    call_id="call_pre_123",
+                ),
+            )
+        )
+    )
+    await harness.send_event(
+        localharness_pb2.OutputEvent(
+            call_hook_request=localharness_pb2.CallHookRequest(
+                request_id="req_post",
+                name="PostTool",
+                type=localharness_pb2.LIFECYCLE_HOOK_POST_TOOL,
+                post_tool_args=localharness_pb2.PostToolArgs(
+                    tool_name="greet",
+                    result="Hello Alice",
+                    call_id="call_post_456",
+                ),
+            )
+        )
+    )
+    await harness.send_event(
+        localharness_pb2.OutputEvent(
+            call_hook_request=localharness_pb2.CallHookRequest(
+                request_id="req_err",
+                name="OnToolError",
+                type=localharness_pb2.LIFECYCLE_HOOK_ON_TOOL_ERROR,
+                on_tool_error_args=localharness_pb2.OnToolErrorArgs(
+                    tool_name="broken",
+                    error_message="failed",
+                    call_id="call_err_789",
+                ),
+            )
+        )
+    )
+    await asyncio.sleep(0.05)
+    self.assertEqual(pre_ids, ["call_pre_123"])
+    self.assertEqual(post_ids, ["call_post_456"])
+    self.assertEqual(error_ids, ["call_err_789"])
+
   def test_extract_media_from_result(self):
     img = types.Image(data=b"\xff\xd8\xff\xd9", mime_type="image/jpeg")
 
@@ -1123,7 +1202,38 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
     self.assertEmpty(config.models)
     self.assertFalse(config.HasField("system_instructions"))
     self.assertEqual(len(config.workspaces), 0)
-    self.assertEqual(len(config.skills_paths), 0)
+    self.assertEqual(config.agent_mode, localharness_pb2.AGENT_MODE_AUTONOMOUS)
+
+  def test_agent_mode_config_produces_valid_proto(self):
+    """Verifies that agent_mode sets HarnessConfig.agent_mode."""
+    strategy = self._make_strategy(
+        capabilities_config=types.CapabilitiesConfig(
+            agent_mode=types.AgentMode.INTERACTIVE
+        )
+    )
+    config = strategy._build_harness_config()
+    self.assertEqual(config.agent_mode, localharness_pb2.AGENT_MODE_INTERACTIVE)
+
+  def test_subagent_agent_mode_config_produces_valid_proto(self):
+    """Verifies that SubagentCapabilities.agent_mode sets CustomAgent.agent_mode."""
+    strategy = self._make_strategy(
+        subagents=[
+            types.SubagentConfig(
+                name="interactive_subagent",
+                description="A subagent that runs in interactive mode.",
+                model="gemini-2.5-pro",
+                capabilities=types.SubagentCapabilities(
+                    agent_mode=types.AgentMode.INTERACTIVE
+                ),
+            )
+        ]
+    )
+    config = strategy._build_harness_config()
+    self.assertLen(config.custom_subagents, 1)
+    self.assertEqual(
+        config.custom_subagents[0].agent_mode,
+        localharness_pb2.AGENT_MODE_INTERACTIVE,
+    )
 
   def test_legacy_shorthands_api_key_produces_valid_proto(self):
     """Verifies that the legacy api_key shorthand translates to the models proto."""
@@ -1630,6 +1740,85 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
           f" '{level.value}'",
       )
 
+  def test_models_service_tier_set(self):
+    """Verifies that service_tier on ModelTarget maps to the proto field."""
+    strategy = self._make_strategy(
+        models=[
+            types.ModelTarget(
+                name=DEFAULT_MODEL,
+                types=[types.ModelType.TEXT],
+                endpoint=types.GeminiAPIEndpoint(
+                    options=types.GeminiModelOptions(
+                        service_tier=types.ServiceTier.PRIORITY,
+                    ),
+                ),
+            )
+        ]
+    )
+    config = strategy._build_harness_config()
+    self.assertEqual(
+        config.models[0].gemini_api_endpoint.options.service_tier, "priority"
+    )
+
+  def test_models_service_tier_none_omitted(self):
+    """Verifies that service_tier=None leaves the proto field at its default."""
+    strategy = self._make_strategy(
+        models=[
+            types.ModelTarget(
+                name=DEFAULT_MODEL,
+                types=[types.ModelType.TEXT],
+                endpoint=types.GeminiAPIEndpoint(
+                    options=types.GeminiModelOptions(service_tier=None),
+                ),
+            )
+        ]
+    )
+    config = strategy._build_harness_config()
+    self.assertFalse(config.models[0].gemini_api_endpoint.HasField("options"))
+
+  def test_models_service_tier_all_values(self):
+    """Verifies all ServiceTier enum values produce correct proto strings."""
+    for tier in types.ServiceTier:
+      strategy = self._make_strategy(
+          models=[
+              types.ModelTarget(
+                  name=DEFAULT_MODEL,
+                  types=[types.ModelType.TEXT],
+                  endpoint=types.GeminiAPIEndpoint(
+                      options=types.GeminiModelOptions(service_tier=tier),
+                  ),
+              )
+          ]
+      )
+      config = strategy._build_harness_config()
+      self.assertEqual(
+          config.models[0].gemini_api_endpoint.options.service_tier,
+          tier.value,
+          f"ServiceTier.{tier.name} should produce proto string '{tier.value}'",
+      )
+
+  def test_vertex_endpoint_service_tier_set(self):
+    """Verifies that service_tier on VertexEndpoint maps to the proto field."""
+    strategy = self._make_strategy(
+        models=[
+            types.ModelTarget(
+                name=DEFAULT_MODEL,
+                types=[types.ModelType.TEXT],
+                endpoint=types.VertexEndpoint(
+                    project="test-project",
+                    location="us-central1",
+                    options=types.GeminiModelOptions(
+                        service_tier=types.ServiceTier.PRIORITY,
+                    ),
+                ),
+            )
+        ]
+    )
+    config = strategy._build_harness_config()
+    self.assertEqual(
+        config.models[0].vertex_endpoint.options.service_tier, "priority"
+    )
+
   def test_vertex_config_propagates(self):
     """Verifies that Vertex configuration fields propagate to proto."""
     models = [
@@ -1779,7 +1968,10 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
   def test_app_data_dir_default_empty(self):
     strategy = self._make_strategy()
     config = strategy._build_harness_config()
-    self.assertEqual(config.app_data_dir, "")
+    # When app_data_dir is not explicitly set, the strategy resolves the
+    # default (~/.gemini/antigravity) so Go's PolicyEvaluator can allowlist it.
+    expected = str(pathlib.Path("~/.gemini/antigravity").expanduser().resolve())
+    self.assertEqual(config.app_data_dir, expected)
 
   @parameterized.named_parameters(
       dict(
@@ -2356,23 +2548,6 @@ class GetDefaultBinaryPathTest(unittest.TestCase):
 
   @mock.patch.dict("os.environ", {}, clear=True)
   @mock.patch("importlib.metadata.distribution")
-  def test_returns_internal_pyglib_resource_path(self, mock_dist):
-    mock_resources = mock.MagicMock()
-    mock_resources.GetResourceFilename.return_value = (
-        "/g3/runfiles/localharness"
-    )
-
-    with mock.patch.object(local_connection, "resources", mock_resources):
-      path = local_connection._get_default_binary_path()
-      self.assertEqual(path, "/g3/runfiles/localharness")
-      mock_resources.GetResourceFilename.assert_called_once_with(
-          "antigravity_harness"
-      )
-      mock_dist.assert_not_called()
-
-  @mock.patch.dict("os.environ", {}, clear=True)
-  @mock.patch.object(local_connection, "resources", None)
-  @mock.patch("importlib.metadata.distribution")
   @mock.patch("importlib.resources.files")
   @mock.patch("os.path.exists")
   def test_returns_external_wheel_path(
@@ -2773,6 +2948,7 @@ class LocalConnectionCompactionHookTest(unittest.IsolatedAsyncioTestCase):
 
     self.assertEqual(len(captured), 1)
     self.assertIsInstance(captured[0], local_connection.LocalConnectionStep)
+    self.assertEqual(captured[0].type, types.StepType.COMPACTION)
     self.assertEqual(captured[0].content, "Context compaction")
 
 
@@ -2819,39 +2995,42 @@ class LocalConnectionSubagentHookTest(unittest.IsolatedAsyncioTestCase):
     step = await asyncio.wait_for(harness.conn._step_queue.get(), timeout=2.0)
     self.assertEqual(step.type, types.StepType.TOOL_CALL)
 
-  async def test_ws_reader_parses_usage_metadata(self):
-    """Verifies that _ws_reader_loop parses and attaches usage_metadata to steps."""
+  async def test_ws_reader_parses_usage_update(self):
+    """Verifies that _ws_reader_loop parses usage_update events."""
     harness = test_utils.TestLocalHarness(
         test_case=self,
         process=self.mock_process,
     )
 
     event = localharness_pb2.OutputEvent(
+        usage_update=localharness_pb2.UsageUpdate(
+            total=localharness_pb2.UsageMetadata(
+                prompt_token_count=150,
+                cached_content_token_count=50,
+                candidates_token_count=75,
+                thoughts_token_count=25,
+                total_token_count=250,
+            ),
+        ),
+    )
+    await harness.send_event(event)
+
+    # Send a step event so we can synchronize on the queue
+    step_event = localharness_pb2.OutputEvent(
         step_update=localharness_pb2.StepUpdate(
             cascade_id="main",
             trajectory_id="main",
             step_index=1,
-            text="response with usage",
+            text="response after usage",
             state=localharness_pb2.StepUpdate.STATE_ACTIVE,
             source=localharness_pb2.StepUpdate.SOURCE_MODEL,
         ),
-        usage_metadata=localharness_pb2.UsageMetadata(
-            prompt_token_count=150,
-            cached_content_token_count=50,
-            candidates_token_count=75,
-            thoughts_token_count=25,
-            total_token_count=250,
-        ),
     )
-
-    await harness.send_event(event)
-
-    step_obj = await asyncio.wait_for(
-        harness.conn._step_queue.get(), timeout=1.0
-    )
+    await harness.send_event(step_event)
+    await asyncio.wait_for(harness.conn._step_queue.get(), timeout=1.0)
 
     self.assertEqual(
-        step_obj.usage_metadata,
+        harness.conn.cumulative_usage,
         types.UsageMetadata(
             prompt_token_count=150,
             cached_content_token_count=50,
@@ -3632,31 +3811,11 @@ class LocalAgentConfigTest(absltest.TestCase):
         system_instructions="test",
     )
     self.assertEqual(config.workspaces, [os.getcwd()])
-    # workspace_only produces 3 deny policies (view_file, create_file,
-    # edit_file), followed by the 2 confirm_run_command policies.
-    self.assertLen(config.policies, 5)
-    for i in range(3):
-      self.assertEqual(config.policies[i].decision, policy.Decision.DENY)
-      self.assertEqual(config.policies[i].name, "workspace_only")
-    self.assertEqual(config.policies[3].tool, "run_command")
-    self.assertEqual(config.policies[4].tool, "*")
-
-  def test_workspace_policies_auto_prepended(self):
-    """workspace_only() policies are auto-prepended when workspaces are set."""
-    config = local_connection_config.LocalAgentConfig(
-        system_instructions="test",
-        workspaces=["/tmp/ws"],
-    )
-    # workspace_only produces 3 deny policies (view_file, create_file,
-    # edit_file), followed by the 2 confirm_run_command policies.
-    self.assertLen(config.policies, 5)
-    # First 3 should be workspace_only deny policies for file tools.
-    for i in range(3):
-      self.assertEqual(config.policies[i].decision, policy.Decision.DENY)
-      self.assertEqual(config.policies[i].name, "workspace_only")
-    # Last 2 should be confirm_run_command.
-    self.assertEqual(config.policies[3].tool, "run_command")
-    self.assertEqual(config.policies[4].tool, "*")
+    # workspace containment is enforced natively by localharness;
+    # config.policies contains only the 2 confirm_run_command policies.
+    self.assertLen(config.policies, 2)
+    self.assertEqual(config.policies[0].tool, "run_command")
+    self.assertEqual(config.policies[1].tool, "*")
 
   def test_explicit_allow_all_overrides_default(self):
     """Explicit allow_all() replaces the confirm_run_command default."""
@@ -3770,235 +3929,6 @@ class LocalAgentConfigTest(absltest.TestCase):
     sse_pb = harness_pb.mcp_servers[1]
     self.assertEqual(sse_pb.name, "my-sse")
     self.assertEqual(sse_pb.http.url, "https://sse.example.com")
-
-
-class LocalAgentConfigWorkspaceTest(
-    parameterized.TestCase, unittest.IsolatedAsyncioTestCase
-):
-  """Tests for workspace scoping policy with app_data_dir inclusion."""
-
-  @parameterized.named_parameters(
-      dict(
-          testcase_name="allowed_in_workspace",
-          app_data_dir_factory=lambda temp_dir: str(
-              temp_dir / "my_custom_app_data"
-          ),
-          path_factory=lambda temp_dir: str(temp_dir / "my_workspace/file.txt"),
-          expected_allowed=True,
-          msg="Target inside workspace should be allowed",
-      ),
-      dict(
-          testcase_name="allowed_in_custom_app_data_dir",
-          app_data_dir_factory=lambda temp_dir: str(
-              temp_dir / "my_custom_app_data"
-          ),
-          path_factory=lambda temp_dir: str(
-              temp_dir / "my_custom_app_data/brain/123/artifact.md"
-          ),
-          expected_allowed=True,
-          msg="Target inside custom app_data_dir should be allowed",
-      ),
-      dict(
-          testcase_name="allowed_in_default_app_data_dir",
-          app_data_dir_factory=lambda _: None,
-          path_factory=lambda temp_dir: str(
-              temp_dir / "my_default_app_data/brain/123/artifact.md"
-          ),
-          expected_allowed=True,
-          msg=(
-              "Target inside default app_data_dir should be allowed when config"
-              " is None"
-          ),
-      ),
-      dict(
-          testcase_name="denied_outside_both",
-          app_data_dir_factory=lambda temp_dir: str(
-              temp_dir / "my_custom_app_data"
-          ),
-          path_factory=lambda temp_dir: str(temp_dir / "outside/passwd"),
-          expected_allowed=False,
-          msg="Target outside both workspace and app_data_dir should be denied",
-      ),
-  )
-  async def test_workspace_policy_scenarios(
-      self,
-      app_data_dir_factory,
-      path_factory,
-      expected_allowed: bool,
-      msg: str,
-  ):
-    # Create dynamic, hermetic temporary directory
-    temp_dir_path = pathlib.Path(self.create_tempdir().full_path)
-
-    workspace_dir = temp_dir_path / "my_workspace"
-    default_app_data_dir = temp_dir_path / "my_default_app_data"
-
-    # Mock the module-level constant to use our hermetic default app data dir
-    with mock.patch.object(
-        local_connection_config,
-        "DEFAULT_APP_DATA_DIR",
-        str(default_app_data_dir),
-    ):
-      app_data_dir = app_data_dir_factory(temp_dir_path)
-      path = path_factory(temp_dir_path)
-
-      config = local_connection_config.LocalAgentConfig(
-          system_instructions="test",
-          workspaces=[str(workspace_dir)],
-          app_data_dir=app_data_dir,
-      )
-
-      # workspace_only policies are the first 3
-      policies = config.policies[:3]
-      hook = policy.enforce(policies)
-      ctx = hooks_base.HookContext()
-
-      tc = types.ToolCall(
-          name="view_file",
-          args={"path": path},
-          canonical_path=path,
-      )
-      res = await hook.run(ctx, tc)
-      self.assertEqual(res.allow, expected_allowed, msg=msg)
-
-  async def test_workspace_policy_denies_symlink_traversal(self):
-    """Tests that the workspace scoping policy correctly blocks symlinks pointing outside."""
-    temp_dir_path = pathlib.Path(self.create_tempdir().full_path)
-
-    # Define safe workspace and unsafe outer target
-    workspace_dir = temp_dir_path / "my_workspace"
-    workspace_dir.mkdir(exist_ok=True)
-
-    outer_dir = temp_dir_path / "outer"
-    outer_dir.mkdir(exist_ok=True)
-    outer_file = outer_dir / "secret.txt"
-    outer_file.write_text("sensitive data")
-
-    # Create a symbolic link inside the workspace pointing to the outer file
-    symlink_path = workspace_dir / "escape_link.txt"
-    os.symlink(outer_file, symlink_path)
-
-    config = local_connection_config.LocalAgentConfig(
-        system_instructions="test",
-        workspaces=[str(workspace_dir)],
-        app_data_dir=None,
-    )
-
-    # workspace_only policies are the first 3
-    policies = config.policies[:3]
-    hook = policy.enforce(policies)
-    ctx = hooks_base.HookContext()
-
-    # Dispatch a tool call targeting the symlink path
-    tc = types.ToolCall(
-        name="view_file",
-        args={"path": str(symlink_path)},
-        canonical_path=str(symlink_path),
-    )
-    res = await hook.run(ctx, tc)
-
-    # Assert that the policy correctly resolves the symlink and BLOCKS the
-    # access
-    self.assertFalse(
-        res.allow,
-        msg="Workspace policy must resolve symlinks and block traversal",
-    )
-
-  async def test_workspace_policy_mutation_and_copy(self):
-    """Tests that workspace policy updates on reassignment and model_copy."""
-    temp_dir_path = pathlib.Path(self.create_tempdir().full_path)
-    workspace_a = temp_dir_path / "ws_a"
-    workspace_b = temp_dir_path / "ws_b"
-    app_1 = temp_dir_path / "app1"
-
-    workspace_a.mkdir(exist_ok=True)
-    workspace_b.mkdir(exist_ok=True)
-
-    config = local_connection_config.LocalAgentConfig(
-        system_instructions="test",
-        workspaces=[str(workspace_a)],
-        app_data_dir=str(app_1),
-    )
-
-    # 1. Initial State
-    self.assertLen(config.policies, 5)
-    self.assertEqual(config.policies[0].name, "workspace_only")
-
-    # Evaluate policy to prove it allows ws_a, denies ws_b
-    hook_a = policy.enforce(config.policies[:3])
-    ctx = hooks_base.HookContext()
-
-    res_a = await hook_a.run(
-        ctx,
-        types.ToolCall(
-            name="view_file",
-            args={"path": str(workspace_a / "f.txt")},
-            canonical_path=str(workspace_a / "f.txt"),
-        ),
-    )
-    self.assertTrue(res_a.allow)
-
-    res_b = await hook_a.run(
-        ctx,
-        types.ToolCall(
-            name="view_file",
-            args={"path": str(workspace_b / "f.txt")},
-            canonical_path=str(workspace_b / "f.txt"),
-        ),
-    )
-    self.assertFalse(res_b.allow)
-
-    # 2. Mutate workspaces
-    config.workspaces = [str(workspace_b)]
-    self.assertLen(config.policies, 5)
-    self.assertEqual(config.policies[0].name, "workspace_only")
-
-    # Evaluate updated policy to prove it allows ws_b, denies ws_a
-    hook_b = policy.enforce(config.policies[:3])
-
-    res_a2 = await hook_b.run(
-        ctx,
-        types.ToolCall(
-            name="view_file",
-            args={"path": str(workspace_a / "f.txt")},
-            canonical_path=str(workspace_a / "f.txt"),
-        ),
-    )
-    self.assertFalse(res_a2.allow)
-
-    res_b2 = await hook_b.run(
-        ctx,
-        types.ToolCall(
-            name="view_file",
-            args={"path": str(workspace_b / "f.txt")},
-            canonical_path=str(workspace_b / "f.txt"),
-        ),
-    )
-    self.assertTrue(res_b2.allow)
-
-    # 3. Model Copy Deep
-    config_copy = config.model_copy(deep=True)
-    self.assertLen(config_copy.policies, 5)
-    self.assertEqual(config_copy.policies[0].name, "workspace_only")
-    self.assertEqual(config_copy.policies[1].name, "workspace_only")
-    self.assertEqual(config_copy.policies[2].name, "workspace_only")
-    self.assertEqual(config_copy.policies[3].tool, "run_command")
-
-    hook_copy = policy.enforce(config_copy.policies[:3])
-    res_b_copy = await hook_copy.run(
-        ctx,
-        types.ToolCall(
-            name="view_file",
-            args={"path": str(workspace_b / "f.txt")},
-            canonical_path=str(workspace_b / "f.txt"),
-        ),
-    )
-    self.assertTrue(res_b_copy.allow)
-
-    # 4. Clear workspaces
-    config.workspaces = []
-    self.assertLen(config.policies, 2)
-    self.assertEqual(config.policies[0].tool, "run_command")
 
 
 class LocalConnectionBuiltinToolHooksTest(unittest.IsolatedAsyncioTestCase):

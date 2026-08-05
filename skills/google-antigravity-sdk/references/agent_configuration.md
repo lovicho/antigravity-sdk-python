@@ -50,6 +50,35 @@ async with Agent(config=config) as agent:
     pass
 ```
 
+### Agent Execution Mode (`agent_mode`)
+
+The SDK supports two operational execution modes via `types.AgentMode`:
+
+-   `AgentMode.AUTONOMOUS` (**default**): Non-interactive, automated execution.
+    The agent is incentivized to accomplish the task on its own from start to
+    finish.
+-   `AgentMode.INTERACTIVE`: Collaborative execution with a human. The agent
+    asks clarifying questions (via `BuiltinTools.ASK_QUESTION`), enables
+    interactive planning, and keeps the user in the loop.
+
+Configure `agent_mode` via `CapabilitiesConfig`:
+
+```python
+from google.antigravity import Agent, LocalAgentConfig, types
+
+config = LocalAgentConfig(
+    capabilities=types.CapabilitiesConfig(
+        agent_mode=types.AgentMode.INTERACTIVE,
+    ),
+)
+async with Agent(config=config) as agent:
+    # Agent will operate in interactive mode, asking questions if needed
+    pass
+```
+
+> [!NOTE]
+> `agent_mode` defaults to `AgentMode.AUTONOMOUS`. If you enable interactive tools such as `BuiltinTools.ASK_QUESTION` without setting `agent_mode=AgentMode.INTERACTIVE`, a validation warning will be logged.
+
 ### Gemini Enterprise Agent Platform (formerly Vertex AI) Configuration
 
 To configure the agent to use Gemini Enterprise Agent Platform (formerly Vertex
@@ -71,6 +100,42 @@ async with Agent(config=config) as agent:
 Note: Gemini Enterprise Agent Platform authentication relies on Application
 Default Credentials (ADC). Ensure you have run `gcloud auth application-default
 login` in your environment.
+
+### Prioritized Inference (`service_tier="priority"`)
+
+To enable Gemini Prioritized Inference, manually construct a `GeminiAPIEndpoint`
+or `VertexEndpoint` with `GeminiModelOptions`:
+
+```python
+from google.antigravity import (
+    Agent,
+    GeminiAPIEndpoint,
+    LocalAgentConfig,
+    types,
+)
+
+# Configure priority inference by manually constructing an endpoint.
+options = types.GeminiModelOptions(service_tier=types.ServiceTier.PRIORITY)
+endpoint = GeminiAPIEndpoint(options=options)
+config = LocalAgentConfig(endpoint=endpoint)
+
+async with Agent(config=config) as agent:
+  response = await agent.chat("Explain quantum computing in one sentence.")
+
+  # Inspect usage metadata to detect server-side rate limit downgrades.
+  if (
+      response.usage_metadata
+      and response.usage_metadata.service_tier == types.ServiceTier.STANDARD
+  ):
+    print("Notice: Request was gracefully downgraded to standard tier.")
+```
+
+> [!IMPORTANT] **Pricing Notice:** Priority tier requests are billed at a higher
+> rate than Standard tier requests. When overflow traffic is gracefully
+> downgraded to Standard tier due to dynamic rate limiting, those downgraded
+> requests are billed at standard rates. Please check the linked documentation
+> for specific pricing, fallback thresholds, and feature details:
+> [Gemini Priority Inference Documentation](https://ai.google.dev/gemini-api/docs/priority-inference).
 
 ### Application Data Directory Override (Artifact & Scratch Storage)
 
@@ -138,6 +203,18 @@ config = LocalAgentConfig(
 ```
 
 For more details, see [mcp_integration.md](mcp_integration.md).
+
+### Local Model Configuration
+
+The SDK supports running agents entirely on-device without an API key. Two
+additional config classes are available:
+
+-   `LiteRTAgentConfig`: For running Gemma models locally via LiteRT-LM.
+-   `LocalOpenAIAgentConfig`: For connecting to any OpenAI-compatible local
+    server (e.g., Ollama, LM Studio).
+
+For full setup instructions, hardware requirements, and configuration details,
+see [local_models.md](local_models.md).
 
 ### Custom Environment Variables (Subprocess & Shell Isolation)
 
