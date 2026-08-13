@@ -194,10 +194,38 @@ def parse_usage_metadata(
   )
 
 
+_STOP_REASON_MAP = {
+    localharness_pb2.TrajectoryStateUpdate.StopReason.STOP_REASON_MAX_MODEL_CALLS_EXCEEDED: (
+        types.StopReason.MAX_MODEL_CALLS_EXCEEDED
+    ),
+    localharness_pb2.TrajectoryStateUpdate.StopReason.STOP_REASON_MAX_TOOL_CALLS_EXCEEDED: (
+        types.StopReason.MAX_TOOL_CALLS_EXCEEDED
+    ),
+    localharness_pb2.TrajectoryStateUpdate.StopReason.STOP_REASON_MAX_INPUT_TOKENS_EXCEEDED: (
+        types.StopReason.MAX_INPUT_TOKENS_EXCEEDED
+    ),
+    localharness_pb2.TrajectoryStateUpdate.StopReason.STOP_REASON_MAX_OUTPUT_TOKENS_EXCEEDED: (
+        types.StopReason.MAX_OUTPUT_TOKENS_EXCEEDED
+    ),
+    localharness_pb2.TrajectoryStateUpdate.StopReason.STOP_REASON_MAX_TOTAL_TOKENS_EXCEEDED: (
+        types.StopReason.MAX_TOTAL_TOKENS_EXCEEDED
+    ),
+    localharness_pb2.TrajectoryStateUpdate.StopReason.STOP_REASON_QUOTA_EXHAUSTED: (
+        types.StopReason.QUOTA_EXHAUSTED
+    ),
+}
+
+
+def _parse_stop_reason(
+    reason: localharness_pb2.TrajectoryStateUpdate.StopReason,
+) -> types.StopReason:
+  """Extracts StopReason from proto enum."""
+  return _STOP_REASON_MAP.get(reason, types.StopReason.UNSPECIFIED)
+
+
 class LocalConnectionStep(types.Step):
   """Connection-specific step for LocalConnection."""
 
-  trajectory_id: str = ""
   http_code: int = 0
 
   @classmethod
@@ -211,6 +239,8 @@ class LocalConnectionStep(types.Step):
       A new LocalConnectionStep instance.
     """
     traj_id = step_dict.get("trajectory_id", "")
+    parent_traj_id = step_dict.get("parent_trajectory_id", "")
+    depth_val = step_dict.get("depth", 0)
     step_idx = step_dict.get("step_index", 0)
 
     id_str = _make_step_id(traj_id, step_idx)
@@ -334,6 +364,8 @@ class LocalConnectionStep(types.Step):
         id=id_str,
         step_index=step_idx,
         trajectory_id=traj_id,
+        parent_trajectory_id=parent_traj_id,
+        depth=depth_val,
         type=step_type,
         source=source,
         status=status,
@@ -395,10 +427,12 @@ class LocalHarnessEventProcessor:
         if initial_trajectory_usages is not None
         else {}
     )
+    self._turn_stop_reason: types.StopReason = types.StopReason.UNSPECIFIED
 
   def reset_for_turn(self) -> None:
     self.is_idle.clear()
     self.main_trajectory_id = None
+    self._turn_stop_reason = types.StopReason.UNSPECIFIED
     while not self.step_queue.empty():
       try:
         self.step_queue.get_nowait()
@@ -414,6 +448,11 @@ class LocalHarnessEventProcessor:
   def trajectory_usages(self) -> dict[str, types.UsageMetadata]:
     """Returns per-trajectory cumulative token usage from the backend."""
     return self._trajectory_usages.copy()
+
+  @property
+  def _last_turn_stop_reason(self) -> types.StopReason:
+    """Returns the stop reason of the most recent turn."""
+    return self._turn_stop_reason
 
   async def cancel_background_tasks(self) -> None:
     for task in self._background_tasks:
@@ -579,6 +618,9 @@ class LocalHarnessEventProcessor:
         if tsu.HasField("error"):
           logging.info("Subagent trajectory failed with error: %s", tsu.error)
         return
+
+      if tsu.stop_reason:
+        self._turn_stop_reason = _parse_stop_reason(tsu.stop_reason)
 
       if (
           tsu.state

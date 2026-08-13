@@ -26,10 +26,14 @@ ready:
         (e.g., `LocalAgentConfig(api_key="...")`) or automatically read from the
         environment.
     -   For Gemini Enterprise Agent Platform (formerly Vertex AI)
-        authentication, the SDK uses Application Default Credentials (ADC).
-        Instruct the user to run `gcloud auth application-default login` and
-        configure the agent with `vertex=True` along with `project` and
-        `location` in `LocalAgentConfig`.
+        authentication, the SDK supports both Standard Mode and Express Mode:
+        -   **Standard Mode (ADC)**: Instruct the user to run
+            `gcloud auth application-default login` and configure the agent with
+            `vertex=True` along with `project` and `location` in
+            `LocalAgentConfig`.
+        -   **Express Mode (API Key)**: Configure the agent with `vertex=True`
+            along with `api_key="your-express-api-key"` in `LocalAgentConfig`
+            (no ADC or regional project/location needed).
     -   **Note**: For local models (`LiteRTAgentConfig` or
         `LocalOpenAIAgentConfig`), no API key or cloud credentials are needed.
         See `references/local_models.md` for setup details.
@@ -46,7 +50,7 @@ relevant information.
     the Google Antigravity SDK (Agent, Conversation, Connection), read
     `references/architecture.md`.
 -   If the user needs to perform advanced agent configuration (e.g., selecting
-    appropriate models, configuring execution mode via `agent_mode`—defaulting
+    appropriate models, configuring execution behavior via `agent_behavior`—defaulting
     to autonomous vs interactive—or configuring connection reliability), or
     understand the critical rules for model identifiers to avoid assumptions,
     read `references/agent_configuration.md`.
@@ -85,7 +89,8 @@ relevant information.
     and PDFs, or generating visual content, read
     `examples/getting_started/multimodal.md`.
 -   If the user needs to implement multi-agent delegation, allowing a main agent
-    to spawn and orchestrate subagents for complex tasks, read
+    to spawn and orchestrate subagents, or configure multi-tier nested subagent
+    hierarchies (using `max_subagent_depth` and `allowed_subagents`), read
     `examples/getting_started/subagents.md`.
 -   If the user needs to connect an agent to external services via MCP (Stdio or
     SSE), read `examples/getting_started/mcp_tools.md`.
@@ -113,6 +118,10 @@ relevant information.
     `examples/getting_started/web_tools.md`. (Note: when fetching massive web
     pages or articles, pair `read_url_content` with `view_file` to inspect
     cached disk files).
+-   If the user needs to enforce session operational limits (model or
+    tool calls) or proactive token budget controls (input, output, or
+    total tokens) and handle `StopReason`, read
+    `examples/getting_started/budget_limits.md`.
 -   If the user needs to set up and run a local model agent (LiteRT with Gemma,
     or an OpenAI-compatible server like Ollama), including model download,
     hardware requirements, and context window configuration, read

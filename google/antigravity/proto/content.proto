@@ -79,7 +79,9 @@ message ImageContent {
     bytes data = 2;
     string uri = 6;
   }
-  .genai.ImageContent.MimeType mime_type = 1;
+  .genai.ImageContent.MimeType mime_type = 1
+      [json_name = "legacy_mime_type_enum"];
+  string mime_type_string = 8;
   .genai.MediaResolution resolution = 5;
 }
 message AudioContent {
@@ -104,7 +106,9 @@ message AudioContent {
     bytes data = 2;
     string uri = 5;
   }
-  .genai.AudioContent.MimeType mime_type = 1;
+  .genai.AudioContent.MimeType mime_type = 1
+      [json_name = "legacy_mime_type_enum"];
+  string mime_type_string = 11;
   int32 channels = 7;
   int32 sample_rate = 8;
 }
@@ -118,9 +122,21 @@ message DocumentContent {
     bytes data = 2;
     string uri = 5;
   }
-  .genai.DocumentContent.MimeType mime_type = 1;
+  .genai.DocumentContent.MimeType mime_type = 1
+      [json_name = "legacy_mime_type_enum"];
+  string mime_type_string = 6;
 }
 message VideoContent {
+  message StaticMediaProcessing {
+    .google.protobuf.Duration start_offset = 1;
+    .google.protobuf.Duration end_offset = 2;
+    double fps = 3;
+  }
+  message MediaProcessing {
+    oneof type {
+      .genai.VideoContent.StaticMediaProcessing static = 2;
+    }
+  }
   enum MimeType {
     TYPE_UNSPECIFIED = 0;
     TYPE_MP4 = 1;
@@ -134,11 +150,22 @@ message VideoContent {
     TYPE_3GPP = 9;
     TYPE_YT_BEYOND = 10;
   }
+  enum Processing {
+    PROCESSING_UNSPECIFIED = 0;
+    STATIC = 1;
+    AGENTIC = 2;
+  }
   oneof data_or_uri {
     bytes data = 2;
     string uri = 6;
   }
-  .genai.VideoContent.MimeType mime_type = 1;
+  oneof processing {
+    .genai.VideoContent.Processing processing_type = 17;
+    .genai.VideoContent.MediaProcessing processing_config = 18;
+  }
+  .genai.VideoContent.MimeType mime_type = 1
+      [json_name = "legacy_mime_type_enum"];
+  string mime_type_string = 8;
   .genai.MediaResolution resolution = 5;
 }
 message UrlCitation {

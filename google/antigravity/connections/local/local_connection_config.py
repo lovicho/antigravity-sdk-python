@@ -61,7 +61,7 @@ PROTO_FIELD_TO_SDK_NAME: dict[str, str] = {
 # Argument keys in tool call JSON payloads that carry wire-format URIs
 # (file:///..., cns://...) and must be normalized to clean filesystem paths.
 WIRE_PATH_ARGUMENT_KEYS: frozenset[str] = frozenset(
-    {"path", "file_path", "directory_path", "TargetFile"}
+    {"path", "file_path", "directory_path", "TargetFile", "output_path"}
 )
 
 
@@ -111,6 +111,30 @@ class BaseLocalAgentConfig(connection.AgentConfig):
     if v is not None and not os.path.isabs(v):
       raise ValueError(f"app_data_dir must be an absolute path, got '{v}'")
     return v
+
+  @pydantic.model_validator(mode="after")
+  def _validate_allowed_subagents(self) -> "BaseLocalAgentConfig":
+    declared_names = {
+        sub.name for sub in self.subagents or [] if getattr(sub, "name", None)
+    }
+    valid_names = declared_names
+    if self.capabilities and self.capabilities.allowed_subagents is not None:
+      unknown = set(self.capabilities.allowed_subagents) - valid_names
+      if unknown:
+        raise ValueError(
+            "Unknown subagent name(s) in CapabilitiesConfig.allowed_subagents:"
+            f" {sorted(unknown)}. Valid subagents are: {sorted(valid_names)}"
+        )
+    for sub in self.subagents or []:
+      if sub.capabilities and sub.capabilities.allowed_subagents is not None:
+        unknown = set(sub.capabilities.allowed_subagents) - valid_names
+        if unknown:
+          raise ValueError(
+              "Unknown subagent name(s) in"
+              f" SubagentConfig('{sub.name}').capabilities.allowed_subagents:"
+              f" {sorted(unknown)}. Valid subagents are: {sorted(valid_names)}"
+          )
+    return self
 
   def _get_system_instructions(self) -> types.SystemInstructions | None:
     """Returns the system instructions, normalizing shorthand if needed."""
@@ -175,6 +199,7 @@ class LocalAgentConfig(BaseLocalAgentConfig):
       ) = None,
       skills_paths: list[str] | None = None,
       retry_config: types.RetryConfig | None = None,
+      budget_config: types.BudgetConfig | None = None,
       model: str | types.ModelTarget | None = None,
       models: list[types.ModelTarget] | None = None,
       api_key: str | None = None,
@@ -209,6 +234,7 @@ class LocalAgentConfig(BaseLocalAgentConfig):
       return types.VertexEndpoint(
           project=self.project,
           location=self.location,
+          api_key=self.api_key,
       )
     return types.GeminiAPIEndpoint(api_key=self.api_key)
 
@@ -307,5 +333,6 @@ class LocalAgentConfig(BaseLocalAgentConfig):
         subagents=self.subagents,
         debug_config=self.debug_config,
         retry_config=self.retry_config,
-        policies=list(self.policies),
+        budget_config=self.budget_config,
+        policies=list(self.policies) if self.policies is not None else None,
     )

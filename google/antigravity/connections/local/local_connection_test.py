@@ -185,7 +185,7 @@ class LocalConnectionTest(unittest.IsolatedAsyncioTestCase):
 
     await harness.conn.send("Hello")
     init_data = await harness.wait_for_response()
-    self.assertEqual(init_data.get("userInput"), "Hello")
+    self.assertEqual(init_data.get("userInput"), {"parts": [{"text": "Hello"}]})
 
     # Set the cascade ID and send the 429 error step.
     event1 = localharness_pb2.OutputEvent(
@@ -231,7 +231,7 @@ class LocalConnectionTest(unittest.IsolatedAsyncioTestCase):
 
     await harness.conn.send("Hello")
     init_data = await harness.wait_for_response()
-    self.assertEqual(init_data.get("userInput"), "Hello")
+    self.assertEqual(init_data.get("userInput"), {"parts": [{"text": "Hello"}]})
 
     # Set the cascade ID.
     event1 = localharness_pb2.OutputEvent(
@@ -272,7 +272,7 @@ class LocalConnectionTest(unittest.IsolatedAsyncioTestCase):
 
     await harness.conn.send("Hello")
     init_data = await harness.wait_for_response()
-    self.assertEqual(init_data.get("userInput"), "Hello")
+    self.assertEqual(init_data.get("userInput"), {"parts": [{"text": "Hello"}]})
 
     # Send an error indicating MCP failure.
     event = localharness_pb2.OutputEvent(
@@ -298,7 +298,7 @@ class LocalConnectionTest(unittest.IsolatedAsyncioTestCase):
 
     await harness.conn.send("Hello")
     init_data = await harness.wait_for_response()
-    self.assertEqual(init_data.get("userInput"), "Hello")
+    self.assertEqual(init_data.get("userInput"), {"parts": [{"text": "Hello"}]})
 
     # 1. Harness sends STATE_IDLE (e.g. while processing tool call)
     event1 = localharness_pb2.OutputEvent(
@@ -933,7 +933,7 @@ class LocalConnectionTest(unittest.IsolatedAsyncioTestCase):
     # Start the turn
     await harness.conn.send("Hello")
     init_data = await harness.wait_for_response()
-    self.assertEqual(init_data.get("userInput"), "Hello")
+    self.assertEqual(init_data.get("userInput"), {"parts": [{"text": "Hello"}]})
 
     # Simulate an active generation step from the harness
     event1 = localharness_pb2.OutputEvent(
@@ -1119,6 +1119,20 @@ class LocalConnectionTest(unittest.IsolatedAsyncioTestCase):
     )
     await asyncio.wait_for(consumer_task, timeout=1.0)
 
+  async def test_last_turn_stop_reason(self):
+    harness = self._make_harness()
+    self.assertEqual(
+        harness.conn._last_turn_stop_reason,
+        types.StopReason.UNSPECIFIED,
+    )
+    harness.conn._processor._turn_stop_reason = (
+        types.StopReason.QUOTA_EXHAUSTED
+    )
+    self.assertEqual(
+        harness.conn._last_turn_stop_reason,
+        types.StopReason.QUOTA_EXHAUSTED,
+    )
+
 
 class LocalConnectionToolCallNoRunnerTest(unittest.IsolatedAsyncioTestCase):
   """Tests for tool call handling when no ToolRunner is configured."""
@@ -1171,12 +1185,7 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
 
   def setUp(self):
     super().setUp()
-    self.patcher = mock.patch(
-        "google.antigravity.connections.local.local_connection._get_default_binary_path",
-        return_value="/fake/binary",
-    )
-    self.patcher.start()
-    self.addCleanup(self.patcher.stop)
+    test_utils.patch_default_binary_path(self)
 
   def _make_strategy(self, **kwargs):
     """Creates a LocalConnectionStrategy with the given kwargs."""
@@ -1202,28 +1211,32 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
     self.assertEmpty(config.models)
     self.assertFalse(config.HasField("system_instructions"))
     self.assertEqual(len(config.workspaces), 0)
-    self.assertEqual(config.agent_mode, localharness_pb2.AGENT_MODE_AUTONOMOUS)
+    self.assertEqual(
+        config.agent_behavior, localharness_pb2.AGENT_BEHAVIOR_AUTONOMOUS
+    )
 
-  def test_agent_mode_config_produces_valid_proto(self):
-    """Verifies that agent_mode sets HarnessConfig.agent_mode."""
+  def test_agent_behavior_config_produces_valid_proto(self):
+    """Verifies that agent_behavior sets HarnessConfig.agent_behavior."""
     strategy = self._make_strategy(
         capabilities_config=types.CapabilitiesConfig(
-            agent_mode=types.AgentMode.INTERACTIVE
+            agent_behavior=types.AgentBehavior.INTERACTIVE
         )
     )
     config = strategy._build_harness_config()
-    self.assertEqual(config.agent_mode, localharness_pb2.AGENT_MODE_INTERACTIVE)
+    self.assertEqual(
+        config.agent_behavior, localharness_pb2.AGENT_BEHAVIOR_INTERACTIVE
+    )
 
-  def test_subagent_agent_mode_config_produces_valid_proto(self):
-    """Verifies that SubagentCapabilities.agent_mode sets CustomAgent.agent_mode."""
+  def test_subagent_agent_behavior_config_produces_valid_proto(self):
+    """Verifies that SubagentCapabilities.agent_behavior sets CustomAgent.agent_behavior."""
     strategy = self._make_strategy(
         subagents=[
             types.SubagentConfig(
                 name="interactive_subagent",
-                description="A subagent that runs in interactive mode.",
+                description="A subagent that runs in interactive behavior.",
                 model="gemini-2.5-pro",
                 capabilities=types.SubagentCapabilities(
-                    agent_mode=types.AgentMode.INTERACTIVE
+                    agent_behavior=types.AgentBehavior.INTERACTIVE
                 ),
             )
         ]
@@ -1231,8 +1244,8 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
     config = strategy._build_harness_config()
     self.assertLen(config.custom_subagents, 1)
     self.assertEqual(
-        config.custom_subagents[0].agent_mode,
-        localharness_pb2.AGENT_MODE_INTERACTIVE,
+        config.custom_subagents[0].agent_behavior,
+        localharness_pb2.AGENT_BEHAVIOR_INTERACTIVE,
     )
 
   def test_legacy_shorthands_api_key_produces_valid_proto(self):
@@ -1309,14 +1322,14 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
     """Verifies that None fields on ModelConfig are not set on the proto."""
     models = [
         types.ModelTarget(
-            name="gemini-3.6-flash",
+            name="gemini-3.7-flash",
             types=[types.ModelType.TEXT],
             endpoint=types.GeminiAPIEndpoint(),
         )
     ]
     strategy = self._make_strategy(models=models)
     config = strategy._build_harness_config()
-    self.assertEqual(config.models[0].name, "gemini-3.6-flash")
+    self.assertEqual(config.models[0].name, "gemini-3.7-flash")
     # api_key should not be set (proto default empty string).
     self.assertEqual(config.models[0].gemini_api_endpoint.api_key, "")
 
@@ -1561,6 +1574,42 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
     )
 
     self.assertEqual(config.harness_side_tools, expected_harness_side_tools)
+
+  def test_capabilities_config_max_subagent_depth_and_allowed_subagents(self):
+    """Verifies max_subagent_depth and allowed_subagents map to SubagentsConfig."""
+    strategy = self._make_strategy(
+        capabilities_config=types.CapabilitiesConfig(
+            max_subagent_depth=3,
+            allowed_subagents=["researcher", "reviewer"],
+        )
+    )
+    config = strategy._build_harness_config()
+    self.assertTrue(config.harness_side_tools.subagents.enabled)
+    self.assertEqual(config.harness_side_tools.subagents.max_nesting_depth, 3)
+    self.assertEqual(
+        list(config.harness_side_tools.subagents.allowed_subagents),
+        ["researcher", "reviewer"],
+    )
+
+  def test_build_custom_subagents_protos_nested_subagent_enabled(self):
+    """Verifies custom subagents can have subagents enabled and scoped."""
+    child_subagent = types.SubagentConfig(
+        name="researcher",
+        description="Does research",
+        capabilities=types.SubagentCapabilities(
+            enabled_tools=[types.BuiltinTools.START_SUBAGENT],
+            allowed_subagents=["fact_checker"],
+        ),
+    )
+    strategy = self._make_strategy(subagents=[child_subagent])
+    custom_agents = strategy._build_custom_subagents_protos({})
+    self.assertLen(custom_agents, 1)
+    self.assertEqual(custom_agents[0].name, "researcher")
+    self.assertTrue(custom_agents[0].harness_side_tools.subagents.enabled)
+    self.assertEqual(
+        list(custom_agents[0].harness_side_tools.subagents.allowed_subagents),
+        ["fact_checker"],
+    )
 
   def test_capabilities_config_compaction_threshold(self):
     """Verifies compaction_threshold maps to HarnessConfig.compaction_threshold.
@@ -1823,7 +1872,7 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
     """Verifies that Vertex configuration fields propagate to proto."""
     models = [
         types.ModelTarget(
-            name="gemini-3.6-flash",
+            name="gemini-3.7-flash",
             types=[types.ModelType.TEXT],
             endpoint=types.VertexEndpoint(
                 project="my-project",
@@ -2054,6 +2103,32 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
     config_empty = strategy_empty._build_harness_config()
     self.assertFalse(config_empty.HasField("retry_config"))
 
+  def test_budget_config_proto(self):
+    """Verifies that budget_config translates to proto correctly."""
+    strategy_none = self._make_strategy(budget_config=None)
+    config_none = strategy_none._build_harness_config()
+    self.assertFalse(config_none.HasField("budget_config"))
+
+    strategy_empty = self._make_strategy(budget_config=types.BudgetConfig())
+    config_empty = strategy_empty._build_harness_config()
+    self.assertFalse(config_empty.HasField("budget_config"))
+
+    budget_cfg = types.BudgetConfig(
+        max_model_calls=5,
+        max_tool_calls=10,
+        max_input_tokens=500,
+        max_output_tokens=200,
+        max_total_tokens=1000,
+    )
+    strategy = self._make_strategy(budget_config=budget_cfg)
+    config = strategy._build_harness_config()
+    self.assertTrue(config.HasField("budget_config"))
+    self.assertEqual(config.budget_config.max_model_calls, 5)
+    self.assertEqual(config.budget_config.max_tool_calls, 10)
+    self.assertEqual(config.budget_config.max_input_tokens, 500)
+    self.assertEqual(config.budget_config.max_output_tokens, 200)
+    self.assertEqual(config.budget_config.max_total_tokens, 1000)
+
   def test_retry_config_api_retry_only(self):
     """Verifies translation when only api_retry is configured."""
     retry_cfg = types.RetryConfig(
@@ -2164,12 +2239,7 @@ class LocalConnectionStrategyApiKeyTest(unittest.IsolatedAsyncioTestCase):
 
   def setUp(self):
     super().setUp()
-    self.patcher = mock.patch(
-        "google.antigravity.connections.local.local_connection._get_default_binary_path",
-        return_value="/fake/binary",
-    )
-    self.patcher.start()
-    self.addCleanup(self.patcher.stop)
+    test_utils.patch_default_binary_path(self)
 
   def _make_strategy(self, **kwargs):
     """Creates a LocalConnectionStrategy with the given kwargs."""
@@ -2186,7 +2256,7 @@ class LocalConnectionStrategyApiKeyTest(unittest.IsolatedAsyncioTestCase):
     """
     models = [
         types.ModelTarget(
-            name="gemini-3.6-flash",
+            name="gemini-3.7-flash",
             types=[types.ModelType.TEXT],
         )
     ]
@@ -2204,7 +2274,7 @@ class LocalConnectionStrategyApiKeyTest(unittest.IsolatedAsyncioTestCase):
     """
     models = [
         types.ModelTarget(
-            name="gemini-3.6-flash",
+            name="gemini-3.7-flash",
             types=[types.ModelType.TEXT],
             endpoint=types.GeminiAPIEndpoint(api_key=None),
         )
@@ -2220,7 +2290,7 @@ class LocalConnectionStrategyApiKeyTest(unittest.IsolatedAsyncioTestCase):
     """Verifies strategy raises validation error when Vertex is set but no project/location provided."""
     models = [
         types.ModelTarget(
-            name="gemini-3.6-flash",
+            name="gemini-3.7-flash",
             types=[types.ModelType.TEXT],
             endpoint=types.VertexEndpoint(project=None, location=None),
         )
@@ -2229,7 +2299,10 @@ class LocalConnectionStrategyApiKeyTest(unittest.IsolatedAsyncioTestCase):
     with self.assertRaises(types.AntigravityValidationError) as ctx:
       async with strategy:
         pass
-    self.assertIn("project and location must be set", str(ctx.exception))
+    self.assertIn(
+        "either (project and location) or api_key must be set",
+        str(ctx.exception),
+    )
 
   @mock.patch.dict("os.environ", {}, clear=True)
   @mock.patch("subprocess.Popen")
@@ -2244,7 +2317,7 @@ class LocalConnectionStrategyApiKeyTest(unittest.IsolatedAsyncioTestCase):
 
     models = [
         types.ModelTarget(
-            name="gemini-3.6-flash",
+            name="gemini-3.7-flash",
             types=[types.ModelType.TEXT],
             endpoint=types.VertexEndpoint(
                 project="my-project",
@@ -2276,7 +2349,7 @@ class LocalConnectionStrategyApiKeyTest(unittest.IsolatedAsyncioTestCase):
     mock_proc.stdout.read.return_value = b""
     mock_popen.return_value = mock_proc
 
-    cfg = local_connection_config.LocalAgentConfig(model="gemini-3.6-flash")
+    cfg = local_connection_config.LocalAgentConfig(model="gemini-3.7-flash")
     self.assertIsInstance(cfg.models[0].endpoint, types.VertexEndpoint)
     self.assertEqual(cfg.models[0].endpoint.project, "env-project")
     self.assertEqual(cfg.models[0].endpoint.location, "env-location")
@@ -2290,7 +2363,7 @@ class LocalConnectionStrategyApiKeyTest(unittest.IsolatedAsyncioTestCase):
   )
   def test_bare_config_routes_to_vertex_via_use_enterprise_env(self):
     """USE_ENTERPRISE alone also triggers Vertex routing (GEAP recipe)."""
-    cfg = local_connection_config.LocalAgentConfig(model="gemini-3.6-flash")
+    cfg = local_connection_config.LocalAgentConfig(model="gemini-3.7-flash")
     self.assertIsInstance(cfg.models[0].endpoint, types.VertexEndpoint)
 
   @mock.patch.dict(
@@ -2306,6 +2379,66 @@ class LocalConnectionStrategyApiKeyTest(unittest.IsolatedAsyncioTestCase):
     ep = types.VertexEndpoint()
     self.assertEqual(ep.project, "env-project")
     self.assertEqual(ep.location, "env-location")
+
+  @mock.patch.dict(
+      "os.environ",
+      {
+          "GOOGLE_CLOUD_PROJECT": "env-project",
+          "GOOGLE_CLOUD_LOCATION": "env-location",
+      },
+      clear=True,
+  )
+  def test_vertex_endpoint_api_key_skips_env_hydration(self):
+    """VertexEndpoint(api_key=...) skips hydrating project and location from env."""
+    ep = types.VertexEndpoint(api_key="express-key")
+    self.assertEqual(ep.api_key, "express-key")
+    self.assertIsNone(ep.project)
+    self.assertIsNone(ep.location)
+    ep.validate_endpoint()
+
+  def test_vertex_endpoint_mutual_exclusivity(self):
+    """VertexEndpoint raises ValueError when both api_key and project/location are set."""
+    ep_both = types.VertexEndpoint(
+        project="my-proj", location="us-central1", api_key="express-key"
+    )
+    with self.assertRaisesRegex(ValueError, "Cannot specify both api_key"):
+      ep_both.validate_endpoint()
+
+    ep_proj = types.VertexEndpoint(project="my-proj", api_key="express-key")
+    with self.assertRaisesRegex(ValueError, "Cannot specify both api_key"):
+      ep_proj.validate_endpoint()
+
+    ep_loc = types.VertexEndpoint(location="us-central1", api_key="express-key")
+    with self.assertRaisesRegex(ValueError, "Cannot specify both api_key"):
+      ep_loc.validate_endpoint()
+
+  @mock.patch.dict("os.environ", {}, clear=True)
+  def test_vertex_shorthand_forwards_api_key(self):
+    """LocalAgentConfig(vertex=True, api_key=...) constructs Express mode VertexEndpoint."""
+    cfg = local_connection_config.LocalAgentConfig(
+        vertex=True, api_key="express-key"
+    )
+    self.assertIsInstance(cfg.models[0].endpoint, types.VertexEndpoint)
+    self.assertEqual(cfg.models[0].endpoint.api_key, "express-key")
+    self.assertIsNone(cfg.models[0].endpoint.project)
+    self.assertIsNone(cfg.models[0].endpoint.location)
+    cfg.models[0].endpoint.validate_endpoint()
+
+  @mock.patch.dict("os.environ", {}, clear=True)
+  def test_vertex_express_config_propagates_to_harness_proto(self):
+    """Verifies that api_key on VertexEndpoint propagates to localharness proto."""
+    models = [
+        types.ModelTarget(
+            name="gemini-3.7-flash",
+            types=[types.ModelType.TEXT],
+            endpoint=types.VertexEndpoint(api_key="express-key"),
+        )
+    ]
+    strategy = self._make_strategy(models=models)
+    config_proto = strategy._build_harness_config()
+    self.assertEqual(
+        config_proto.models[0].vertex_endpoint.api_key, "express-key"
+    )
 
   @mock.patch.dict("os.environ", {"GEMINI_API_KEY": "env-key"}, clear=True)
   @mock.patch("subprocess.Popen")
@@ -2435,7 +2568,7 @@ class LocalConnectionStrategyApiKeyTest(unittest.IsolatedAsyncioTestCase):
     mock_popen.return_value = mock_proc
     models = [
         types.ModelTarget(
-            name="gemini-3.6-flash",
+            name="gemini-3.7-flash",
             types=[types.ModelType.TEXT],
             endpoint=types.GeminiAPIEndpoint(api_key="explicit-key"),
         )
@@ -2451,12 +2584,7 @@ class LocalConnectionStrategyConnectTest(unittest.IsolatedAsyncioTestCase):
 
   def setUp(self):
     super().setUp()
-    self.patcher = mock.patch(
-        "google.antigravity.connections.local.local_connection._get_default_binary_path",
-        return_value="/fake/binary",
-    )
-    self.patcher.start()
-    self.addCleanup(self.patcher.stop)
+    test_utils.patch_default_binary_path(self)
 
   def _make_strategy(self, **kwargs):
     return local_connection.LocalConnectionStrategy(**kwargs)
@@ -3505,11 +3633,13 @@ class LocalConnectionSendTest(unittest.IsolatedAsyncioTestCase):
     await harness.conn.send("Standard text prompt")
 
     sent_data = await harness.wait_for_response()
-    self.assertEqual(sent_data.get("userInput"), "Standard text prompt")
-    self.assertNotIn("complexUserInput", sent_data)
+    self.assertIn("userInput", sent_data)
+    parts = sent_data["userInput"]["parts"]
+    self.assertEqual(len(parts), 1)
+    self.assertEqual(parts[0]["text"], "Standard text prompt")
 
   async def test_send_none_prompt_populates_blank_string(self):
-    """Verifies that passing a prompt of None maps to a blank userInput string frame."""
+    """Verifies that passing a prompt of None maps to a blank userInput text part."""
     harness = test_utils.TestLocalHarness(
         test_case=self,
         process=self.mock_process,
@@ -3518,12 +3648,13 @@ class LocalConnectionSendTest(unittest.IsolatedAsyncioTestCase):
 
     sent_data = await harness.wait_for_response()
 
-    # Assert it sets userInput to a blank string and does not use complex inputs
-    self.assertEqual(sent_data.get("userInput"), "")
-    self.assertNotIn("complexUserInput", sent_data)
+    self.assertIn("userInput", sent_data)
+    parts = sent_data["userInput"]["parts"]
+    self.assertEqual(len(parts), 1)
+    self.assertEqual(parts[0].get("text", ""), "")
 
-  async def test_send_single_media_content_populates_complex_user_input(self):
-    """Verifies that a single rich Content primitive maps to the complex_user_input parts list."""
+  async def test_send_single_media_content_populates_user_input(self):
+    """Verifies that a single rich Content primitive maps to the user_input parts list."""
     harness = test_utils.TestLocalHarness(
         test_case=self,
         process=self.mock_process,
@@ -3537,10 +3668,9 @@ class LocalConnectionSendTest(unittest.IsolatedAsyncioTestCase):
 
     sent_data = await harness.wait_for_response()
 
-    self.assertNotIn("userInput", sent_data)
-    self.assertIn("complexUserInput", sent_data)
+    self.assertIn("userInput", sent_data)
 
-    parts = sent_data["complexUserInput"]["parts"]
+    parts = sent_data["userInput"]["parts"]
     self.assertEqual(len(parts), 1)
     self.assertIn("media", parts[0])
     media = parts[0]["media"]
@@ -3563,10 +3693,9 @@ class LocalConnectionSendTest(unittest.IsolatedAsyncioTestCase):
 
     sent_data = await harness.wait_for_response()
 
-    self.assertNotIn("userInput", sent_data)
-    self.assertIn("complexUserInput", sent_data)
+    self.assertIn("userInput", sent_data)
 
-    parts = sent_data["complexUserInput"]["parts"]
+    parts = sent_data["userInput"]["parts"]
     self.assertEqual(len(parts), 2)
 
     self.assertEqual(parts[0]["text"], "Context text instruction.")
@@ -3574,8 +3703,8 @@ class LocalConnectionSendTest(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(parts[1]["media"]["mimeType"], "application/pdf")
     self.assertEqual(parts[1]["media"]["data"], "ZmFrZV9wZGY=")  # b"fake_pdf"
 
-  async def test_send_slash_command_populates_complex_user_input(self):
-    """Verifies that a SlashCommand primitive maps to complex_user_input slash_command field."""
+  async def test_send_slash_command_populates_user_input(self):
+    """Verifies that a SlashCommand primitive maps to user_input slash_command field."""
     harness = test_utils.TestLocalHarness(
         test_case=self,
         process=self.mock_process,
@@ -3587,10 +3716,9 @@ class LocalConnectionSendTest(unittest.IsolatedAsyncioTestCase):
 
     sent_data = await harness.wait_for_response()
 
-    self.assertNotIn("userInput", sent_data)
-    self.assertIn("complexUserInput", sent_data)
+    self.assertIn("userInput", sent_data)
 
-    parts = sent_data["complexUserInput"]["parts"]
+    parts = sent_data["userInput"]["parts"]
     self.assertEqual(len(parts), 1)
     self.assertIn("slashCommand", parts[0])
     sc = parts[0]["slashCommand"]
@@ -3654,7 +3782,9 @@ class LocalConnectionSendTest(unittest.IsolatedAsyncioTestCase):
     # Start a turn so the connection is non-idle.
     await harness.conn.send("initial prompt")
     initial_msg = await harness.wait_for_response()
-    self.assertEqual(initial_msg.get("userInput"), "initial prompt")
+    self.assertEqual(
+        initial_msg.get("userInput"), {"parts": [{"text": "initial prompt"}]}
+    )
 
     # send_trigger_notification should succeed even though we are mid-turn.
     await harness.conn.send_trigger_notification("trigger content")
@@ -3665,10 +3795,17 @@ class LocalConnectionSendTest(unittest.IsolatedAsyncioTestCase):
     # A regular send() should also succeed (no send-side guard).
     await harness.conn.send("follow-up prompt")
     followup_msg = await harness.wait_for_response()
-    self.assertEqual(followup_msg.get("userInput"), "follow-up prompt")
+    self.assertEqual(
+        followup_msg.get("userInput"),
+        {"parts": [{"text": "follow-up prompt"}]},
+    )
 
 
 class LocalAgentConfigTest(absltest.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    test_utils.patch_default_binary_path(self)
 
   def test_create_strategy(self):
     config = local_connection_config.LocalAgentConfig(
@@ -3884,6 +4021,54 @@ class LocalAgentConfigTest(absltest.TestCase):
           conversation_id="invalid_char_because_of_underscores_123",
       )
     self.assertIn("must match [a-zA-Z0-9-]", str(ctx.exception))
+
+  def test_local_agent_config_validates_allowed_subagents_success(self):
+    sub = types.SubagentConfig(
+        name="researcher",
+        description="researcher",
+        system_instructions="research",
+    )
+    config = local_connection_config.LocalAgentConfig(
+        subagents=[sub],
+        capabilities=types.CapabilitiesConfig(
+            allowed_subagents=["researcher"],
+        ),
+    )
+    self.assertEqual(config.capabilities.allowed_subagents, ["researcher"])
+
+  def test_local_agent_config_validates_allowed_subagents_unknown_raises(self):
+    sub = types.SubagentConfig(
+        name="researcher",
+        description="researcher",
+        system_instructions="research",
+    )
+    with self.assertRaisesRegex(
+        pydantic.ValidationError, "Unknown subagent name.*non_existent"
+    ):
+      local_connection_config.LocalAgentConfig(
+          subagents=[sub],
+          capabilities=types.CapabilitiesConfig(
+              allowed_subagents=["non_existent"],
+          ),
+      )
+
+  def test_local_agent_config_validates_subagent_allowed_subagents_unknown_raises(
+      self,
+  ):
+    sub = types.SubagentConfig(
+        name="researcher",
+        description="researcher",
+        capabilities=types.SubagentCapabilities(
+            enabled_tools=[types.BuiltinTools.START_SUBAGENT],
+            allowed_subagents=["ghost_agent"],
+        ),
+    )
+    with self.assertRaisesRegex(
+        pydantic.ValidationError, "Unknown subagent name.*ghost_agent"
+    ):
+      local_connection_config.LocalAgentConfig(
+          subagents=[sub],
+      )
 
   def test_create_strategy_with_mcp_servers(self):
     stdio_cfg = types.McpStdioServer(
@@ -4234,6 +4419,7 @@ class LocalConnectionSubagentsTest(unittest.IsolatedAsyncioTestCase):
 
   def setUp(self):
     super().setUp()
+    test_utils.patch_default_binary_path(self)
     self.temp_dir = self.enterContext(tempfile.TemporaryDirectory())
     self.workspace = pathlib.Path(self.temp_dir) / "workspace"
     self.workspace.mkdir()
@@ -4241,11 +4427,9 @@ class LocalConnectionSubagentsTest(unittest.IsolatedAsyncioTestCase):
   def test_builds_subagents_proto_correctly(self):
     def my_custom_tool():
       """A test tool."""
-      pass
 
     def another_one():
       """Another test tool."""
-      pass
 
     subagent = types.SubagentConfig(
         name="test_helper",
@@ -4374,7 +4558,6 @@ class LocalConnectionSubagentsTest(unittest.IsolatedAsyncioTestCase):
   def test_subagent_tool_not_registered_raises(self):
     def unregistered_tool():
       """Not added to parent."""
-      pass
 
     subagent = types.SubagentConfig(
         name="test_helper",
@@ -4412,10 +4595,11 @@ class LocalConnectionSubagentsTest(unittest.IsolatedAsyncioTestCase):
     ):
       strategy._build_harness_config()
 
-  def test_subagent_tools_stripped_and_warned(self):
+  def test_subagent_with_start_subagent_enables_nested_delegation(self):
+    """Verifies subagents with START_SUBAGENT get subagents.enabled=True."""
     subagent = types.SubagentConfig(
         name="nested_helper",
-        description="A subagent trying to use subagents",
+        description="A subagent that can spawn subagents",
         system_instructions="Spawn subagents.",
         capabilities=types.SubagentCapabilities(
             enabled_tools=[types.BuiltinTools.START_SUBAGENT],
@@ -4427,20 +4611,11 @@ class LocalConnectionSubagentsTest(unittest.IsolatedAsyncioTestCase):
         workspaces=[str(self.workspace)],
     )
 
-    with self.assertLogs(level="WARNING") as log_capture:
-      harness_config = strategy._build_harness_config()
-
-    # Verify warning was logged
-    self.assertTrue(
-        any(
-            "Nested subagents are currently not supported" in msg
-            for msg in log_capture.output
-        )
-    )
+    harness_config = strategy._build_harness_config()
 
     self.assertEqual(len(harness_config.custom_subagents), 1)
     custom_agent = harness_config.custom_subagents[0]
-    self.assertFalse(custom_agent.harness_side_tools.subagents.enabled)
+    self.assertTrue(custom_agent.harness_side_tools.subagents.enabled)
     self.assertFalse(custom_agent.harness_side_tools.file_edit.enabled)
 
   def test_local_agent_config_subagents_none_initializes(self):

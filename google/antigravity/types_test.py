@@ -194,6 +194,9 @@ class StepTest(unittest.TestCase):
     step = types.Step()
     self.assertEqual(step.id, "")
     self.assertEqual(step.step_index, 0)
+    self.assertEqual(step.trajectory_id, "")
+    self.assertEqual(step.parent_trajectory_id, "")
+    self.assertEqual(step.depth, 0)
     self.assertEqual(step.type, types.StepType.UNKNOWN)
     self.assertEqual(step.status, types.StepStatus.UNKNOWN)
     self.assertEqual(step.source, types.StepSource.UNKNOWN)
@@ -658,12 +661,12 @@ class BuiltinToolsTest(parameterized.TestCase):
     self.assertEqual(types.BuiltinTools.none(), [])
 
 
-class AgentModeTest(unittest.TestCase):
-  """Tests for the AgentMode enum."""
+class AgentBehaviorTest(unittest.TestCase):
+  """Tests for the AgentBehavior enum."""
 
   def test_enum_values(self):
-    self.assertEqual(types.AgentMode.AUTONOMOUS, "autonomous")
-    self.assertEqual(types.AgentMode.INTERACTIVE, "interactive")
+    self.assertEqual(types.AgentBehavior.AUTONOMOUS, "autonomous")
+    self.assertEqual(types.AgentBehavior.INTERACTIVE, "interactive")
 
 
 class CapabilitiesConfigTest(unittest.TestCase):
@@ -673,18 +676,20 @@ class CapabilitiesConfigTest(unittest.TestCase):
     """Verifies defaults: subagents enabled, no tool lists, no threshold."""
     config = types.CapabilitiesConfig()
     self.assertTrue(config.enable_subagents)
-    self.assertEqual(config.agent_mode, types.AgentMode.AUTONOMOUS)
+    self.assertEqual(config.agent_behavior, types.AgentBehavior.AUTONOMOUS)
     self.assertIsNone(config.enabled_tools)
     self.assertIsNone(config.disabled_tools)
     self.assertIsNone(config.compaction_threshold)
     self.assertIsNone(config.finish_tool_schema_json)
 
-  def test_agent_mode_explicit(self):
-    """Verifies that agent_mode can be explicitly set via enum or string."""
-    config = types.CapabilitiesConfig(agent_mode=types.AgentMode.INTERACTIVE)
-    self.assertEqual(config.agent_mode, types.AgentMode.INTERACTIVE)
-    config_str = types.CapabilitiesConfig(agent_mode="interactive")
-    self.assertEqual(config_str.agent_mode, types.AgentMode.INTERACTIVE)
+  def test_agent_behavior_explicit(self):
+    """Verifies that agent_behavior can be explicitly set via enum or string."""
+    config = types.CapabilitiesConfig(
+        agent_behavior=types.AgentBehavior.INTERACTIVE
+    )
+    self.assertEqual(config.agent_behavior, types.AgentBehavior.INTERACTIVE)
+    config_str = types.CapabilitiesConfig(agent_behavior="interactive")
+    self.assertEqual(config_str.agent_behavior, types.AgentBehavior.INTERACTIVE)
 
   def test_enabled_tools(self):
     """Verifies that enabled_tools accepts a list of BuiltinTools."""
@@ -722,7 +727,7 @@ class CapabilitiesConfigTest(unittest.TestCase):
     with self.assertLogs(level="WARNING") as log_cm:
       types.CapabilitiesConfig(
           enabled_tools=[types.BuiltinTools.ASK_QUESTION],
-          agent_mode=types.AgentMode.AUTONOMOUS,
+          agent_behavior=types.AgentBehavior.AUTONOMOUS,
       )
     self.assertTrue(
         any("ASK_QUESTION is enabled" in msg for msg in log_cm.output)
@@ -733,16 +738,112 @@ class CapabilitiesConfigTest(unittest.TestCase):
     with mock.patch("logging.warning") as mock_warn:
       types.CapabilitiesConfig(
           enabled_tools=[types.BuiltinTools.ASK_QUESTION],
-          agent_mode=types.AgentMode.INTERACTIVE,
+          agent_behavior=types.AgentBehavior.INTERACTIVE,
       )
       mock_warn.assert_not_called()
+
+  def test_max_subagent_depth_and_allowed_subagents(self):
+    """Verifies max_subagent_depth and allowed_subagents on CapabilitiesConfig."""
+    config = types.CapabilitiesConfig(
+        max_subagent_depth=3,
+        allowed_subagents=["researcher", "reviewer"],
+    )
+    self.assertEqual(config.max_subagent_depth, 3)
+    self.assertEqual(config.allowed_subagents, ["researcher", "reviewer"])
+
+  def test_max_subagent_depth_ge_1_enforced(self):
+    """Verifies max_subagent_depth < 1 raises ValidationError."""
+    with self.assertRaises(pydantic.ValidationError) as cm:
+      types.CapabilitiesConfig(max_subagent_depth=0)
+    self.assertIn("greater than or equal to 1", str(cm.exception))
+
+  def test_subagent_capabilities_allowed_subagents(self):
+    """Verifies allowed_subagents on SubagentCapabilities."""
+    caps = types.SubagentCapabilities(allowed_subagents=["fact_checker"])
+    self.assertEqual(caps.allowed_subagents, ["fact_checker"])
+
+  def test_max_subagent_depth_fails_when_subagents_disabled(self):
+    """Verifies ValidationError when max_subagent_depth is set but subagents disabled."""
+    with self.assertRaises(pydantic.ValidationError) as cm:
+      types.CapabilitiesConfig(
+          enable_subagents=False,
+          max_subagent_depth=2,
+      )
+    self.assertIn("max_subagent_depth cannot be configured", str(cm.exception))
+
+  def test_max_subagent_depth_1_fails_when_subagents_disabled(self):
+    """Verifies max_subagent_depth=1 also fails when subagents disabled."""
+    with self.assertRaises(pydantic.ValidationError) as cm:
+      types.CapabilitiesConfig(
+          enable_subagents=False,
+          max_subagent_depth=1,
+      )
+    self.assertIn("max_subagent_depth cannot be configured", str(cm.exception))
+
+  def test_allowed_subagents_fails_when_subagents_disabled(self):
+    """Verifies ValidationError when allowed_subagents is set but subagents disabled."""
+    with self.assertRaises(pydantic.ValidationError) as cm:
+      types.CapabilitiesConfig(
+          enable_subagents=False,
+          allowed_subagents=["worker"],
+      )
+    self.assertIn("allowed_subagents cannot be specified", str(cm.exception))
+
+  def test_allowed_subagents_empty_list_fails_when_subagents_disabled(self):
+    """Verifies ValidationError when allowed_subagents=[] and subagents disabled."""
+    with self.assertRaises(pydantic.ValidationError) as cm:
+      types.CapabilitiesConfig(
+          enable_subagents=False,
+          allowed_subagents=[],
+      )
+    self.assertIn("allowed_subagents cannot be specified", str(cm.exception))
+
+  def test_max_subagent_depth_fails_when_start_subagent_tool_disabled(self):
+    """Verifies ValidationError when START_SUBAGENT is in disabled_tools."""
+    with self.assertRaises(pydantic.ValidationError) as cm:
+      types.CapabilitiesConfig(
+          disabled_tools=[types.BuiltinTools.START_SUBAGENT],
+          max_subagent_depth=3,
+      )
+    self.assertIn("max_subagent_depth cannot be configured", str(cm.exception))
+
+  def test_allowed_subagents_fails_when_start_subagent_tool_disabled(self):
+    """Verifies ValidationError when START_SUBAGENT is in disabled_tools and allowed_subagents is set."""
+    with self.assertRaises(pydantic.ValidationError) as cm:
+      types.CapabilitiesConfig(
+          disabled_tools=[types.BuiltinTools.START_SUBAGENT],
+          allowed_subagents=["worker"],
+      )
+    self.assertIn("allowed_subagents cannot be specified", str(cm.exception))
+
+  def test_max_subagent_depth_fails_when_start_subagent_not_in_enabled_tools(
+      self,
+  ):
+    """Verifies ValidationError when START_SUBAGENT is omitted from enabled_tools."""
+    with self.assertRaises(pydantic.ValidationError) as cm:
+      types.CapabilitiesConfig(
+          enabled_tools=[types.BuiltinTools.VIEW_FILE],
+          max_subagent_depth=2,
+      )
+    self.assertIn("max_subagent_depth cannot be configured", str(cm.exception))
+
+  def test_allowed_subagents_fails_when_start_subagent_not_in_enabled_tools(
+      self,
+  ):
+    """Verifies ValidationError when START_SUBAGENT is omitted from enabled_tools and allowed_subagents is set."""
+    with self.assertRaises(pydantic.ValidationError) as cm:
+      types.CapabilitiesConfig(
+          enabled_tools=[types.BuiltinTools.VIEW_FILE],
+          allowed_subagents=["worker"],
+      )
+    self.assertIn("allowed_subagents cannot be specified", str(cm.exception))
 
   def test_subagent_ask_question_warning_when_not_interactive(self):
     """Verifies that a warning is logged for SubagentCapabilities."""
     with self.assertLogs(level="WARNING") as log_cm:
       types.SubagentCapabilities(
           enabled_tools=[types.BuiltinTools.ASK_QUESTION],
-          agent_mode=types.AgentMode.AUTONOMOUS,
+          agent_behavior=types.AgentBehavior.AUTONOMOUS,
       )
     self.assertTrue(
         any(
@@ -1697,15 +1798,17 @@ class SubagentCapabilitiesTest(unittest.TestCase):
 
   def test_defaults(self):
     sc = types.SubagentCapabilities()
-    self.assertEqual(sc.agent_mode, types.AgentMode.AUTONOMOUS)
+    self.assertEqual(sc.agent_behavior, types.AgentBehavior.AUTONOMOUS)
     self.assertIsNone(sc.enabled_tools)
     self.assertIsNone(sc.disabled_tools)
 
-  def test_agent_mode_explicit(self):
-    sc = types.SubagentCapabilities(agent_mode=types.AgentMode.INTERACTIVE)
-    self.assertEqual(sc.agent_mode, types.AgentMode.INTERACTIVE)
-    sc_str = types.SubagentCapabilities(agent_mode="interactive")
-    self.assertEqual(sc_str.agent_mode, types.AgentMode.INTERACTIVE)
+  def test_agent_behavior_explicit(self):
+    sc = types.SubagentCapabilities(
+        agent_behavior=types.AgentBehavior.INTERACTIVE
+    )
+    self.assertEqual(sc.agent_behavior, types.AgentBehavior.INTERACTIVE)
+    sc_str = types.SubagentCapabilities(agent_behavior="interactive")
+    self.assertEqual(sc_str.agent_behavior, types.AgentBehavior.INTERACTIVE)
 
   def test_mutually_exclusive_ok_enabled(self):
     sc = types.SubagentCapabilities(
@@ -1726,6 +1829,33 @@ class SubagentCapabilitiesTest(unittest.TestCase):
       types.SubagentCapabilities(
           enabled_tools=[types.BuiltinTools.EDIT_FILE],
           disabled_tools=[types.BuiltinTools.RUN_COMMAND],
+      )
+
+  def test_allowed_subagents_valid_when_start_subagent_enabled(self):
+    sc = types.SubagentCapabilities(
+        enabled_tools=[types.BuiltinTools.START_SUBAGENT],
+        allowed_subagents=["worker"],
+    )
+    self.assertEqual(sc.allowed_subagents, ["worker"])
+
+  def test_allowed_subagents_raises_when_start_subagent_omitted_from_enabled_tools(
+      self,
+  ):
+    with self.assertRaisesRegex(
+        pydantic.ValidationError, "START_SUBAGENT is disabled or omitted"
+    ):
+      types.SubagentCapabilities(
+          enabled_tools=[types.BuiltinTools.VIEW_FILE],
+          allowed_subagents=["worker"],
+      )
+
+  def test_allowed_subagents_raises_when_start_subagent_in_disabled_tools(self):
+    with self.assertRaisesRegex(
+        pydantic.ValidationError, "START_SUBAGENT is disabled or omitted"
+    ):
+      types.SubagentCapabilities(
+          disabled_tools=[types.BuiltinTools.START_SUBAGENT],
+          allowed_subagents=["worker"],
       )
 
 
@@ -1862,6 +1992,88 @@ class RetryConfigTest(unittest.TestCase):
       types.ModelOutputRetryConfig(max_retries=-5)
     with self.assertRaises(pydantic.ValidationError):
       types.ModelOutputRetryConfig(max_retries=2**32)
+
+
+class BudgetEnforcementTypesTest(absltest.TestCase):
+  """Tests for StopReason."""
+
+  def test_budget_config_defaults_and_validation(self):
+    cfg = types.BudgetConfig()
+    self.assertIsNone(cfg.max_model_calls)
+    self.assertIsNone(cfg.max_tool_calls)
+    self.assertIsNone(cfg.max_input_tokens)
+    self.assertIsNone(cfg.max_output_tokens)
+    self.assertIsNone(cfg.max_total_tokens)
+
+    cfg_valid = types.BudgetConfig(
+        max_model_calls=5,
+        max_tool_calls=10,
+        max_input_tokens=500,
+        max_output_tokens=200,
+        max_total_tokens=1000,
+    )
+    self.assertEqual(cfg_valid.max_model_calls, 5)
+    self.assertEqual(cfg_valid.max_tool_calls, 10)
+    self.assertEqual(cfg_valid.max_input_tokens, 500)
+    self.assertEqual(cfg_valid.max_output_tokens, 200)
+    self.assertEqual(cfg_valid.max_total_tokens, 1000)
+
+    with self.assertRaises(pydantic.ValidationError):
+      types.BudgetConfig(max_model_calls=0)
+    with self.assertRaises(pydantic.ValidationError):
+      types.BudgetConfig(max_model_calls=2**31)
+    with self.assertRaises(pydantic.ValidationError):
+      types.BudgetConfig(max_tool_calls=0)
+    with self.assertRaises(pydantic.ValidationError):
+      types.BudgetConfig(max_tool_calls=2**31)
+    with self.assertRaises(pydantic.ValidationError):
+      types.BudgetConfig(max_input_tokens=0)
+    with self.assertRaises(pydantic.ValidationError):
+      types.BudgetConfig(max_input_tokens=2**63)
+    with self.assertRaises(pydantic.ValidationError):
+      types.BudgetConfig(max_output_tokens=0)
+    with self.assertRaises(pydantic.ValidationError):
+      types.BudgetConfig(max_output_tokens=2**63)
+    with self.assertRaises(pydantic.ValidationError):
+      types.BudgetConfig(max_total_tokens=0)
+    with self.assertRaises(pydantic.ValidationError):
+      types.BudgetConfig(max_total_tokens=2**63)
+
+  def test_stop_reason_enum(self):
+    self.assertEqual(types.StopReason.UNSPECIFIED, "UNSPECIFIED")
+    self.assertEqual(
+        types.StopReason.MAX_MODEL_CALLS_EXCEEDED,
+        "MAX_MODEL_CALLS_EXCEEDED",
+    )
+    self.assertEqual(
+        types.StopReason.MAX_TOOL_CALLS_EXCEEDED,
+        "MAX_TOOL_CALLS_EXCEEDED",
+    )
+    self.assertEqual(
+        types.StopReason.MAX_INPUT_TOKENS_EXCEEDED,
+        "MAX_INPUT_TOKENS_EXCEEDED",
+    )
+    self.assertEqual(
+        types.StopReason.MAX_OUTPUT_TOKENS_EXCEEDED,
+        "MAX_OUTPUT_TOKENS_EXCEEDED",
+    )
+    self.assertEqual(
+        types.StopReason.MAX_TOTAL_TOKENS_EXCEEDED,
+        "MAX_TOTAL_TOKENS_EXCEEDED",
+    )
+    self.assertEqual(types.StopReason.QUOTA_EXHAUSTED, "QUOTA_EXHAUSTED")
+
+  def test_chat_response_stop_reason(self):
+    async def mock_stream():
+      yield types.Text(step_index=1, text="")
+
+    mock_conv = mock.MagicMock(spec=conversation.Conversation)
+    mock_conv._last_turn_stop_reason = types.StopReason.QUOTA_EXHAUSTED
+    response = types.ChatResponse(mock_stream(), conversation=mock_conv)
+    self.assertEqual(
+        response.stop_reason,
+        types.StopReason.QUOTA_EXHAUSTED,
+    )
 
 
 if __name__ == "__main__":

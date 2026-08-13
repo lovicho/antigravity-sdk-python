@@ -33,10 +33,10 @@ The result from the subagent is typically delivered back to the main agent,
 which then presents it or uses it. The `await response.text()` call will return
 the final aggregated response, including the output produced by the subagent.
 
-## Configuring Subagent Capabilities and Mode
+## Configuring Subagent Capabilities and Behavior
 
-Subagents default to `agent_mode=AgentMode.AUTONOMOUS`. You can declare custom
-subagents and customize their capabilities and execution mode via
+Subagents default to `agent_behavior=AgentBehavior.AUTONOMOUS`. You can declare
+custom subagents and customize their capabilities and execution behavior via
 `SubagentConfig` and `SubagentCapabilities`:
 
 ```python
@@ -48,9 +48,58 @@ config = LocalAgentConfig(
             name="researcher",
             description="Researches topics autonomously.",
             capabilities=types.SubagentCapabilities(
-                agent_mode=types.AgentMode.AUTONOMOUS,
+                agent_behavior=types.AgentBehavior.AUTONOMOUS,
             ),
         ),
     ],
 )
+```
+
+## Hierarchical & Nested Subagents
+
+You can create multi-tier subagent hierarchies where subagents delegate further
+to other subagents. Configure the session-wide depth limit with
+`max_subagent_depth` on `CapabilitiesConfig`, and scope which subagents each
+tier can invoke with `allowed_subagents`:
+
+```python
+from google.antigravity import Agent, LocalAgentConfig, types
+
+# Leaf tier: Can read files but cannot spawn further subagents.
+fact_checker = types.SubagentConfig(
+    name="fact_checker",
+    description="Fact checks claims by verifying data.",
+    capabilities=types.SubagentCapabilities(
+        enabled_tools=[types.BuiltinTools.VIEW_FILE],
+    ),
+)
+
+# Middle tier: Can read files and delegate to fact_checker.
+lead_researcher = types.SubagentConfig(
+    name="lead_researcher",
+    description="Researches a topic and delegates verification to fact_checker.",
+    capabilities=types.SubagentCapabilities(
+        enabled_tools=[
+            types.BuiltinTools.VIEW_FILE,
+            types.BuiltinTools.START_SUBAGENT,
+        ],
+        allowed_subagents=["fact_checker"],
+    ),
+)
+
+# Root agent: Session depth ceiling of 3; initially allowed to invoke lead_researcher.
+config = LocalAgentConfig(
+    subagents=[lead_researcher, fact_checker],
+    capabilities=types.CapabilitiesConfig(
+        enable_subagents=True,
+        max_subagent_depth=3,
+        allowed_subagents=["lead_researcher"],
+    ),
+)
+
+async with Agent(config) as agent:
+    response = await agent.chat(
+        "Use 'lead_researcher' to analyze the report and have 'fact_checker' verify figures."
+    )
+    print(await response.text())
 ```

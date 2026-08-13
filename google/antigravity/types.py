@@ -56,7 +56,7 @@ __all__ = [
     "SystemInstructions",
     "SubagentConfig",
     "SubagentCapabilities",
-    "AgentMode",
+    "AgentBehavior",
     "BuiltinTools",
     "CapabilitiesConfig",
     "ModelAPIRetryConfig",
@@ -74,6 +74,8 @@ __all__ = [
     "StepSource",
     "StepTarget",
     "StepStatus",
+    "BudgetConfig",
+    "StopReason",
     "Step",
     "HookResult",
     "QuestionResponse",
@@ -148,8 +150,8 @@ class TemplatedSystemInstructions(pydantic.BaseModel):
 SystemInstructions = CustomSystemInstructions | TemplatedSystemInstructions
 
 
-class AgentMode(str, enum.Enum):
-  """Operational execution mode for an agent.
+class AgentBehavior(str, enum.Enum):
+  """Operational execution behavior for an agent.
 
   Attributes:
     AUTONOMOUS: Non-interactive, automated execution. The agent must accomplish
@@ -167,18 +169,22 @@ class SubagentCapabilities(pydantic.BaseModel):
   """Capabilities configuration for subagents.
 
   Attributes:
-    agent_mode: Operational execution mode for the subagent. In particular,
-      AgentMode.AUTONOMOUS incentivizes the agent to solve the task on their
-      own from start to finish while AgentMode.INTERACTIVE makes the agent work
-      collaboratively with a human, asking for clarifications and keeping
-      them in the loop if needed. Defaults to AgentMode.AUTONOMOUS.
+    agent_behavior: Operational execution behavior for the subagent. In
+      particular, AgentBehavior.AUTONOMOUS incentivizes the agent to solve the
+      task on their own from start to finish while AgentBehavior.INTERACTIVE
+      makes the agent work collaboratively with a human, asking for
+      clarifications and keeping them in the loop if needed. Defaults to
+      AgentBehavior.AUTONOMOUS.
+    allowed_subagents: Explicit allowlist of subagent names this subagent may
+      directly invoke. When None, all registered subagents are discoverable.
     enabled_tools: Explicit allowlist of builtin tools to enable. Mutually
       exclusive with disabled_tools. When None, the harness defaults are used.
     disabled_tools: Explicit denylist of builtin tools to disable. Mutually
       exclusive with enabled_tools. When None, the harness defaults are used.
   """
 
-  agent_mode: AgentMode = AgentMode.AUTONOMOUS
+  agent_behavior: AgentBehavior = AgentBehavior.AUTONOMOUS
+  allowed_subagents: list[str] | None = None
   enabled_tools: list[BuiltinTools] | None = None
   disabled_tools: list[BuiltinTools] | None = None
 
@@ -191,16 +197,32 @@ class SubagentCapabilities(pydantic.BaseModel):
     return self
 
   @pydantic.model_validator(mode="after")
+  def _validate_subagents_and_tools(self) -> "SubagentCapabilities":
+    subagent_disabled = (
+        self.disabled_tools is not None
+        and BuiltinTools.START_SUBAGENT in self.disabled_tools
+    ) or (
+        self.enabled_tools is not None
+        and BuiltinTools.START_SUBAGENT not in self.enabled_tools
+    )
+    if subagent_disabled and self.allowed_subagents is not None:
+      raise ValueError(
+          "allowed_subagents cannot be specified when START_SUBAGENT is"
+          " disabled or omitted from enabled_tools."
+      )
+    return self
+
+  @pydantic.model_validator(mode="after")
   def _validate_interactive_tools(self) -> "SubagentCapabilities":
     if (
         self.enabled_tools is not None
         and BuiltinTools.ASK_QUESTION in self.enabled_tools
-        and self.agent_mode != AgentMode.INTERACTIVE
+        and self.agent_behavior != AgentBehavior.INTERACTIVE
     ):
       logging.warning(
-          "BuiltinTools.ASK_QUESTION is enabled on subagent, but agent_mode is"
-          " not INTERACTIVE. Set"
-          " SubagentCapabilities(agent_mode=AgentMode.INTERACTIVE) if"
+          "BuiltinTools.ASK_QUESTION is enabled on subagent, but"
+          " agent_behavior is not INTERACTIVE. Set"
+          " SubagentCapabilities(agent_behavior=AgentBehavior.INTERACTIVE) if"
           " interactive question-and-answer behavior is desired."
       )
     return self
@@ -363,11 +385,11 @@ class CapabilitiesConfig(pydantic.BaseModel):
 
   Attributes:
     enable_subagents: Whether the agent can spawn and delegate to sub-agents.
-    agent_mode: Operational execution mode for the agent. In particular,
-      AgentMode.AUTONOMOUS incentivizes the agent to solve the task on their
-      own from start to finish while AgentMode.INTERACTIVE makes the agent work
-      collaboratively with a human, asking for clarifications and keeping
-      them in the loop if needed. Defaults to AgentMode.AUTONOMOUS.
+    agent_behavior: Operational execution behavior for the agent. In particular,
+      AgentBehavior.AUTONOMOUS incentivizes the agent to solve the task on their
+      own from start to finish while AgentBehavior.INTERACTIVE makes the agent
+      work collaboratively with a human, asking for clarifications and keeping
+      them in the loop if needed. Defaults to AgentBehavior.AUTONOMOUS.
     enabled_tools: Explicit allowlist of builtin tools to enable. Mutually
       exclusive with disabled_tools. When None, the harness defaults are used
       (all tools enabled). Disabled tools are removed from the model's context,
@@ -379,14 +401,20 @@ class CapabilitiesConfig(pydantic.BaseModel):
     compaction_threshold: Token count after which the context window may be
       compacted. When None, the backend's default is used.
     finish_tool_schema_json: Optional JSON schema string for the finish tool.
+    max_subagent_depth: Global maximum subagent recursion depth for the session.
+      When None, defaults to 1 (flat single-level delegation).
+    allowed_subagents: Explicit allowlist of subagent names the root agent may
+      directly invoke. When None, all registered subagents are discoverable.
   """
 
   enable_subagents: bool = True
-  agent_mode: AgentMode = AgentMode.AUTONOMOUS
+  agent_behavior: AgentBehavior = AgentBehavior.AUTONOMOUS
   enabled_tools: list[BuiltinTools] | None = None
   disabled_tools: list[BuiltinTools] | None = None
   compaction_threshold: int | None = None
   finish_tool_schema_json: str | None = None
+  max_subagent_depth: int | None = pydantic.Field(default=None, ge=1)
+  allowed_subagents: list[str] | None = None
 
   @pydantic.model_validator(mode="after")
   def _check_mutually_exclusive(self) -> "CapabilitiesConfig":
@@ -397,22 +425,49 @@ class CapabilitiesConfig(pydantic.BaseModel):
     return self
 
   @pydantic.model_validator(mode="after")
+  def _validate_subagents_and_tools(self) -> "CapabilitiesConfig":
+    subagent_disabled = (
+        not self.enable_subagents
+        or (
+            self.disabled_tools is not None
+            and BuiltinTools.START_SUBAGENT in self.disabled_tools
+        )
+        or (
+            self.enabled_tools is not None
+            and BuiltinTools.START_SUBAGENT not in self.enabled_tools
+        )
+    )
+    if subagent_disabled:
+      if self.max_subagent_depth is not None:
+        raise ValueError(
+            "max_subagent_depth cannot be configured when subagents are"
+            " disabled (enable_subagents=False or START_SUBAGENT not enabled)."
+        )
+      if self.allowed_subagents is not None:
+        raise ValueError(
+            "allowed_subagents cannot be specified when subagents are disabled."
+        )
+    return self
+
+  @pydantic.model_validator(mode="after")
   def _validate_interactive_tools(self) -> "CapabilitiesConfig":
     if (
         self.enabled_tools is not None
         and BuiltinTools.ASK_QUESTION in self.enabled_tools
-        and self.agent_mode != AgentMode.INTERACTIVE
+        and self.agent_behavior != AgentBehavior.INTERACTIVE
     ):
       logging.warning(
-          "BuiltinTools.ASK_QUESTION is enabled, but agent_mode is not"
+          "BuiltinTools.ASK_QUESTION is enabled, but agent_behavior is not"
           " INTERACTIVE. Set"
-          " CapabilitiesConfig(agent_mode=AgentMode.INTERACTIVE) if interactive"
-          " question-and-answer behavior is desired."
+          " CapabilitiesConfig(agent_behavior=AgentBehavior.INTERACTIVE) if"
+          " interactive question-and-answer behavior is desired."
       )
     return self
 
 
+_MAX_INT32 = 2**31 - 1  # Maximum value for protobuf int32 wire fields
 _MAX_UINT32 = 2**32 - 1  # Maximum value for protobuf uint32 wire fields
+_MAX_INT64 = 2**63 - 1  # Maximum value for protobuf int64 wire fields
 
 
 class ModelAPIRetryConfig(pydantic.BaseModel):
@@ -742,12 +797,76 @@ class SessionContinuationMode(str, enum.Enum):
   CREATE_ONLY = "create_only"
 
 
+class BudgetConfig(pydantic.BaseModel):
+  """Configuration for session-level budget limits and caps.
+
+  Attributes:
+    max_model_calls: Maximum number of model invocations (reasoning steps /
+      generator calls) permitted across the session.
+    max_tool_calls: Maximum number of tool invocations permitted across the
+      session, regardless of tool source.
+    max_input_tokens: Maximum net uncached input tokens permitted across the
+      session (calculated as prompt tokens minus cached content tokens across
+      all turns).
+    max_output_tokens: Maximum output tokens permitted across the session
+      (candidates + thoughts).
+    max_total_tokens: Maximum total net tokens permitted across the session
+      (calculated as net uncached input tokens + output tokens across all
+      turns).
+  """
+
+  max_model_calls: int | None = pydantic.Field(
+      default=None, ge=1, le=_MAX_INT32
+  )
+  max_tool_calls: int | None = pydantic.Field(default=None, ge=1, le=_MAX_INT32)
+  max_input_tokens: int | None = pydantic.Field(
+      default=None, ge=1, le=_MAX_INT64
+  )
+  max_output_tokens: int | None = pydantic.Field(
+      default=None, ge=1, le=_MAX_INT64
+  )
+  max_total_tokens: int | None = pydantic.Field(
+      default=None, ge=1, le=_MAX_INT64
+  )
+
+
+class StopReason(str, enum.Enum):
+  """Reason why the execution turn stopped.
+
+  Attributes:
+    UNSPECIFIED: Default value; normal completion or unspecified stop reason.
+    MAX_MODEL_CALLS_EXCEEDED: Turn halted because session exceeded configured
+      max_model_calls.
+    MAX_TOOL_CALLS_EXCEEDED: Turn halted because session exceeded
+      max_tool_calls.
+    MAX_INPUT_TOKENS_EXCEEDED: Turn halted because session exceeded
+      max_input_tokens.
+    MAX_OUTPUT_TOKENS_EXCEEDED: Turn halted because session exceeded
+      max_output_tokens.
+    MAX_TOTAL_TOKENS_EXCEEDED: Turn halted because session exceeded
+      max_total_tokens.
+    QUOTA_EXHAUSTED: Turn halted because backend model API quota was exhausted.
+  """
+
+  UNSPECIFIED = "UNSPECIFIED"
+  MAX_MODEL_CALLS_EXCEEDED = "MAX_MODEL_CALLS_EXCEEDED"
+  MAX_TOOL_CALLS_EXCEEDED = "MAX_TOOL_CALLS_EXCEEDED"
+  MAX_INPUT_TOKENS_EXCEEDED = "MAX_INPUT_TOKENS_EXCEEDED"
+  MAX_OUTPUT_TOKENS_EXCEEDED = "MAX_OUTPUT_TOKENS_EXCEEDED"
+  MAX_TOTAL_TOKENS_EXCEEDED = "MAX_TOTAL_TOKENS_EXCEEDED"
+  QUOTA_EXHAUSTED = "QUOTA_EXHAUSTED"
+
+
 class Step(pydantic.BaseModel):
   """Structure representing one action in the agent trajectory.
 
   Attributes:
     id: Unique string identifier for the step.
     step_index: Integer index of the step in the trajectory.
+    trajectory_id: Unique identifier of the trajectory owning this step.
+    parent_trajectory_id: ID of the parent trajectory that spawned this step, or
+      empty string for the root agent conversation.
+    depth: Nesting depth of this step (0 for root conversation).
     type: The high-level type of the step.
     source: The source that generated the step.
     target: The target interacting with this step.
@@ -769,6 +888,9 @@ class Step(pydantic.BaseModel):
 
   id: str = ""
   step_index: int = 0
+  trajectory_id: str = ""
+  parent_trajectory_id: str = ""
+  depth: int = 0
   type: StepType = StepType.UNKNOWN
   source: StepSource = StepSource.UNKNOWN
   target: StepTarget = StepTarget.UNKNOWN
@@ -1109,6 +1231,11 @@ class ChatResponse:
   def usage_metadata(self) -> UsageMetadata | None:
     """Accumulated token usage across all model invocations in this turn."""
     return self._conversation.last_turn_usage
+
+  @property
+  def stop_reason(self) -> StopReason:
+    """The reason why the execution turn stopped."""
+    return self._conversation._last_turn_stop_reason  # pylint: disable=protected-access
 
   async def cancel(self) -> None:
     """Cancels the active execution turn and halts generation.

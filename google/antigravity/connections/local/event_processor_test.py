@@ -23,6 +23,7 @@ from google.protobuf import json_format
 from google.antigravity.proto import localharness_pb2
 from google.antigravity import types
 from google.antigravity.connections.local import event_processor
+from google.antigravity.connections.local import types as local_types
 
 
 MAIN_TRAJECTORY_ID = "cbb3a5135a32671ae8152a25a857c4bc"
@@ -84,6 +85,50 @@ class EventProcessorHelperTest(absltest.TestCase):
     self.assertIsNone(meta.thoughts_token_count)
     self.assertIsNone(meta.total_token_count)
     self.assertIsNone(meta.service_tier)
+
+  def test_parse_stop_reason(self):
+    self.assertEqual(
+        event_processor._parse_stop_reason(  # pylint: disable=protected-access
+            localharness_pb2.TrajectoryStateUpdate.STOP_REASON_MAX_MODEL_CALLS_EXCEEDED
+        ),
+        types.StopReason.MAX_MODEL_CALLS_EXCEEDED,
+    )
+    self.assertEqual(
+        event_processor._parse_stop_reason(  # pylint: disable=protected-access
+            localharness_pb2.TrajectoryStateUpdate.STOP_REASON_MAX_TOOL_CALLS_EXCEEDED
+        ),
+        types.StopReason.MAX_TOOL_CALLS_EXCEEDED,
+    )
+    self.assertEqual(
+        event_processor._parse_stop_reason(  # pylint: disable=protected-access
+            localharness_pb2.TrajectoryStateUpdate.STOP_REASON_MAX_INPUT_TOKENS_EXCEEDED
+        ),
+        types.StopReason.MAX_INPUT_TOKENS_EXCEEDED,
+    )
+    self.assertEqual(
+        event_processor._parse_stop_reason(  # pylint: disable=protected-access
+            localharness_pb2.TrajectoryStateUpdate.STOP_REASON_MAX_OUTPUT_TOKENS_EXCEEDED
+        ),
+        types.StopReason.MAX_OUTPUT_TOKENS_EXCEEDED,
+    )
+    self.assertEqual(
+        event_processor._parse_stop_reason(  # pylint: disable=protected-access
+            localharness_pb2.TrajectoryStateUpdate.STOP_REASON_MAX_TOTAL_TOKENS_EXCEEDED
+        ),
+        types.StopReason.MAX_TOTAL_TOKENS_EXCEEDED,
+    )
+    self.assertEqual(
+        event_processor._parse_stop_reason(  # pylint: disable=protected-access
+            localharness_pb2.TrajectoryStateUpdate.STOP_REASON_QUOTA_EXHAUSTED
+        ),
+        types.StopReason.QUOTA_EXHAUSTED,
+    )
+    self.assertEqual(
+        event_processor._parse_stop_reason(  # pylint: disable=protected-access
+            localharness_pb2.TrajectoryStateUpdate.STOP_REASON_UNSPECIFIED
+        ),
+        types.StopReason.UNSPECIFIED,
+    )
 
 
 class LocalConnectionStepFromDictTest(absltest.TestCase):
@@ -186,6 +231,50 @@ class LocalConnectionStepFromDictTest(absltest.TestCase):
     self.assertEqual(step.tool_calls[0].args, {"file_path": "/foo"})
     self.assertEqual(step.tool_calls[0].canonical_path, "/foo")
 
+  def test_step_type_tool_call_with_generate_image_normalizes_output_path(self):
+    """Verifies that a step with generate_image built-in tool normalizes output_path."""
+    step = event_processor.LocalConnectionStep.from_dict({
+        "source": "SOURCE_MODEL",
+        "state": "STATE_DONE",
+        "generate_image": {
+            "prompt": "A sunset",
+            "image_name": "sunset",
+            "aspect_ratio": "16:9",
+            "output_path": "file:///tmp/sunset_123.png",
+        },
+    })
+    self.assertEqual(step.type, types.StepType.TOOL_CALL)
+    self.assertLen(step.tool_calls, 1)
+    self.assertEqual(step.tool_calls[0].name, "generate_image")
+    self.assertEqual(
+        step.tool_calls[0].args,
+        {
+            "prompt": "A sunset",
+            "image_name": "sunset",
+            "aspect_ratio": "16:9",
+            "output_path": "/tmp/sunset_123.png",
+        },
+    )
+    self.assertEqual(step.tool_calls[0].canonical_path, "/tmp/sunset_123.png")
+
+  def test_generate_image_result_model_output_path(self):
+    """Verifies GenerateImageResult field and string output formatting."""
+    res = local_types.GenerateImageResult(
+        image_name="sunset",
+        aspect_ratio="16:9",
+        output_path="/tmp/sunset_123.png",
+    )
+    self.assertEqual(res.image_name, "sunset")
+    self.assertEqual(res.aspect_ratio, "16:9")
+    self.assertEqual(res.output_path, "/tmp/sunset_123.png")
+    self.assertEqual(str(res), "/tmp/sunset_123.png")
+
+  def test_generate_image_result_model_fallback_str(self):
+    res = local_types.GenerateImageResult(
+        image_name="sunset", aspect_ratio="16:9"
+    )
+    self.assertEqual(str(res), "sunset")
+
   def test_structured_output_extracted_from_finish(self):
     """Verifies that structured output is extracted when finish payload is present.
 
@@ -266,6 +355,23 @@ class LocalConnectionStepFromDictTest(absltest.TestCase):
         step.tool_calls[0].canonical_path,
         "/cns/el-d/home/user/workspace/kittens.md",
     )
+
+  def test_step_from_dict_parses_parent_trajectory_id_and_depth(self):
+    """Verifies that from_dict parses parent_trajectory_id and depth."""
+    step = event_processor.LocalConnectionStep.from_dict({
+        "step_index": 5,
+        "trajectory_id": "child_traj_123",
+        "parent_trajectory_id": "parent_traj_456",
+        "depth": 2,
+        "state": "STATE_DONE",
+        "source": "SOURCE_MODEL",
+        "text": "Task finished",
+    })
+    self.assertEqual(step.step_index, 5)
+    self.assertEqual(step.trajectory_id, "child_traj_123")
+    self.assertEqual(step.parent_trajectory_id, "parent_traj_456")
+    self.assertEqual(step.depth, 2)
+    self.assertEqual(step.content, "Task finished")
 
   def test_step_type_tool_call_with_custom_tool(self):
     """Verifies that a step with a custom_tool field is typed TOOL_CALL and parses details."""
@@ -403,6 +509,32 @@ class LocalHarnessEventProcessorTest(unittest.IsolatedAsyncioTestCase):
     await processor.process_event(event)
 
     self.assertFalse(processor.is_idle.is_set())
+
+  async def test_process_event_updates_stop_reason(self):
+    processor = event_processor.LocalHarnessEventProcessor(
+        send_input_event_fn=mock.AsyncMock()
+    )
+    processor.main_trajectory_id = MAIN_TRAJECTORY_ID
+
+    event = localharness_pb2.OutputEvent(
+        trajectory_state_update=localharness_pb2.TrajectoryStateUpdate(
+            state=localharness_pb2.TrajectoryStateUpdate.State.STATE_FULLY_IDLE,
+            trajectory_id=MAIN_TRAJECTORY_ID,
+            stop_reason=localharness_pb2.TrajectoryStateUpdate.STOP_REASON_QUOTA_EXHAUSTED,
+        )
+    )
+    await processor.process_event(event)
+
+    self.assertEqual(
+        processor._last_turn_stop_reason,
+        types.StopReason.QUOTA_EXHAUSTED,
+    )
+
+    processor.reset_for_turn()
+    self.assertEqual(
+        processor._last_turn_stop_reason,
+        types.StopReason.UNSPECIFIED,
+    )
 
   async def test_main_agent_idle_sets_idle_state(self):
     """Verifies that when the main agent is IDLE, the connection is idle."""

@@ -10,7 +10,7 @@ Google Antigravity SDK agents.
 
 ### Default Model
 
-Google Antigravity SDK's default model is `gemini-3.6-flash`.
+Google Antigravity SDK's default model is `gemini-3.7-flash`.
 
 ### Default Image Generation Model
 
@@ -43,41 +43,78 @@ Here are small code snippets demonstrating advanced configurations using
 from google.antigravity import Agent, LocalAgentConfig
 
 config = LocalAgentConfig(
-    model="gemini-3.6-flash",
+    model="gemini-3.7-flash",
 )
 async with Agent(config=config) as agent:
     # Use the agent
     pass
 ```
 
-### Agent Execution Mode (`agent_mode`)
+### Agent Execution Behavior (`agent_behavior`)
 
-The SDK supports two operational execution modes via `types.AgentMode`:
+The SDK supports two operational execution behaviors via `types.AgentBehavior`:
 
--   `AgentMode.AUTONOMOUS` (**default**): Non-interactive, automated execution.
+-   `AgentBehavior.AUTONOMOUS` (**default**): Non-interactive, automated execution.
     The agent is incentivized to accomplish the task on its own from start to
     finish.
--   `AgentMode.INTERACTIVE`: Collaborative execution with a human. The agent
+-   `AgentBehavior.INTERACTIVE`: Collaborative execution with a human. The agent
     asks clarifying questions (via `BuiltinTools.ASK_QUESTION`), enables
     interactive planning, and keeps the user in the loop.
 
-Configure `agent_mode` via `CapabilitiesConfig`:
+Configure `agent_behavior` via `CapabilitiesConfig`:
 
 ```python
 from google.antigravity import Agent, LocalAgentConfig, types
 
 config = LocalAgentConfig(
     capabilities=types.CapabilitiesConfig(
-        agent_mode=types.AgentMode.INTERACTIVE,
+        agent_behavior=types.AgentBehavior.INTERACTIVE,
     ),
 )
 async with Agent(config=config) as agent:
-    # Agent will operate in interactive mode, asking questions if needed
+    # Agent will operate with interactive behavior, asking questions if needed
     pass
 ```
 
 > [!NOTE]
-> `agent_mode` defaults to `AgentMode.AUTONOMOUS`. If you enable interactive tools such as `BuiltinTools.ASK_QUESTION` without setting `agent_mode=AgentMode.INTERACTIVE`, a validation warning will be logged.
+> `agent_behavior` defaults to `AgentBehavior.AUTONOMOUS`. If you enable interactive tools such as `BuiltinTools.ASK_QUESTION` without setting `agent_behavior=AgentBehavior.INTERACTIVE`, a validation warning will be logged.
+
+### Nested Subagents & Depth Controls (`max_subagent_depth`, `allowed_subagents`)
+
+The SDK supports multi-tier hierarchical subagent execution:
+
+-   `max_subagent_depth`: Configures the session-wide subagent recursion depth
+    ceiling on `CapabilitiesConfig` (root conversation is depth 0).
+-   `allowed_subagents`: An explicit allowlist of subagent names that the root
+    agent (on `CapabilitiesConfig`) or a specific subagent (on
+    `SubagentCapabilities`) is permitted to invoke.
+
+```python
+from google.antigravity import Agent, LocalAgentConfig, types
+
+# Configure a subagent that can invoke other subagents
+researcher = types.SubagentConfig(
+    name="researcher",
+    description="Research agent with subagent delegation capability",
+    capabilities=types.SubagentCapabilities(
+        enabled_tools=[
+            types.BuiltinTools.VIEW_FILE,
+            types.BuiltinTools.START_SUBAGENT,
+        ],
+        allowed_subagents=["fact_checker"],
+    ),
+)
+
+# Root agent configured with a max depth of 3
+config = LocalAgentConfig(
+    subagents=[researcher],
+    capabilities=types.CapabilitiesConfig(
+        enable_subagents=True,
+        max_subagent_depth=3,
+        allowed_subagents=["researcher"],
+    ),
+)
+```
 
 ### Gemini Enterprise Agent Platform (formerly Vertex AI) Configuration
 
@@ -87,19 +124,28 @@ AI) instead of Gemini Developer API:
 ```python
 from google.antigravity import Agent, LocalAgentConfig
 
-config = LocalAgentConfig(
+# 1. Express Mode (API Key) - authenticates against aiplatform.googleapis.com
+express_config = LocalAgentConfig(
+    vertex=True,
+    api_key="your-express-api-key",
+)
+
+# 2. Standard Mode (ADC) - regional routing with project and location
+standard_config = LocalAgentConfig(
     vertex=True,
     project="your-gcp-project",
     location="us-central1",
 )
-async with Agent(config=config) as agent:
-    # Use the agent with Gemini Enterprise Agent Platform
-    pass
+
+async with Agent(config=express_config) as agent:
+  # Use the agent with Gemini Enterprise Agent Platform
+  pass
 ```
 
-Note: Gemini Enterprise Agent Platform authentication relies on Application
-Default Credentials (ADC). Ensure you have run `gcloud auth application-default
-login` in your environment.
+Note: In Standard Mode, Gemini Enterprise Agent Platform authentication relies on
+Application Default Credentials (ADC); ensure you have run
+`gcloud auth application-default login` in your environment. In Express Mode,
+only the `api_key` and `vertex=True` are required.
 
 ### Prioritized Inference (`service_tier="priority"`)
 
@@ -229,3 +275,20 @@ config = LocalAgentConfig(
 )
 ```
 
+### Session Budget Controls & Stop Reasons
+
+You can configure session operational limits (`max_model_calls`, `max_tool_calls`) and proactive token budget controls (`max_input_tokens`, `max_output_tokens`, `max_total_tokens`) using `BudgetConfig`:
+
+```python
+from google.antigravity import Agent, LocalAgentConfig, types
+
+config = LocalAgentConfig(
+    budget_config=types.BudgetConfig(
+        max_model_calls=10,
+        max_tool_calls=20,
+        max_total_tokens=100_000,
+    ),
+)
+```
+
+For a full guide and multi-turn stop reason handling examples, see [budget_limits.md](../../examples/getting_started/budget_limits.md).

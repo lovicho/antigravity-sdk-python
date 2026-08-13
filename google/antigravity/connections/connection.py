@@ -73,6 +73,7 @@ class AgentConfig(abc.ABC, pydantic.BaseModel):
   # Optional retry configuration. Supported by Local, RemoteWebsocket, and JPv2
   # (AntigravityProdActor) connection strategies; ignored by deprecated JPv1.
   retry_config: types.RetryConfig | None = None
+  budget_config: types.BudgetConfig | None = None
 
   @pydantic.field_validator("debug_config", mode="before")
   @classmethod
@@ -245,6 +246,15 @@ class Connection(abc.ABC):
     an empty dictionary (no tracking).
     """
     return {}
+
+  @property
+  def _last_turn_stop_reason(self) -> types.StopReason:
+    """Returns the stop reason of the most recent turn.
+
+    Subclasses override to provide live stop reason data. Default returns
+    UNSPECIFIED.
+    """
+    return types.StopReason.UNSPECIFIED
 
   @abc.abstractmethod
   async def send(self, prompt: types.Content | None, **kwargs: Any) -> None:

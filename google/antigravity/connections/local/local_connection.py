@@ -73,18 +73,22 @@ def to_proto_session_continuation_mode(
   return localharness_pb2.HarnessConfig.SESSION_CONTINUATION_MODE_UNSPECIFIED
 
 
-_AGENT_MODE_MAP = {
-    types.AgentMode.AUTONOMOUS: localharness_pb2.AGENT_MODE_AUTONOMOUS,
-    types.AgentMode.INTERACTIVE: localharness_pb2.AGENT_MODE_INTERACTIVE,
+_AGENT_BEHAVIOR_MAP = {
+    types.AgentBehavior.AUTONOMOUS: (
+        localharness_pb2.AGENT_BEHAVIOR_AUTONOMOUS
+    ),
+    types.AgentBehavior.INTERACTIVE: (
+        localharness_pb2.AGENT_BEHAVIOR_INTERACTIVE
+    ),
 }
 
 
-def to_proto_agent_mode(
-    mode: types.AgentMode | None,
-) -> localharness_pb2.AgentMode:
-  if mode is not None and mode in _AGENT_MODE_MAP:
-    return _AGENT_MODE_MAP[mode]
-  return localharness_pb2.AGENT_MODE_AUTONOMOUS
+def to_proto_agent_behavior(
+    behavior: types.AgentBehavior | None,
+) -> localharness_pb2.AgentBehavior:
+  if behavior is not None and behavior in _AGENT_BEHAVIOR_MAP:
+    return _AGENT_BEHAVIOR_MAP[behavior]
+  return localharness_pb2.AGENT_BEHAVIOR_AUTONOMOUS
 
 
 def to_proto_model_type(
@@ -140,6 +144,18 @@ def build_retry_config_proto(
   return proto
 
 
+def build_budget_config_proto(
+    config: types.BudgetConfig | None,
+) -> localharness_pb2.BudgetConfig | None:
+  """Builds a BudgetConfig proto from a BudgetConfig model."""
+  if not config:
+    return None
+  data = config.model_dump(exclude_none=True)
+  if not data:
+    return None
+  return localharness_pb2.BudgetConfig(**data)
+
+
 def build_models_proto(
     models: list[types.ModelTarget],
 ) -> list[localharness_pb2.ModelConfig]:
@@ -169,6 +185,7 @@ def build_models_proto(
           http_headers=m.endpoint.http_headers or {},
           project=m.endpoint.project or "",
           location=m.endpoint.location or "",
+          api_key=m.endpoint.api_key or "",
       )
       if m.endpoint.options and m.endpoint.options.model_dump(
           exclude_none=True
@@ -326,6 +343,11 @@ class LocalConnection(connection.Connection):
     """Returns per-trajectory cumulative token usage from the backend."""
     return self._processor.trajectory_usages
 
+  @property
+  def _last_turn_stop_reason(self) -> types.StopReason:
+    """Returns the stop reason of the most recent turn from the backend."""
+    return self._processor._last_turn_stop_reason  # pylint: disable=protected-access
+
   async def send(self, prompt: types.Content | None, **kwargs: Any) -> None:
     """Sends a prompt to the agent.
 
@@ -337,20 +359,17 @@ class LocalConnection(connection.Connection):
     self._processor.reset_for_turn()
 
     if prompt is None:
-      event = localharness_pb2.InputEvent(user_input="")
-    elif isinstance(prompt, str):
-      event = localharness_pb2.InputEvent(user_input=prompt)
+      content_list = [""]
+    elif isinstance(prompt, collections.abc.Sequence) and not isinstance(
+        prompt, (str, bytes)
+    ):
+      content_list = prompt
     else:
-      if isinstance(prompt, collections.abc.Sequence) and not isinstance(
-          prompt, (str, bytes)
-      ):
-        content_list = prompt
-      else:
-        content_list = [prompt]
-      user_input_pb = localharness_pb2.UserInput(
-          parts=[to_proto_input_content(c) for c in content_list]
-      )
-      event = localharness_pb2.InputEvent(complex_user_input=user_input_pb)
+      content_list = [prompt]
+    user_input_pb = localharness_pb2.UserInput(
+        parts=[to_proto_input_content(c) for c in content_list]
+    )
+    event = localharness_pb2.InputEvent(user_input=user_input_pb)
 
     await self._send_input_event(event)
 
@@ -771,6 +790,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
       subagents: list[types.SubagentConfig] | None = None,
       debug_config: connection.DebugConfig | None = None,
       retry_config: types.RetryConfig | None = None,
+      budget_config: types.BudgetConfig | None = None,
       policies: list[policy.Policy] | None = None,
   ):
     """Initializes the instance.
@@ -792,6 +812,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
       subagents: Optional list of static subagent configurations.
       debug_config: Optional debug configuration for the connection.
       retry_config: Optional retry configuration for model API and outputs.
+      budget_config: Optional session budget configuration.
       policies: Optional list of policy rules for the Go evaluator.
     """
     self._binary_path = _get_default_binary_path()
@@ -804,6 +825,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
     self._env = env
     self._debug_config = debug_config
     self._retry_config = retry_config
+    self._budget_config = budget_config
     self._policies = policies or []
     # Maps rule_id -> Policy for dynamic rules evaluated during tool execution.
     self._dynamic_policy_map: dict[str, policy.Policy] = {}
@@ -869,14 +891,27 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
   ) -> localharness_pb2.HarnessSideTools:
     active_tools = self._resolve_active_tools(cfg, is_subagent=is_subagent)
     subagent_enabled = False
-    if not is_subagent:
-      subagent_enabled = (
-          getattr(cfg, "enable_subagents", True)
-          and types.BuiltinTools.START_SUBAGENT in active_tools
+    max_depth = None
+    allowed_subagents = []
+
+    if cfg is not None:
+      subagent_enabled = getattr(cfg, "enable_subagents", True) and (
+          types.BuiltinTools.START_SUBAGENT in active_tools
       )
+      max_depth = getattr(cfg, "max_subagent_depth", None)
+      allowed_subagents = cfg.allowed_subagents or []
+    elif not is_subagent:
+      subagent_enabled = types.BuiltinTools.START_SUBAGENT in active_tools
+
+    subagents_proto = localharness_pb2.SubagentsConfig(
+        enabled=subagent_enabled,
+        allowed_subagents=allowed_subagents,
+    )
+    if max_depth is not None:
+      subagents_proto.max_nesting_depth = max_depth
 
     return localharness_pb2.HarnessSideTools(
-        subagents=localharness_pb2.SubagentsConfig(enabled=subagent_enabled),
+        subagents=subagents_proto,
         find=localharness_pb2.FindToolConfig(
             enabled=types.BuiltinTools.FIND_FILE in active_tools
         ),
@@ -923,13 +958,6 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
           enabled_tools=types.BuiltinTools.read_only(),
       )
 
-      active_tools = self._resolve_active_tools(capabilities, is_subagent=True)
-      if types.BuiltinTools.START_SUBAGENT in active_tools:
-        logging.warning(
-            "Nested subagents are currently not supported. Subagent tools will"
-            " be disabled."
-        )
-
       resolved_subagent_tools = []
       for tool in subagent.tools or []:
         if isinstance(tool, str):
@@ -962,7 +990,9 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
                   capabilities, is_subagent=True
               ),
               tools=resolved_subagent_tools,
-              agent_mode=to_proto_agent_mode(capabilities.agent_mode),
+              agent_behavior=to_proto_agent_behavior(
+                  capabilities.agent_behavior
+              ),
           )
       )
     return custom_agents_protos
@@ -1031,12 +1061,19 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
         mcp_servers=mcp_server_protos,
         enabled_hooks=enabled_hooks,
         custom_subagents=custom_agents_protos,
-        agent_mode=to_proto_agent_mode(self._capabilities_config.agent_mode),
+        agent_behavior=to_proto_agent_behavior(
+            self._capabilities_config.agent_behavior
+        ),
     )
     if self._retry_config:
       retry_proto = build_retry_config_proto(self._retry_config)
       if retry_proto:
         harness_config.retry_config.CopyFrom(retry_proto)
+
+    if self._budget_config:
+      budget_proto = build_budget_config_proto(self._budget_config)
+      if budget_proto:
+        harness_config.budget_config.CopyFrom(budget_proto)
 
     if self._policies:
       policy_config, self._dynamic_policy_map = policy._to_policy_config_proto(
