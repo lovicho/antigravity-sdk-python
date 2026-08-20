@@ -82,6 +82,16 @@ class ToolCallTest(unittest.TestCase):
     tc = types.ToolCall(id="call_123", name="tool")
     self.assertEqual(tc.id, "call_123")
 
+  def test_step_id_defaults_to_none(self):
+    """Verifies that step_id defaults to None when omitted."""
+    tc = types.ToolCall(name="tool")
+    self.assertIsNone(tc.step_id)
+
+  def test_step_id_explicitly_set(self):
+    """Verifies that step_id can be explicitly set."""
+    tc = types.ToolCall(step_id="traj-1:5", name="tool")
+    self.assertEqual(tc.step_id, "traj-1:5")
+
   def test_extra_fields_ignored(self):
     """Verifies that unknown fields are silently dropped.
 
@@ -155,6 +165,16 @@ class ToolResultTest(unittest.TestCase):
     tr = types.ToolResult(name="tool")
     tr.id = "call_456"
     self.assertEqual(tr.id, "call_456")
+
+  def test_step_id_defaults_to_none(self):
+    """Verifies that step_id defaults to None when omitted."""
+    tr = types.ToolResult(name="tool")
+    self.assertIsNone(tr.step_id)
+
+  def test_step_id_explicitly_set(self):
+    """Verifies that step_id can be explicitly set."""
+    tr = types.ToolResult(step_id="traj-1:3", name="tool", result="ok")
+    self.assertEqual(tr.step_id, "traj-1:3")
 
   def test_extra_fields_ignored(self):
     """Verifies extra='ignore' on ToolResult.
@@ -266,6 +286,15 @@ class HookResultTest(unittest.TestCase):
     hr = types.HookResult(allow=True)
     hr.allow = False
     self.assertFalse(hr.allow)
+
+  def test_modified_args(self):
+    """Verifies construction and default of modified_args on HookResult."""
+    hr_default = types.HookResult()
+    self.assertIsNone(hr_default.modified_args)
+
+    hr = types.HookResult(allow=True, modified_args={"cmd": "echo safe"})
+    self.assertTrue(hr.allow)
+    self.assertEqual(hr.modified_args, {"cmd": "echo safe"})
 
 
 class QuestionResponseTest(unittest.TestCase):
@@ -757,6 +786,39 @@ class CapabilitiesConfigTest(unittest.TestCase):
       types.CapabilitiesConfig(max_subagent_depth=0)
     self.assertIn("greater than or equal to 1", str(cm.exception))
 
+  def test_run_command_config_defaults_and_custom(self):
+    """Verifies RunCommandConfig defaults and custom settings on CapabilitiesConfig."""
+    config_default = types.CapabilitiesConfig()
+    self.assertIsNone(config_default.run_command_config)
+
+    run_cmd_default = types.RunCommandConfig()
+    self.assertFalse(run_cmd_default.enable_daemons)
+    self.assertIsNone(run_cmd_default.timeout_seconds)
+
+    config_custom = types.CapabilitiesConfig(
+        run_command_config=types.RunCommandConfig(
+            enable_daemons=True,
+            timeout_seconds=600.0,
+        )
+    )
+    self.assertIsNotNone(config_custom.run_command_config)
+    self.assertTrue(config_custom.run_command_config.enable_daemons)
+    self.assertEqual(config_custom.run_command_config.timeout_seconds, 600.0)
+
+    subagent_caps = types.SubagentCapabilities(
+        run_command_config=types.RunCommandConfig(timeout_seconds=30.0)
+    )
+    self.assertIsNotNone(subagent_caps.run_command_config)
+    self.assertEqual(subagent_caps.run_command_config.timeout_seconds, 30.0)
+
+  def test_run_command_config_non_positive_timeout_raises(self):
+    """Verifies timeout_seconds <= 0 raises ValidationError."""
+    with self.assertRaises(pydantic.ValidationError):
+      types.RunCommandConfig(timeout_seconds=0)
+
+    with self.assertRaises(pydantic.ValidationError):
+      types.RunCommandConfig(timeout_seconds=-10.0)
+
   def test_subagent_capabilities_allowed_subagents(self):
     """Verifies allowed_subagents on SubagentCapabilities."""
     caps = types.SubagentCapabilities(allowed_subagents=["fact_checker"])
@@ -878,6 +940,7 @@ class ToolExecutionErrorTest(unittest.TestCase):
     self.assertEqual(err.tool_name, "run_command")
     self.assertIsNone(err.server_name)
     self.assertIsNone(err.call_id)
+    self.assertIsNone(err.step_id)
 
   def test_explicit_server_name_and_call_id(self):
     """Verifies construction with explicit server_name and call_id."""
@@ -886,12 +949,14 @@ class ToolExecutionErrorTest(unittest.TestCase):
         tool_name="mcp_tool",
         server_name="mcp_server",
         call_id="call_123",
+        step_id="step_456",
     )
     self.assertIsInstance(err, RuntimeError)
     self.assertEqual(str(err), "query failed")
     self.assertEqual(err.tool_name, "mcp_tool")
     self.assertEqual(err.server_name, "mcp_server")
     self.assertEqual(err.call_id, "call_123")
+    self.assertEqual(err.step_id, "step_456")
 
 
 class ImageTest(unittest.TestCase):

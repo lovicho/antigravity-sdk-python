@@ -1560,7 +1560,9 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
         view_file=localharness_pb2.ViewFileToolConfig(enabled=True),
         subagents=localharness_pb2.SubagentsConfig(enabled=False),
         user_questions=localharness_pb2.UserQuestionsConfig(enabled=False),
-        run_command=localharness_pb2.RunCommandToolConfig(enabled=False),
+        run_command=localharness_pb2.RunCommandToolConfig(
+            enabled=False, enable_daemon_commands=False, max_timeout_ms=0
+        ),
         find=localharness_pb2.FindToolConfig(enabled=False),
         generate_image=localharness_pb2.GenerateImageToolConfig(enabled=False),
         file_edit=localharness_pb2.FileEditToolConfig(enabled=False),
@@ -1574,6 +1576,54 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
     )
 
     self.assertEqual(config.harness_side_tools, expected_harness_side_tools)
+
+  def test_capabilities_config_run_command_custom(self):
+    """Verifies RunCommandConfig maps to RunCommandToolConfig."""
+    strategy_custom = self._make_strategy(
+        capabilities_config=types.CapabilitiesConfig(
+            run_command_config=types.RunCommandConfig(
+                enable_daemons=False,
+                timeout_seconds=60.0,
+            ),
+        )
+    )
+    config_custom = strategy_custom._build_harness_config()
+    self.assertFalse(
+        config_custom.harness_side_tools.run_command.enable_daemon_commands
+    )
+    self.assertEqual(
+        config_custom.harness_side_tools.run_command.max_timeout_ms,
+        60_000,
+    )
+
+    strategy_true = self._make_strategy(
+        capabilities_config=types.CapabilitiesConfig(
+            run_command_config=types.RunCommandConfig(
+                enable_daemons=True,
+                timeout_seconds=None,
+            ),
+        )
+    )
+    config_true = strategy_true._build_harness_config()
+    self.assertTrue(
+        config_true.harness_side_tools.run_command.enable_daemon_commands
+    )
+    self.assertEqual(
+        config_true.harness_side_tools.run_command.max_timeout_ms,
+        0,
+    )
+
+  def test_build_harness_config_defaults_run_command(self):
+    """Verifies run_command defaults when capabilities_config is None or has no RunCommandConfig."""
+    strategy = self._make_strategy(capabilities_config=None)
+    config = strategy._build_harness_config()
+    self.assertFalse(
+        config.harness_side_tools.run_command.enable_daemon_commands
+    )
+    self.assertEqual(
+        config.harness_side_tools.run_command.max_timeout_ms,
+        0,
+    )
 
   def test_capabilities_config_max_subagent_depth_and_allowed_subagents(self):
     """Verifies max_subagent_depth and allowed_subagents map to SubagentsConfig."""
@@ -2396,8 +2446,40 @@ class LocalConnectionStrategyApiKeyTest(unittest.IsolatedAsyncioTestCase):
     self.assertIsNone(ep.location)
     ep.validate_endpoint()
 
+  @mock.patch.dict(
+      "os.environ",
+      {
+          "GOOGLE_CLOUD_PROJECT": "env-project",
+          "GOOGLE_CLOUD_LOCATION": "env-location",
+      },
+      clear=True,
+  )
+  def test_vertex_endpoint_base_url_skips_env_hydration(self):
+    """VertexEndpoint(base_url=...) skips hydrating project and location from env."""
+    ep = types.VertexEndpoint(base_url="http://localhost:8080")
+    self.assertEqual(ep.base_url, "http://localhost:8080")
+    self.assertIsNone(ep.project)
+    self.assertIsNone(ep.location)
+    self.assertIsNone(ep.api_key)
+    ep.validate_endpoint()
+
+  def test_vertex_endpoint_base_url_allows_custom_auth_and_routing(self):
+    """VertexEndpoint allows custom project/location and api_key when base_url is set."""
+    ep = types.VertexEndpoint(
+        base_url="https://gateway.example.com/vertex",
+        project="my-proj",
+        location="us-central1",
+        api_key="gateway-key",
+        http_headers={"Authorization": "Bearer token"},
+    )
+    self.assertEqual(ep.base_url, "https://gateway.example.com/vertex")
+    self.assertEqual(ep.project, "my-proj")
+    self.assertEqual(ep.location, "us-central1")
+    self.assertEqual(ep.api_key, "gateway-key")
+    ep.validate_endpoint()
+
   def test_vertex_endpoint_mutual_exclusivity(self):
-    """VertexEndpoint raises ValueError when both api_key and project/location are set."""
+    """VertexEndpoint raises ValueError when both api_key and project/location are set without base_url."""
     ep_both = types.VertexEndpoint(
         project="my-proj", location="us-central1", api_key="express-key"
     )

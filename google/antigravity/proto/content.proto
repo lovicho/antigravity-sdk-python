@@ -149,6 +149,7 @@ message VideoContent {
     TYPE_WMV = 8;
     TYPE_3GPP = 9;
     TYPE_YT_BEYOND = 10;
+    TYPE_JPEG2000 = 11;
   }
   enum Processing {
     PROCESSING_UNSPECIFIED = 0;
@@ -368,6 +369,14 @@ message GoogleMapsResultContent {
     string widget_context_token = 2;
   }
   repeated .genai.GoogleMapsResultContent.GoogleMapsResult result = 1;
+}
+message FunctionContent {
+  string name = 1;
+  string description = 2;
+  .genai.Value parameters = 3;
+  .genai.Value response = 4;
+  bool defer_loading = 7;
+  string short_description = 8;
 }
 message FunctionResultSubcontent {
   oneof type {

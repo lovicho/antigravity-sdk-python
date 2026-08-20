@@ -58,6 +58,7 @@ __all__ = [
     "SubagentCapabilities",
     "AgentBehavior",
     "BuiltinTools",
+    "RunCommandConfig",
     "CapabilitiesConfig",
     "ModelAPIRetryConfig",
     "ModelOutputRetryConfig",
@@ -165,6 +166,23 @@ class AgentBehavior(str, enum.Enum):
   INTERACTIVE = "interactive"
 
 
+class RunCommandConfig(pydantic.BaseModel):
+  """Configuration for the builtin run_command tool.
+
+  Attributes:
+    enable_daemons: Whether the agent is authorized to start long-running
+      daemon commands (e.g. background dev servers, watchers) using
+      run_command(IsDaemon=True) without blocking session completion. When True,
+      the IsDaemon argument is exposed on the run_command tool schema. Defaults
+      to False.
+    timeout_seconds: Maximum execution duration in seconds for commands.
+      When None, the default timeout (10 minutes) is used. Defaults to None.
+  """
+
+  enable_daemons: bool = False
+  timeout_seconds: float | None = pydantic.Field(default=None, gt=0)
+
+
 class SubagentCapabilities(pydantic.BaseModel):
   """Capabilities configuration for subagents.
 
@@ -181,12 +199,14 @@ class SubagentCapabilities(pydantic.BaseModel):
       exclusive with disabled_tools. When None, the harness defaults are used.
     disabled_tools: Explicit denylist of builtin tools to disable. Mutually
       exclusive with enabled_tools. When None, the harness defaults are used.
+    run_command_config: Optional configuration for the builtin run_command tool.
   """
 
   agent_behavior: AgentBehavior = AgentBehavior.AUTONOMOUS
   allowed_subagents: list[str] | None = None
   enabled_tools: list[BuiltinTools] | None = None
   disabled_tools: list[BuiltinTools] | None = None
+  run_command_config: RunCommandConfig | None = None
 
   @pydantic.model_validator(mode="after")
   def _check_mutually_exclusive(self) -> "SubagentCapabilities":
@@ -405,6 +425,7 @@ class CapabilitiesConfig(pydantic.BaseModel):
       When None, defaults to 1 (flat single-level delegation).
     allowed_subagents: Explicit allowlist of subagent names the root agent may
       directly invoke. When None, all registered subagents are discoverable.
+    run_command_config: Optional configuration for the builtin run_command tool.
   """
 
   enable_subagents: bool = True
@@ -415,6 +436,7 @@ class CapabilitiesConfig(pydantic.BaseModel):
   finish_tool_schema_json: str | None = None
   max_subagent_depth: int | None = pydantic.Field(default=None, ge=1)
   allowed_subagents: list[str] | None = None
+  run_command_config: RunCommandConfig | None = None
 
   @pydantic.model_validator(mode="after")
   def _check_mutually_exclusive(self) -> "CapabilitiesConfig":
@@ -621,6 +643,8 @@ class ToolCall(pydantic.BaseModel):
 
   Attributes:
     id: Optional unique identifier for the call, often assigned by the backend.
+    step_id: Optional identifier correlating this call with its step in the
+      trajectory.
     name: Tool identifier. Use a BuiltinTools member for Connection-provided
       tools, or an arbitrary string for custom host-side tools.
     args: Keyword arguments for the tool, as a JSON-serializable dict.
@@ -632,6 +656,7 @@ class ToolCall(pydantic.BaseModel):
   name: BuiltinTools | str
   args: dict[str, Any] = pydantic.Field(default_factory=dict)
   id: str | None = None
+  step_id: str | None = None
   canonical_path: str | None = None
   server_name: str | None = None
 
@@ -641,6 +666,7 @@ class ToolResult(pydantic.BaseModel):
 
   Attributes:
     id: Optional identifier correlating this result with a ToolCall.id.
+    step_id: Optional step identifier correlating this result with a step.
     name: The name of the tool that was executed. A BuiltinTools member for
       Connection-provided tools, or a string for custom host-side tools.
     result: The tool's return value. Can be any JSON-serializable value.
@@ -655,6 +681,7 @@ class ToolResult(pydantic.BaseModel):
 
   name: BuiltinTools | str
   id: str | None = None
+  step_id: str | None = None
   result: Any = None
   error: str | None = None
   exception: Exception | None = pydantic.Field(default=None, exclude=True)
@@ -917,12 +944,16 @@ class HookResult(pydantic.BaseModel):
   Attributes:
     allow: Whether execution should proceed.
     message: Optional explanation or response message.
+    modified_args: Optional dictionary of modified tool arguments to
+      shallow-merge into the existing arguments dictionary (overwriting
+      specified keys) before execution.
   """
 
   model_config = pydantic.ConfigDict(extra="ignore")
 
   allow: bool = True
   message: str = ""
+  modified_args: dict[str, Any] | None = None
 
 
 class QuestionResponse(pydantic.BaseModel):
@@ -1017,6 +1048,7 @@ class ToolExecutionError(RuntimeError):
   tool_name: str
   server_name: str | None
   call_id: str | None
+  step_id: str | None
 
   def __init__(
       self,
@@ -1024,11 +1056,13 @@ class ToolExecutionError(RuntimeError):
       tool_name: str,
       server_name: str | None = None,
       call_id: str | None = None,
+      step_id: str | None = None,
   ):
     super().__init__(message)
     self.tool_name = tool_name
     self.server_name = server_name
     self.call_id = call_id
+    self.step_id = step_id
 
 
 class AntigravityValidationError(Exception):

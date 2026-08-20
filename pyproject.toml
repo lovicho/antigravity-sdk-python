@@ -18,7 +18,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "google-antigravity"
-version = "0.1.12"
+version = "0.1.13"
 description = "Google Antigravity SDK for building AI agents"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -37,11 +37,11 @@ classifiers = [
 dependencies = [
     "absl-py",
     "google-genai>=1.0",
-    "mcp>=1.0",
+    "mcp>=1.0,<2.0",
     "pydantic>=2.0",
     "uvicorn>=0.46",
     "websockets>=12.0",
-    "protobuf>=4.25",
+    "protobuf>=7.35",
 ]
 
 [project.optional-dependencies]

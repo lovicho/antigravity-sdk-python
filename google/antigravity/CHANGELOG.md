@@ -7,6 +7,55 @@ All notable changes to the Google Antigravity Python SDK will be documented in t
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.1.13] - 2026-08-18
+
+This release introduces pre-tool argument modification capabilities in lifecycle hooks, adds native support for synchronous hook functions, and establishes structured command execution configuration with configurable execution timeouts. It also improves tool execution observability with step correlation IDs, and enhances connection resilience during client disconnects.
+
+### 🌟 Key Highlights
+- **Pre-Tool Hook Argument Modification**: Pre-tool lifecycle hooks can now sanitize, transform, or override tool input arguments before tool execution begins.
+  ```python
+  @pre_tool
+  def sanitize_args(event: PreToolHookEvent) -> PreToolHookDecision:
+      return PreToolHookDecision(allow=True, modified_args={"query": event.args["query"].strip()})
+  ```
+
+- **Synchronous Hook Function Support**: Lifecycle hook decorators now accept standard synchronous functions alongside asynchronous coroutines without raising runtime await errors.
+  ```python
+  @pre_turn
+  def log_turn(event: PreTurnHookEvent) -> None:
+      print(f"Executing turn for session: {event.session_id}")
+  ```
+
+- **Structured Command Execution Configuration**: Command execution settings are now consolidated under `RunCommandConfig`, introducing configurable timeouts that default to 10 minutes (600 seconds) alongside daemon execution controls.
+  ```python
+  capabilities = CapabilitiesConfig(
+      run_command_config=RunCommandConfig(timeout_seconds=300, enable_daemons=True)
+  )
+  ```
+
+- **Tool Lifecycle Step Correlation**: `ToolResult` and `ToolExecutionError` event payloads now include `step_id`, enabling end-to-end tracking and correlation of tool invocations across trajectory steps.
+  ```python
+  @post_tool
+  def trace_tool_execution(event: ToolResult) -> None:
+      print(f"Step {event.step_id}: {event.tool_name} returned {event.result}")
+  ```
+
+---
+
+### 📋 Detailed Changes
+
+#### Features & Enhancements
+- **Pre-Tool Hook Argument Modification**: Added the ability for `@pre_tool` hooks to return updated tool arguments that are sequentially chained across registered hooks prior to tool execution.
+- **Tool Step Correlation**: Added `step_id` to `ToolResult` and `ToolExecutionError` hook event models, allowing developers to correlate tool completions and failures with their originating tool call step.
+- **VS Code Debugging Configuration**: Updated `setup_vscode_debugging.sh` to target the canonical `getting_started/hello_world` starter example and explicitly configure Gemini Developer API defaults.
+
+#### Model & Default Changes
+- **Command Timeout and Daemon Configuration**: `CapabilitiesConfig` now has a `RunCommandConfig` allowing configuration of execution timeouts and daemon commands. Timeouts default to 10 minutes (600 seconds) to prevent unresponsive command tasks. Run commands can have daemons enabled via a boolean flag..
+
+#### Bug Fixes
+- **Synchronous Hook Decorator Execution**: Fixed a runtime `TypeError` when decorating synchronous functions with `@pre_turn`, `@post_tool_call`, and other lifecycle hooks by verifying awaitability before awaiting hook responses.
+- **LiteRT Early Client Disconnects**: Suppressed unhandled `ConnectionResetError`, `ConnectionAbortedError`, and `BrokenPipeError` exceptions when clients disconnect early from local LiteRT server connections.
+
 ## [0.1.12] - 2026-08-13
 
 This release fixes a regression: https://github.com/google-antigravity/antigravity-sdk-python/issues/172
@@ -18,7 +67,7 @@ The 0.1.11 release updates the default model to `gemini-3.7-flash`, introduces s
 ### 🌟 Key Highlights
 
 - **Default Model Upgrade to Gemini 3.7 Flash**: Upgraded the default inference model to `gemini-3.7-flash`.
-- **Session Budget Enforcement & Stop Reasons**: Added `BudgetConfig` to define session-level usage limits (total tokens, turns, and cost) and `StopReason` enum (`BUDGET_EXCEEDED`, `TURN_LIMIT`, `USER_CANCELLED`, etc.) to inspect turn termination causes.
+- **Session Budget Enforcement & Stop Reasons**: Added `BudgetConfig` to define session-level usage limits (model invocations, tool invocations, and token budgets) and `StopReason` enum (`MAX_MODEL_CALLS_EXCEEDED`, `MAX_TOOL_CALLS_EXCEEDED`, `MAX_TOTAL_TOKENS_EXCEEDED`, `QUOTA_EXHAUSTED`, etc.) to inspect turn termination causes.
 - **Vertex AI Express Mode Support**: Added native support for Express Mode authentication via `VertexEndpoint(api_key=...)` and `LocalAgentConfig(vertex=true, api_key=...)`, simplifying headless and non-GCP deployments.
 - **Autonomous Agent Behavior Mode**: Control the agent's behavior with `AgentBehavior`. By default the SDK now has a `AgentBehavior.AUTONOMOUS` mode (used to be `AgentBehavior.INTERACTIVE`) to streamline scripting, background and headless interactions modes.
 - **Multi-Interface Hook Registration**: Enabled single-instance registration across multiple hook interfaces (`PreToolHook`, `PostToolHook`, `PreTurnHook`), allowing for cross functional instrumentation.
@@ -26,10 +75,10 @@ The 0.1.11 release updates the default model to `gemini-3.7-flash`, introduces s
 ### 🔧 Detailed Changes
 
 #### New Features
-- **Budget Enforcement**: Introduced `BudgetConfig(max_total_tokens, max_turns, max_cost_usd)` and exposed stop reason metadata on turn responses.
+- **Budget Enforcement**: Introduced `BudgetConfig(max_model_calls, max_tool_calls, max_input_tokens, max_output_tokens, max_total_tokens)` and exposed stop reason metadata on turn responses.
 - **Express Mode API Key Auth**: Added `api_key` support across `VertexEndpoint` and local agent configurations.
 - **Multi-Interface Hooks**: Supported registering composite hook classes without duplicate invocation.
-- **PreToolArgs Metadata**: Exposed `trajectory_id` and `step_index` on tool hook payloads for chat thread context tracing.
+- **PreToolArgs Metadata**: Exposed `step_id` on tool hook payloads for chat thread context tracing.
 
 #### Model & Default Changes
 - **Default Model Upgrade**: Updated the default model from `gemini-3.6-flash` to `gemini-3.7-flash`.

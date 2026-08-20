@@ -15,6 +15,7 @@
 """Unit tests for HookRouter."""
 
 import asyncio
+import json
 from typing import Any
 from absl.testing import absltest
 from google.antigravity.proto import localharness_pb2
@@ -259,6 +260,8 @@ class HookRouterTest(absltest.TestCase):
           post_tool_args=localharness_pb2.PostToolArgs(
               tool_name="view_file",
               result="file content here",
+              trajectory_id="traj-1",
+              step_index=5,
           ),
       )
 
@@ -269,11 +272,44 @@ class HookRouterTest(absltest.TestCase):
       tool_result = received_data[0]
       self.assertEqual(tool_result.name, "view_file")
       self.assertEqual(tool_result.result, "file content here")
+      self.assertEqual(tool_result.step_id, "traj-1:5")
       self.assertIsNone(tool_result.error)
       self.assertLen(sent_events, 1)
       resp = sent_events[0].call_hook_response
       self.assertEqual(resp.request_id, "test_post_tool")
       self.assertTrue(resp.HasField("empty_result"))
+
+    asyncio.run(_test())
+
+  def test_handle_post_tool_step_index_only(self):
+
+    async def _test():
+      fired = asyncio.Event()
+      received_data: list[Any] = []
+
+      @hooks.post_tool_call
+      async def my_hook(data: Any):
+        fired.set()
+        received_data.append(data)
+
+      hook_runner = h_runner.HookRunner(post_tool_call_hooks=[my_hook])
+      router = HookRouter(hook_runner, lambda event: asyncio.sleep(0))
+      req = localharness_pb2.CallHookRequest(
+          request_id="test_post_tool_step_only",
+          name="PostTool",
+          type=localharness_pb2.LIFECYCLE_HOOK_POST_TOOL,
+          post_tool_args=localharness_pb2.PostToolArgs(
+              tool_name="view_file",
+              result="file content here",
+              step_index=7,
+          ),
+      )
+
+      await router.handle(req)
+
+      self.assertTrue(fired.is_set())
+      self.assertLen(received_data, 1)
+      self.assertEqual(received_data[0].step_id, "7")
 
     asyncio.run(_test())
 
@@ -597,6 +633,8 @@ class HookRouterOnToolErrorTest(absltest.TestCase):
           on_tool_error_args=localharness_pb2.OnToolErrorArgs(
               tool_name="run_command",
               error_message="command failed",
+              trajectory_id="traj-1",
+              step_index=3,
           ),
       )
 
@@ -606,6 +644,7 @@ class HookRouterOnToolErrorTest(absltest.TestCase):
       self.assertLen(received_errors, 1)
       self.assertIsInstance(received_errors[0], types.ToolExecutionError)
       self.assertEqual(received_errors[0].tool_name, "run_command")
+      self.assertEqual(received_errors[0].step_id, "traj-1:3")
       self.assertIsNone(received_errors[0].server_name)
       self.assertEqual(str(received_errors[0]), "command failed")
       self.assertLen(sent_events, 1)
@@ -762,6 +801,8 @@ class HookRouterPreToolTest(absltest.TestCase):
               tool_name="run_command",
               arguments_json='{"cmd": "ls"}',
               call_id="call_pre",
+              trajectory_id="traj-1",
+              step_index=4,
           ),
       )
 
@@ -779,6 +820,57 @@ class HookRouterPreToolTest(absltest.TestCase):
       self.assertEqual(captured_tool_calls[0].name, "run_command")
       self.assertEqual(captured_tool_calls[0].args, {"cmd": "ls"})
       self.assertEqual(captured_tool_calls[0].id, "call_pre")
+      self.assertEqual(captured_tool_calls[0].step_id, "traj-1:4")
+
+    asyncio.run(_test())
+
+  def test_handle_pre_tool_modified_args(self):
+
+    async def _test():
+
+      @hooks.pre_tool_call_decide
+      async def modifying_hook(data):
+        del data
+        return hooks.HookResult(
+            allow=True, modified_args={"cmd": "echo 'sanitized'"}
+        )
+
+      hook_runner = h_runner.HookRunner(
+          pre_tool_call_decide_hooks=[modifying_hook],
+      )
+
+      sent_events = []
+
+      async def mock_send(event: localharness_pb2.InputEvent):
+        sent_events.append(event)
+
+      router = HookRouter(hook_runner, mock_send)
+
+      req = localharness_pb2.CallHookRequest(
+          request_id="test_pre_modify",
+          name="PreTool",
+          type=localharness_pb2.LIFECYCLE_HOOK_PRE_TOOL,
+          pre_tool_args=localharness_pb2.PreToolArgs(
+              tool_name="run_command",
+              arguments_json='{"cmd": "rm -rf /"}',
+              call_id="call_modify",
+          ),
+      )
+
+      await router.handle(req)
+
+      self.assertLen(sent_events, 1)
+      resp = sent_events[0].call_hook_response
+      self.assertEqual(resp.request_id, "test_pre_modify")
+      self.assertTrue(resp.HasField("pre_tool_result"))
+      self.assertEqual(
+          resp.pre_tool_result.decision,
+          localharness_pb2.PreToolResult.Decision.ALLOW,
+      )
+      self.assertEqual(
+          resp.pre_tool_result.modified_arguments_json,
+          json.dumps({"cmd": "echo 'sanitized'"}),
+      )
 
     asyncio.run(_test())
 

@@ -220,6 +220,8 @@ message HarnessSideTools {
   .antigravity.localharness.SearchWebToolConfig search_web = 12;
   .antigravity.localharness.ReadUrlContentToolConfig read_url_content = 14;
   .antigravity.localharness.ToolSearchConfig tool_search_config = 15;
+  .antigravity.localharness.ManageTaskToolConfig manage_task = 16;
+  .antigravity.localharness.ScheduleToolConfig schedule = 17;
   extensions 1000 to 1999;
   extensions 2000 to max;
 }
@@ -231,6 +233,7 @@ message FindToolConfig {
 message RunCommandToolConfig {
   bool enabled = 1;
   uint32 max_timeout_ms = 2;
+  bool enable_daemon_commands = 3;
 }
 message SubagentsConfig {
   bool enabled = 1;
@@ -269,6 +272,12 @@ message ReadUrlContentToolConfig {
 message ToolSearchConfig {
   bool enabled = 1;
   extensions 1000 to max;
+}
+message ManageTaskToolConfig {
+  bool enabled = 1;
+}
+message ScheduleToolConfig {
+  bool enabled = 1;
 }
 message PermissionsConfig {
   bool enforce_workspace_validation = 1;
@@ -403,6 +412,7 @@ message ActionViewFile {
   string file_path = 1;
   uint32 start_line = 2;
   uint32 end_line = 3;
+  int32 content_offset = 4;
 }
 message ActionCreateFile {
   string file_path = 1;
@@ -643,6 +653,8 @@ message PreToolArgs {
   string arguments_json = 2;
   string server_name = 3;
   string call_id = 4;
+  string trajectory_id = 5;
+  uint32 step_index = 6;
 }
 message PostToolArgs {
   string tool_name = 1;
@@ -650,18 +662,24 @@ message PostToolArgs {
   string error = 3;
   string server_name = 5;
   string call_id = 6;
+  string trajectory_id = 7;
+  uint32 step_index = 8;
 }
 message OnToolErrorArgs {
   string tool_name = 1;
   string error_message = 2;
   string server_name = 4;
   string call_id = 5;
+  string trajectory_id = 6;
+  uint32 step_index = 7;
 }
 message PreTurnArgs {
   .antigravity.localharness.UserInput user_input = 1;
+  string trajectory_id = 2;
 }
 message PostTurnArgs {
   string response_text = 1;
+  string trajectory_id = 2;
 }
 message EmptyResult {}
 message OnToolErrorResult {
@@ -710,6 +728,8 @@ message CustomAgent {
   repeated .antigravity.localharness.Tool tools = 5;
   .antigravity.localharness.SubagentSkillsConfig skills_config = 6;
   .antigravity.localharness.AgentBehavior agent_behavior = 7;
+  extensions 1000 to 1999;
+  extensions 2000 to max;
 }
 message ToolOutputTruncation {
   message TruncateStrategy {
@@ -726,7 +746,14 @@ message ToolOutputTruncation {
   }
 }
 message PolicyConfig {
+  enum WorkspaceContainment {
+    WORKSPACE_CONTAINMENT_UNSPECIFIED = 0;
+    WORKSPACE_CONTAINMENT_ENABLED = 1;
+    WORKSPACE_CONTAINMENT_DISABLED = 2;
+  }
   repeated .antigravity.localharness.PolicyRule rules = 1;
+  .antigravity.localharness.PolicyConfig.WorkspaceContainment
+      workspace_containment = 2;
 }
 message PolicyRule {
   string tool = 1;
