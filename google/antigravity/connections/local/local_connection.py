@@ -18,6 +18,7 @@ import asyncio
 import collections
 import importlib.metadata
 import importlib.resources
+import inspect
 import json
 import logging
 import os
@@ -40,6 +41,7 @@ from google.antigravity.proto import localharness_pb2
 from google.antigravity import types
 from google.antigravity.connections import connection
 from google.antigravity.connections.local import event_processor
+from google.antigravity.connections.local import local_connection_config
 from google.antigravity.hooks import hook_runner as h_runner
 from google.antigravity.hooks import policy
 from google.antigravity.tools import tool_runner as t_runner
@@ -227,10 +229,25 @@ def callable_to_tool_proto(
 
   # Use the ToolRunner's public callable to strip injectable params.
   target_fn = fn
-  if tool_runner is not None:
-    tool_name = getattr(fn, "__name__", "")
-    if tool_name in tool_runner.tools:
-      target_fn = tool_runner.get_public_callable(tool_name)
+  tool_name = getattr(fn, "__name__", None) or type(fn).__name__
+  if tool_runner is not None and tool_name in tool_runner.tools:
+    target_fn = tool_runner.get_public_callable(tool_name)
+
+  if not hasattr(target_fn, "__name__"):
+    orig_fn = target_fn
+
+    def wrapped(*args, **kwargs):
+      return orig_fn(*args, **kwargs)
+
+    wrapped.__name__ = tool_name
+    setattr(wrapped, "__doc__", getattr(orig_fn, "__doc__", None))
+    try:
+      setattr(wrapped, "__signature__", inspect.signature(orig_fn))
+    except (ValueError, TypeError):
+      setattr(
+          wrapped, "__annotations__", getattr(orig_fn, "__annotations__", {})
+      )
+    target_fn = wrapped
 
   decl = genai_types.FunctionDeclaration.from_callable_with_api_option(
       callable=target_fn,
@@ -263,6 +280,19 @@ def _sanitize_prompt(text: str) -> str:
   if not sanitized.strip():
     return " "
   return sanitized
+
+
+def _get_ws_close_code(e: websockets.ConnectionClosed) -> int | str | None:
+  """Safely retrieves the WebSocket close code across websockets library versions."""
+  rcvd = getattr(e, "rcvd", None)
+  if rcvd is not None and hasattr(rcvd, "code"):
+    return rcvd.code
+  sent = getattr(e, "sent", None)
+  if sent is not None and hasattr(sent, "code"):
+    return sent.code
+  if rcvd is None and sent is None:
+    return 1006
+  return getattr(e, "code", None)
 
 
 class LocalConnection(connection.Connection):
@@ -523,14 +553,15 @@ class LocalConnection(connection.Connection):
         json_format.Parse(raw_msg, event)
         await self._processor.process_event(event)
     except websockets.ConnectionClosed as e:
+      close_code = _get_ws_close_code(e)
       if self._disconnecting:
         # Expected closure.
-        logging.info("WebSocket closed (code %s); normal shutdown.", e.code)
+        logging.info("WebSocket closed (code %s); normal shutdown.", close_code)
       else:
         # Unexpected closure.
         stderr_tail = "\n".join(self._stderr_lines) or "(no stderr output)"
         error_msg = (
-            f"Harness process exited unexpectedly (WS close code {e.code})."
+            f"Harness process exited unexpectedly (WS close code {close_code})."
             f"\nHarness stderr:\n{stderr_tail}"
         )
         logging.error(error_msg)
@@ -631,13 +662,20 @@ def _get_sdk_version() -> str:
     return "0.0.0-dev"
 
 
-def _get_default_binary_path_external() -> str:
+_HARNESS_PATH_ENV_VAR = "ANTIGRAVITY_HARNESS_PATH"
+
+
+def _get_default_binary_path_external(env: dict[str, str] | None) -> str:
   """Returns the default localharness binary path."""
-  # 1. Check environment variable first
-  if harness_path := os.environ.get("ANTIGRAVITY_HARNESS_PATH"):
+  # 1. Check passed value in env first.
+  if env and _HARNESS_PATH_ENV_VAR in env:
+    return env[_HARNESS_PATH_ENV_VAR]
+
+  # 2. Check variable in os.environ.
+  if harness_path := os.environ.get(_HARNESS_PATH_ENV_VAR):
     return harness_path
 
-  # 2. Try importlib.metadata (Robust wheel discovery)
+  # 3. Try importlib.metadata (Robust wheel discovery)
   # This is immune to sys.path shadowing by a local repository directory.
   try:
     dist = importlib.metadata.distribution("google-antigravity")
@@ -654,7 +692,7 @@ def _get_default_binary_path_external() -> str:
   except (importlib.metadata.PackageNotFoundError, ValueError, AttributeError):
     pass
 
-  # 3. Try importlib.resources (External Wheel fallback)
+  # 4. Try importlib.resources (External Wheel fallback)
   try:
     # Using 'google.antigravity' as the package name.
     # This assumes the binary is located at google/antigravity/bin/localharness
@@ -672,14 +710,14 @@ def _get_default_binary_path_external() -> str:
   except (ImportError, AttributeError, KeyError):
     pass
 
-  # 4. Fallback: Check if it's in the system PATH
+  # 5. Fallback: Check if it's in the system PATH
   if path := shutil.which("localharness"):
     return path
 
   raise RuntimeError(
       "Could not find default localharness binary. "
       "Please specify binary_path explicitly, set the "
-      "ANTIGRAVITY_HARNESS_PATH environment variable, or ensure it is in your "
+      f"{_HARNESS_PATH_ENV_VAR} environment variable, or ensure it is in your "
       "PATH. Note: If you are running from the root of the repository, the "
       "local source tree might shadow your pip-installed package and prevent "
       "resource discovery."
@@ -792,6 +830,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
       retry_config: types.RetryConfig | None = None,
       budget_config: types.BudgetConfig | None = None,
       policies: list[policy.Policy] | None = None,
+      tools: Sequence[Callable[..., Any] | str] | None = None,
   ):
     """Initializes the instance.
 
@@ -814,10 +853,12 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
       retry_config: Optional retry configuration for model API and outputs.
       budget_config: Optional session budget configuration.
       policies: Optional list of policy rules for the Go evaluator.
+      tools: Optional list of tools for the root agent.
     """
-    self._binary_path = _get_default_binary_path()
+    self._binary_path = _get_default_binary_path(env)
     self._tool_runner = tool_runner
     self._hook_runner = hook_runner
+    self._tools = tools
     self._connection: LocalConnection | None = None
     self._mcp_servers = mcp_servers or []
     self._models: list[types.ModelTarget] = models or []
@@ -844,9 +885,9 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
     self._conversation_id = conversation_id
     self._session_continuation_mode = session_continuation_mode
     self._save_dir = save_dir
-    self._workspaces = [
-        event_processor.normalize_wire_path(ws) for ws in workspaces or []
-    ]
+    self._workspaces = local_connection_config.normalize_workspace_paths(
+        workspaces
+    )
     self._app_data_dir = app_data_dir
     self._subagents = subagents or []
 
@@ -965,7 +1006,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
 
   def _build_custom_subagents_protos(
       self,
-      main_agent_tool_protos: dict[str, localharness_pb2.Tool],
+      all_tool_protos: dict[str, localharness_pb2.Tool],
   ) -> list[localharness_pb2.CustomAgent]:
     """Resolves and builds CustomAgent configuration protos for subagents."""
     custom_agents_protos = []
@@ -978,22 +1019,19 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
       for tool in subagent.tools or []:
         if isinstance(tool, str):
           name = tool
+          if name in all_tool_protos:
+            resolved_subagent_tools.append(all_tool_protos[name])
+          else:
+            resolved_subagent_tools.append(localharness_pb2.Tool(name=name))
+        elif callable(tool):
+          proto = callable_to_tool_proto(tool, tool_runner=self._tool_runner)
+          all_tool_protos[proto.name] = proto
+          resolved_subagent_tools.append(proto)
         else:
-          name = getattr(tool, "__name__", None)
-          if name is None:
-            raise ValueError(
-                f"Invalid tool type in subagent '{subagent.name}' tools list:"
-                f" {tool}"
-            )
-
-        if name not in main_agent_tool_protos:
           raise ValueError(
-              f"Subagent tool '{name}' is not registered on the main agent"
-              " config. Any custom tools used by subagents must also be added"
-              " to the main agent's tools list."
+              f"Invalid tool type in subagent '{subagent.name}' tools list:"
+              f" {tool}"
           )
-
-        resolved_subagent_tools.append(main_agent_tool_protos[name])
 
       custom_agents_protos.append(
           localharness_pb2.CustomAgent(
@@ -1015,11 +1053,42 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
 
   def _build_harness_config(self) -> localharness_pb2.HarnessConfig:
     """Translates Pydantic config objects into a HarnessConfig proto."""
-    main_agent_tool_protos = {}
+    all_tool_protos = {}
     if self._tool_runner:
       for fn in self._tool_runner.tools.values():
         proto = callable_to_tool_proto(fn, tool_runner=self._tool_runner)
-        main_agent_tool_protos[proto.name] = proto
+        all_tool_protos[proto.name] = proto
+
+    root_tool_protos = []
+    if self._tools is not None:
+      for tool in self._tools:
+        if isinstance(tool, str):
+          if tool in all_tool_protos:
+            root_tool_protos.append(all_tool_protos[tool])
+          else:
+            root_tool_protos.append(localharness_pb2.Tool(name=tool))
+        elif callable(tool):
+          proto = callable_to_tool_proto(tool, tool_runner=self._tool_runner)
+          all_tool_protos[proto.name] = proto
+          root_tool_protos.append(proto)
+    elif self._tool_runner:
+      # Fallback when _tools is not explicitly specified: exclude tools
+      # exclusive to subagents.
+      subagent_tool_names = set()
+      for sa in self._subagents:
+        for t in sa.tools or []:
+          if isinstance(t, str):
+            subagent_tool_names.add(t)
+          elif callable(t):
+            subagent_proto = callable_to_tool_proto(
+                t, tool_runner=self._tool_runner
+            )
+            subagent_tool_names.add(subagent_proto.name)
+      root_tool_protos = [
+          proto
+          for name, proto in all_tool_protos.items()
+          if name not in subagent_tool_names
+      ]
 
     system_instructions_proto = self._to_system_instructions_proto(
         self._system_instructions
@@ -1047,11 +1116,9 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
 
     enabled_hooks = self._get_enabled_hooks()
 
-    custom_agents_protos = self._build_custom_subagents_protos(
-        main_agent_tool_protos
-    )
+    custom_agents_protos = self._build_custom_subagents_protos(all_tool_protos)
     harness_config = localharness_pb2.HarnessConfig(
-        tools=list(main_agent_tool_protos.values()),
+        tools=root_tool_protos,
         system_instructions=system_instructions_proto,
         cascade_id=self._conversation_id or "",
         session_continuation_mode=to_proto_session_continuation_mode(
@@ -1133,6 +1200,10 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
         (
             self._hook_runner.on_tool_error_hooks,
             localharness_pb2.LIFECYCLE_HOOK_ON_TOOL_ERROR,
+        ),
+        (
+            self._hook_runner.on_compaction_hooks,
+            localharness_pb2.LIFECYCLE_HOOK_ON_COMPACTION,
         ),
     ]
     for hooks_list, hook_type in hook_mapping:

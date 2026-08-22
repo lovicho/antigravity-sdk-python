@@ -24,6 +24,7 @@ import pathlib
 import struct
 import subprocess
 import tempfile
+import typing
 import unittest
 from unittest import mock
 
@@ -33,6 +34,7 @@ import pydantic
 import websockets
 
 from google.antigravity.proto import localharness_pb2
+from google.antigravity import models as models_lib
 from google.antigravity import types
 from google.antigravity.connections.local import event_processor
 from google.antigravity.connections.local import local_connection
@@ -41,9 +43,7 @@ from google.antigravity.connections.local import test_utils
 from google.antigravity.hooks import hook_runner
 from google.antigravity.hooks import hooks as hooks_base
 from google.antigravity.hooks import policy
-from google.antigravity.models import DEFAULT_MODEL
 from google.antigravity.tools import tool_runner
-from google.antigravity.types import QuestionResponse
 
 
 class PromptSanitizationTest(unittest.TestCase):
@@ -498,7 +498,7 @@ class LocalConnectionTest(unittest.IsolatedAsyncioTestCase):
     hr = hook_runner.HookRunner()
 
     @hooks_base.pre_turn
-    async def denying_turn(data):
+    async def denying_turn(_):
       return hooks_base.HookResult(allow=False, message="Denied by hook")
 
     hr.register_hook(denying_turn)
@@ -706,7 +706,8 @@ class LocalConnectionTest(unittest.IsolatedAsyncioTestCase):
     sent_data = await harness.wait_for_response()
     resp = sent_data["toolResponse"]
     self.assertEqual(resp["id"], "call_img")
-    # The text part stays in response_json; the image becomes supplemental media.
+    # The text part stays in response_json; the image becomes supplemental
+    # media.
     self.assertIn("here is the snapshot", resp["responseJson"])
     self.assertIn("supplementalMedia", resp)
     self.assertEqual(resp["supplementalMedia"][0]["mimeType"], "image/jpeg")
@@ -773,10 +774,10 @@ class LocalConnectionTest(unittest.IsolatedAsyncioTestCase):
     hr = hook_runner.HookRunner()
 
     @hooks_base.on_interaction
-    async def auto_answer(data):
+    async def auto_answer(_):
       return hooks_base.QuestionHookResult(
           responses=[
-              QuestionResponse(selected_option_ids=["1"]),
+              types.QuestionResponse(selected_option_ids=["1"]),
           ]
       )
 
@@ -817,10 +818,10 @@ class LocalConnectionTest(unittest.IsolatedAsyncioTestCase):
     hr = hook_runner.HookRunner()
 
     @hooks_base.on_interaction
-    async def auto_answer(data):
+    async def auto_answer(_):
       return hooks_base.QuestionHookResult(
           responses=[
-              QuestionResponse(selected_option_ids=["1"]),
+              types.QuestionResponse(selected_option_ids=["1"]),
           ]
       )
 
@@ -846,7 +847,8 @@ class LocalConnectionTest(unittest.IsolatedAsyncioTestCase):
                             choices=["Yes", "No"],
                         )
                     ),
-                    localharness_pb2.UserQuestion(),  # Unhandled question type (empty)
+                    # Unhandled question type (empty).
+                    localharness_pb2.UserQuestion(),
                 ]
             ),
         )
@@ -1210,7 +1212,7 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
     # No models, system instructions, workspaces, or skills by default.
     self.assertEmpty(config.models)
     self.assertFalse(config.HasField("system_instructions"))
-    self.assertEqual(len(config.workspaces), 0)
+    self.assertEmpty(config.workspaces)
     self.assertEqual(
         config.agent_behavior, localharness_pb2.AGENT_BEHAVIOR_AUTONOMOUS
     )
@@ -1779,14 +1781,14 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
     """
     strategy = self._make_strategy()
     config = strategy._build_harness_config()
-    self.assertEqual(len(config.workspaces), 0)
+    self.assertEmpty(config.workspaces)
 
   def test_models_thinking_level_set(self):
     """Verifies that thinking_level on ModelTarget maps to the proto field."""
     strategy = self._make_strategy(
         models=[
             types.ModelTarget(
-                name=DEFAULT_MODEL,
+                name=models_lib.DEFAULT_MODEL,
                 types=[types.ModelType.TEXT],
                 endpoint=types.GeminiAPIEndpoint(
                     options=types.GeminiModelOptions(
@@ -1806,7 +1808,7 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
     strategy = self._make_strategy(
         models=[
             types.ModelTarget(
-                name=DEFAULT_MODEL,
+                name=models_lib.DEFAULT_MODEL,
                 types=[types.ModelType.TEXT],
                 endpoint=types.GeminiAPIEndpoint(
                     options=types.GeminiModelOptions(thinking_level=None),
@@ -1823,7 +1825,7 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
       strategy = self._make_strategy(
           models=[
               types.ModelTarget(
-                  name=DEFAULT_MODEL,
+                  name=models_lib.DEFAULT_MODEL,
                   types=[types.ModelType.TEXT],
                   endpoint=types.GeminiAPIEndpoint(
                       options=types.GeminiModelOptions(thinking_level=level),
@@ -1844,7 +1846,7 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
     strategy = self._make_strategy(
         models=[
             types.ModelTarget(
-                name=DEFAULT_MODEL,
+                name=models_lib.DEFAULT_MODEL,
                 types=[types.ModelType.TEXT],
                 endpoint=types.GeminiAPIEndpoint(
                     options=types.GeminiModelOptions(
@@ -1864,7 +1866,7 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
     strategy = self._make_strategy(
         models=[
             types.ModelTarget(
-                name=DEFAULT_MODEL,
+                name=models_lib.DEFAULT_MODEL,
                 types=[types.ModelType.TEXT],
                 endpoint=types.GeminiAPIEndpoint(
                     options=types.GeminiModelOptions(service_tier=None),
@@ -1881,7 +1883,7 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
       strategy = self._make_strategy(
           models=[
               types.ModelTarget(
-                  name=DEFAULT_MODEL,
+                  name=models_lib.DEFAULT_MODEL,
                   types=[types.ModelType.TEXT],
                   endpoint=types.GeminiAPIEndpoint(
                       options=types.GeminiModelOptions(service_tier=tier),
@@ -1901,7 +1903,7 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
     strategy = self._make_strategy(
         models=[
             types.ModelTarget(
-                name=DEFAULT_MODEL,
+                name=models_lib.DEFAULT_MODEL,
                 types=[types.ModelType.TEXT],
                 endpoint=types.VertexEndpoint(
                     project="test-project",
@@ -2051,7 +2053,7 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
     )
     config = strategy._build_harness_config()
     self.assertEqual(config.cascade_id, "session-789")
-    self.assertEqual(len(config.workspaces), 1)
+    self.assertLen(config.workspaces, 1)
     self.assertEqual(
         config.workspaces[0].filesystem_workspace.directory, "/ws/a"
     )
@@ -2099,7 +2101,121 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
         workspaces=["file:///dev/shm/workspace", "/tmp/clean-path"]
     )
     self.assertEqual(
-        strategy._workspaces, ["/dev/shm/workspace", "/tmp/clean-path"]
+        strategy._workspaces,
+        ["/dev/shm/workspace", str(pathlib.Path("/tmp/clean-path").resolve())],
+    )
+
+  def test_strategy_normalizes_relative_workspaces(self):
+    """Verifies that relative workspace paths and user home ~ are resolved."""
+    strategy = self._make_strategy(
+        workspaces=["ws", "./subdir", "../parent", "~/my_project"]
+    )
+    expected = [
+        str(pathlib.Path("ws").resolve()),
+        str(pathlib.Path("./subdir").resolve()),
+        str(pathlib.Path("../parent").resolve()),
+        str(pathlib.Path("~/my_project").expanduser().resolve()),
+    ]
+    self.assertEqual(strategy._workspaces, expected)
+    config = strategy._build_harness_config()
+    self.assertLen(config.workspaces, 4)
+    for i, exp in enumerate(expected):
+      self.assertEqual(config.workspaces[i].filesystem_workspace.directory, exp)
+
+  def test_strategy_normalizes_pathlib_paths(self):
+    """Verifies that pathlib.Path objects are resolved and accepted."""
+    strategy = self._make_strategy(
+        workspaces=[pathlib.Path("ws"), pathlib.Path("/dev/shm/ws")]
+    )
+    expected = [
+        str(pathlib.Path("ws").resolve()),
+        str(pathlib.Path("/dev/shm/ws").resolve()),
+    ]
+    self.assertEqual(strategy._workspaces, expected)
+
+  def test_strategy_normalizes_cns_workspaces(self):
+    """Verifies that CNS URIs and paths are preserved without filesystem resolve."""
+    strategy = self._make_strategy(
+        workspaces=["cns://el-d/home/user/project", "/cns/el-d/home/user/data"]
+    )
+    expected = [
+        "/cns/el-d/home/user/project",
+        "/cns/el-d/home/user/data",
+    ]
+    self.assertEqual(strategy._workspaces, expected)
+    config = strategy._build_harness_config()
+    self.assertEqual(
+        config.workspaces[0].filesystem_workspace.directory,
+        "/cns/el-d/home/user/project",
+    )
+    self.assertEqual(
+        config.workspaces[1].filesystem_workspace.directory,
+        "/cns/el-d/home/user/data",
+    )
+
+  def test_local_agent_config_workspaces_validation(self):
+    """Verifies LocalAgentConfig validation, coercion, and normalization of workspaces."""
+    # Default is [os.getcwd()]
+    cfg_default = local_connection_config.LocalAgentConfig()
+    self.assertEqual(cfg_default.workspaces, [os.getcwd()])
+
+    # Explicit empty list is preserved
+    cfg_empty = local_connection_config.LocalAgentConfig(workspaces=[])
+    self.assertEqual(cfg_empty.workspaces, [])
+
+    # Single string is coerced and normalized
+    cfg_str = local_connection_config.LocalAgentConfig(workspaces="ws")
+    self.assertEqual(cfg_str.workspaces, [str(pathlib.Path("ws").resolve())])
+
+    # Single Path is coerced and normalized
+    cfg_path = local_connection_config.LocalAgentConfig(
+        workspaces=pathlib.Path("ws")
+    )
+    self.assertEqual(cfg_path.workspaces, [str(pathlib.Path("ws").resolve())])
+
+    # List of relative paths and ~
+    cfg_list = local_connection_config.LocalAgentConfig(
+        workspaces=["ws", "./nested", "~/my_project"]
+    )
+    self.assertEqual(
+        cfg_list.workspaces,
+        [
+            str(pathlib.Path("ws").resolve()),
+            str(pathlib.Path("./nested").resolve()),
+            str(pathlib.Path("~/my_project").expanduser().resolve()),
+        ],
+    )
+
+    # URIs
+    cfg_uris = local_connection_config.LocalAgentConfig(
+        workspaces=["file:///dev/shm/ws", "cns://el-d/home/user/ws"]
+    )
+    self.assertEqual(
+        cfg_uris.workspaces,
+        ["/dev/shm/ws", "/cns/el-d/home/user/ws"],
+    )
+
+    # Invalid types raise ValidationError
+    with self.assertRaises(pydantic.ValidationError):
+      local_connection_config.LocalAgentConfig(
+          workspaces=typing.cast(typing.Any, 123)
+      )
+
+    with self.assertRaises(pydantic.ValidationError):
+      local_connection_config.LocalAgentConfig(
+          workspaces=typing.cast(typing.Any, {"invalid": "type"})
+      )
+
+  def test_strategy_normalizes_single_workspace_input(self):
+    """Verifies that a single string or PathLike passed to strategy is normalized."""
+    strategy_str = self._make_strategy(workspaces="ws")
+    self.assertEqual(
+        strategy_str._workspaces, [str(pathlib.Path("ws").resolve())]
+    )
+
+    strategy_path = self._make_strategy(workspaces=pathlib.Path("ws"))
+    self.assertEqual(
+        strategy_path._workspaces, [str(pathlib.Path("ws").resolve())]
     )
 
   def test_mcp_servers_propagated(self):
@@ -2731,9 +2847,22 @@ _get_default_binary_path = local_connection._get_default_binary_path
 
 class GetDefaultBinaryPathTest(unittest.TestCase):
 
-  @mock.patch.dict("os.environ", {"ANTIGRAVITY_HARNESS_PATH": "/env/path"})
-  def test_returns_env_path(self):
-    path = _get_default_binary_path()
+  @mock.patch.dict(
+      "os.environ",
+      {"ANTIGRAVITY_HARNESS_PATH": "/I/should/not/be/used"},
+  )
+  def test_returns_env_path_via_passed_env(self):
+    path = _get_default_binary_path(
+        env={"ANTIGRAVITY_HARNESS_PATH": "/I/should/be/used"}
+    )
+    self.assertEqual(path, "/I/should/be/used")
+
+  @mock.patch.dict(
+      "os.environ",
+      {"ANTIGRAVITY_HARNESS_PATH": "/env/path"}
+  )
+  def test_returns_env_path_via_global_env(self):
+    path = _get_default_binary_path(env={"not_harness_path": "different_value"})
     self.assertEqual(path, "/env/path")
 
   @mock.patch.dict("os.environ", {}, clear=True)
@@ -2751,7 +2880,7 @@ class GetDefaultBinaryPathTest(unittest.TestCase):
     mock_dist.return_value = mock_distribution
     mock_exists.return_value = True
 
-    path = _get_default_binary_path()
+    path = _get_default_binary_path(env=None)
     self.assertEqual(path, "/site-packages/google/antigravity/bin/localharness")
     mock_dist.assert_called_once_with("google-antigravity")
     mock_file.locate.assert_called_once()
@@ -2769,7 +2898,7 @@ class GetDefaultBinaryPathTest(unittest.TestCase):
     mock_files.return_value = mock_path
     mock_exists.return_value = True
 
-    path = _get_default_binary_path()
+    path = _get_default_binary_path(env={})
     self.assertEqual(path, "/wheel/path")
 
   @mock.patch.dict("os.environ", {}, clear=True)
@@ -2781,7 +2910,7 @@ class GetDefaultBinaryPathTest(unittest.TestCase):
     mock_files.side_effect = ImportError
     mock_which.return_value = "/system/path"
 
-    path = _get_default_binary_path()
+    path = _get_default_binary_path(env={})
     self.assertEqual(path, "/system/path")
     mock_which.assert_called_once_with("localharness")
 
@@ -2795,7 +2924,7 @@ class GetDefaultBinaryPathTest(unittest.TestCase):
     mock_which.return_value = None
 
     with self.assertRaises(RuntimeError) as ctx:
-      _get_default_binary_path()
+      _get_default_binary_path(env={})
     self.assertIn(
         "Could not find default localharness binary", str(ctx.exception)
     )
@@ -3131,7 +3260,8 @@ class LocalConnectionCompactionHookTest(unittest.IsolatedAsyncioTestCase):
 
       async def run(self, context, data):  # pylint: disable=unused-argument
         captured.append(data)
-        event.set()
+        if len(captured) == 1:
+          event.set()
 
     hr = hook_runner.HookRunner()
     hr.register_hook(CompactionHook())
@@ -3142,24 +3272,47 @@ class LocalConnectionCompactionHookTest(unittest.IsolatedAsyncioTestCase):
         hook_runner=hr,
     )
 
-    output_event = localharness_pb2.OutputEvent(
-        step_update=localharness_pb2.StepUpdate(
+    req = localharness_pb2.CallHookRequest(
+        request_id="req_comp_1",
+        name="OnCompaction",
+        type=localharness_pb2.LIFECYCLE_HOOK_ON_COMPACTION,
+        on_compaction_args=localharness_pb2.OnCompactionArgs(
+            trajectory_id="main",
             step_index=1,
-            text="Context compaction",
-            state=localharness_pb2.StepUpdate.STATE_DONE,
-            source=localharness_pb2.StepUpdate.SOURCE_SYSTEM,
-            target=localharness_pb2.StepUpdate.TARGET_USER,
-            compaction=localharness_pb2.ActionCompaction(),
-        )
+            summary="Context compaction",
+        ),
     )
-
+    output_event = localharness_pb2.OutputEvent(call_hook_request=req)
     await harness.send_event(output_event)
-    await asyncio.wait_for(event.wait(), timeout=1.0)
 
+    await asyncio.wait_for(event.wait(), timeout=1.0)
     self.assertEqual(len(captured), 1)
-    self.assertIsInstance(captured[0], local_connection.LocalConnectionStep)
     self.assertEqual(captured[0].type, types.StepType.COMPACTION)
     self.assertEqual(captured[0].content, "Context compaction")
+    self.assertEqual(captured[0].status, types.StepStatus.DONE)
+    self.assertEqual(captured[0].source, types.StepSource.SYSTEM)
+    self.assertEqual(captured[0].target, types.StepTarget.USER)
+    self.assertEqual(captured[0].trajectory_id, "main")
+    self.assertEqual(captured[0].step_index, 1)
+
+    resp = await harness.wait_for_response(timeout=1.0)
+    self.assertIn("callHookResponse", resp)
+    self.assertEqual(resp["callHookResponse"]["requestId"], "req_comp_1")
+    self.assertIn("emptyResult", resp["callHookResponse"])
+
+  def test_get_enabled_hooks_includes_on_compaction(self):
+    """Verifies _get_enabled_hooks includes LIFECYCLE_HOOK_ON_COMPACTION."""
+    hr = hook_runner.HookRunner()
+
+    class CompactionHook(hooks_base.OnCompactionHook):
+
+      async def run(self, context, data):
+        pass
+
+    hr.register_hook(CompactionHook())
+    strategy = local_connection.LocalConnectionStrategy(hook_runner=hr)
+    enabled = strategy._get_enabled_hooks()
+    self.assertIn(localharness_pb2.LIFECYCLE_HOOK_ON_COMPACTION, enabled)
 
 
 class LocalConnectionSubagentHookTest(unittest.IsolatedAsyncioTestCase):
@@ -3267,7 +3420,7 @@ class LocalConnectionToolCallHooksTest(unittest.IsolatedAsyncioTestCase):
     """
     tr = tool_runner.ToolRunner()
 
-    async def failing_handler(**kwargs):
+    async def failing_handler(**_):
       raise RuntimeError("Intentional failure")
 
     tr.register(failing_handler, "failing_tool")
@@ -3697,6 +3850,31 @@ class LocalConnectionUnexpectedCloseTest(unittest.IsolatedAsyncioTestCase):
     item = await asyncio.wait_for(conn._step_queue.get(), timeout=2)
     self.assertIsNone(item)
 
+  def test_get_ws_close_code_with_rcvd_code(self):
+    """Verifies close code extraction when rcvd has a code."""
+    rcvd_frame = mock.MagicMock(code=1000)
+    exc = websockets.ConnectionClosed(rcvd=rcvd_frame, sent=None)
+    self.assertEqual(local_connection._get_ws_close_code(exc), 1000)
+
+  def test_get_ws_close_code_with_sent_code(self):
+    """Verifies close code extraction when sent has a code."""
+    sent_frame = mock.MagicMock(code=1001)
+    exc = websockets.ConnectionClosed(rcvd=None, sent=sent_frame)
+    self.assertEqual(local_connection._get_ws_close_code(exc), 1001)
+
+  def test_get_ws_close_code_with_both_none(self):
+    """Verifies close code defaults to 1006 when both rcvd and sent are None."""
+    exc = websockets.ConnectionClosed(rcvd=None, sent=None)
+    self.assertEqual(local_connection._get_ws_close_code(exc), 1006)
+
+  def test_get_ws_close_code_fallback_to_code_attr(self):
+    """Verifies fallback to code attribute if rcvd/sent are not None but have no code attribute."""
+    exc = mock.MagicMock(spec=websockets.ConnectionClosed)
+    exc.rcvd = "invalid_rcvd_no_code"
+    exc.sent = "invalid_sent_no_code"
+    exc.code = 1008
+    self.assertEqual(local_connection._get_ws_close_code(exc), 1008)
+
 
 class LocalConnectionSendTest(unittest.IsolatedAsyncioTestCase):
   """Validates multi-modal coercion and InputEvent serialization inside LocalConnection.send()."""
@@ -3934,7 +4112,7 @@ class LocalAgentConfigTest(absltest.TestCase):
   def test_merge_models_only_defaults(self):
     config = local_connection_config.LocalAgentConfig()
     self.assertLen(config.models, 2)
-    self.assertEqual(config.models[0].name, DEFAULT_MODEL)
+    self.assertEqual(config.models[0].name, models_lib.DEFAULT_MODEL)
     self.assertEqual(config.models[0].types, [types.ModelType.TEXT])
     self.assertEqual(
         config.models[1].name,
@@ -3961,7 +4139,7 @@ class LocalAgentConfigTest(absltest.TestCase):
     self.assertLen(config.models, 2)
     self.assertEqual(config.models[0].name, "custom-image-model")
     self.assertEqual(config.models[0].types, [types.ModelType.IMAGE])
-    self.assertEqual(config.models[1].name, DEFAULT_MODEL)
+    self.assertEqual(config.models[1].name, models_lib.DEFAULT_MODEL)
     self.assertEqual(config.models[1].types, [types.ModelType.TEXT])
 
   def test_merge_models_explicit_and_shorthand(self):
@@ -4637,32 +4815,122 @@ class LocalConnectionSubagentsTest(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(appended.appended_sections[0].title, "Section1")
     self.assertEqual(appended.appended_sections[0].content, "Content1")
 
-  def test_subagent_tool_not_registered_raises(self):
-    def unregistered_tool():
-      """Not added to parent."""
+  def test_subagent_exclusive_tool_scoping(self):
+    def main_tool():
+      """Main agent tool."""
+
+    def sub_tool():
+      """Subagent exclusive tool."""
 
     subagent = types.SubagentConfig(
         name="test_helper",
         description="A helpful subagent",
-        tools=[unregistered_tool],
+        tools=[sub_tool],
+    )
+
+    tr = tool_runner.ToolRunner(tools=[main_tool, sub_tool])
+
+    strategy = local_connection.LocalConnectionStrategy(
+        subagents=[subagent],
+        workspaces=[str(self.workspace)],
+        tool_runner=tr,
+        tools=[main_tool],
+    )
+
+    harness_config = strategy._build_harness_config()
+
+    # Main agent tools should only have main_tool.
+    self.assertEqual([t.name for t in harness_config.tools], ["main_tool"])
+    # Subagent tools should only have sub_tool.
+    self.assertEqual(len(harness_config.custom_subagents), 1)
+    self.assertEqual(
+        [t.name for t in harness_config.custom_subagents[0].tools],
+        ["sub_tool"],
+    )
+
+  def test_subagent_exclusive_callable_tool_resolved_automatically(self):
+    def sub_only_tool():
+      """Only on subagent without tool_runner."""
+
+    subagent = types.SubagentConfig(
+        name="test_helper",
+        description="A helpful subagent",
+        tools=[sub_only_tool],
     )
 
     strategy = local_connection.LocalConnectionStrategy(
         subagents=[subagent],
         workspaces=[str(self.workspace)],
+        tools=[],
     )
 
-    with self.assertRaisesRegex(
-        ValueError,
-        "Subagent tool 'unregistered_tool' is not registered on the main agent"
-        " config",
-    ):
-      strategy._build_harness_config()
+    harness_config = strategy._build_harness_config()
 
-  def test_subagent_harness_tools_as_strings_raise_if_not_registered(self):
+    self.assertEqual(len(harness_config.tools), 0)
+    self.assertEqual(len(harness_config.custom_subagents), 1)
+    self.assertEqual(
+        [t.name for t in harness_config.custom_subagents[0].tools],
+        ["sub_only_tool"],
+    )
+
+  def test_subagent_callable_functor_without_name(self):
+    class FunctorTool:
+
+      def __call__(self, x: int) -> int:
+        """A functor tool."""
+        return x * 2
+
+    functor = FunctorTool()
     subagent = types.SubagentConfig(
-        name="test_helper",
-        description="A helpful subagent",
+        name="functor_helper",
+        description="Helper with functor",
+        tools=[functor],
+    )
+
+    strategy = local_connection.LocalConnectionStrategy(
+        subagents=[subagent],
+        workspaces=[str(self.workspace)],
+        tools=[],
+    )
+
+    harness_config = strategy._build_harness_config()
+    self.assertEqual(len(harness_config.custom_subagents), 1)
+    self.assertEqual(
+        [t.name for t in harness_config.custom_subagents[0].tools],
+        ["FunctorTool"],
+    )
+
+  def test_build_harness_config_tools_none_fallback(self):
+    def root_tool():
+      """Root tool."""
+
+    def sub_tool():
+      """Sub tool."""
+
+    subagent = types.SubagentConfig(
+        name="sub",
+        description="sub",
+        tools=[sub_tool],
+    )
+    tr = tool_runner.ToolRunner(tools=[root_tool, sub_tool])
+    strategy = local_connection.LocalConnectionStrategy(
+        subagents=[subagent],
+        workspaces=[str(self.workspace)],
+        tool_runner=tr,
+        # tools not specified (None)
+    )
+
+    harness_config = strategy._build_harness_config()
+    self.assertEqual([t.name for t in harness_config.tools], ["root_tool"])
+    self.assertEqual(
+        [t.name for t in harness_config.custom_subagents[0].tools],
+        ["sub_tool"],
+    )
+
+  def test_subagent_string_named_tools_builds_tool_protos(self):
+    subagent = types.SubagentConfig(
+        name="string_tool_helper",
+        description="Helper with string tools",
         tools=["view_file", "code_search"],
     )
 
@@ -4671,9 +4939,28 @@ class LocalConnectionSubagentsTest(unittest.IsolatedAsyncioTestCase):
         workspaces=[str(self.workspace)],
     )
 
+    harness_config = strategy._build_harness_config()
+    self.assertEqual(len(harness_config.custom_subagents), 1)
+    self.assertEqual(
+        [t.name for t in harness_config.custom_subagents[0].tools],
+        ["view_file", "code_search"],
+    )
+
+  def test_subagent_invalid_tool_type_raises_value_error(self):
+    subagent = types.SubagentConfig.model_construct(
+        name="invalid_helper",
+        description="Helper with invalid tool",
+        tools=[12345],  # pytype: disable=wrong-arg-types
+    )
+
+    strategy = local_connection.LocalConnectionStrategy(
+        subagents=[subagent],
+        workspaces=[str(self.workspace)],
+    )
+
     with self.assertRaisesRegex(
         ValueError,
-        "Subagent tool 'view_file' is not registered on the main agent config",
+        "Invalid tool type in subagent 'invalid_helper' tools list: 12345",
     ):
       strategy._build_harness_config()
 
