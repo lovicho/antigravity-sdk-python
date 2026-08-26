@@ -24,6 +24,7 @@ from google.antigravity.connections.local.local_connection_config import make_st
 from google.antigravity.connections.local.local_connection_config import normalize_wire_path
 from google.antigravity.connections.local.local_connection_config import PROTO_FIELD_TO_SDK_NAME
 from google.antigravity.connections.local.local_connection_config import WIRE_PATH_ARGUMENT_KEYS
+from google.antigravity.connections.local.proto_converters import _parse_stop_reason
 from google.antigravity.hooks import hook_runner as hook_runner_lib
 from google.antigravity.hooks import hooks
 
@@ -116,6 +117,7 @@ class HookRouter:
         localharness_pb2.LIFECYCLE_HOOK_ON_COMPACTION: (
             self._handle_on_compaction
         ),
+        localharness_pb2.LIFECYCLE_HOOK_STOP: self._handle_stop,
     }
 
   @property
@@ -344,6 +346,36 @@ class HookRouter:
     )
     await self._hook_runner.dispatch_compaction(turn_ctx, step_obj)
     resp.empty_result.CopyFrom(localharness_pb2.EmptyResult())
+
+  async def _handle_stop(
+      self,
+      req: localharness_pb2.CallHookRequest,
+      resp: localharness_pb2.CallHookResponse,
+  ) -> None:
+    """Handles Stop lifecycle hooks dispatched by the Go harness."""
+    stop_args = types.StopArgs()
+    if req.HasField("stop_args"):
+      sa = req.stop_args
+      stop_args = types.StopArgs(
+          response_text=sa.response_text,
+          trajectory_id=sa.trajectory_id,
+          continuation_count=sa.continuation_count,
+          stop_reason=_parse_stop_reason(sa.stop_reason),
+          error_message=sa.error_message,
+      )
+    turn_ctx = self._current_turn_context or hooks.TurnContext(
+        self._hook_runner.session_context
+    )
+    result = await self._hook_runner.dispatch_stop(turn_ctx, stop_args)
+    sr = localharness_pb2.StopResult()
+    if result.decision == types.StopDecision.CONTINUE:
+      self._current_turn_context = turn_ctx
+      sr.decision = localharness_pb2.StopResult.Decision.CONTINUE
+      sr.reason = result.reason.strip()
+    else:
+      self._current_turn_context = None
+      sr.decision = localharness_pb2.StopResult.Decision.ALLOW_STOP
+    resp.stop_result.CopyFrom(sr)
 
   async def handle(self, req: localharness_pb2.CallHookRequest) -> None:
     """Handles an incoming CallHookRequest and sends a CallHookResponse back to the harness."""

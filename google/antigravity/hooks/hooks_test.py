@@ -366,6 +366,76 @@ class BaseHookTest(unittest.IsolatedAsyncioTestCase):
     res = await my_sync_hook("test")
     self.assertEqual(res, "echo: test")
 
+  async def test_stop_hook_class(self):
+    """Verifies StopHook can be instantiated and executed."""
+
+    class MyStopHook(hooks.StopHook):
+
+      async def run(
+          self, context: hooks.HookContext, data: types.StopArgs
+      ) -> types.StopHookResult:
+        return types.StopHookResult(
+            decision=types.StopDecision.CONTINUE,
+            reason=f"Continue because: {data.response_text}",
+        )
+
+    hook = MyStopHook()
+    ctx = hooks.HookContext()
+    args = types.StopArgs(response_text="hello world")
+    res = await hook.run(ctx, args)
+    self.assertEqual(res.decision, types.StopDecision.CONTINUE)
+    self.assertEqual(res.reason, "Continue because: hello world")
+
+  async def test_decorator_stop_async(self):
+    """Verifies @stop decorator works with an async function."""
+
+    @hooks.stop
+    async def my_hook(data: types.StopArgs) -> types.StopHookResult:
+      return types.StopHookResult(
+          decision=types.StopDecision.CONTINUE,
+          reason=f"Continue for: {data.response_text}",
+      )
+
+    self.assertIsInstance(my_hook, hooks.StopHook)
+    ctx = hooks.HookContext()
+    res = await my_hook.run(ctx, types.StopArgs(response_text="async test"))
+    self.assertEqual(res.decision, types.StopDecision.CONTINUE)
+    self.assertEqual(res.reason, "Continue for: async test")
+
+  async def test_decorator_stop_sync(self):
+    """Verifies @stop decorator works with a sync function."""
+
+    @hooks.stop
+    def my_sync_hook(data: types.StopArgs) -> types.StopHookResult:
+      return types.StopHookResult(
+          decision=types.StopDecision.ALLOW_STOP,
+          reason=f"Finished: {data.response_text}",
+      )
+
+    self.assertIsInstance(my_sync_hook, hooks.StopHook)
+    ctx = hooks.HookContext()
+    res = await my_sync_hook.run(ctx, types.StopArgs(response_text="sync test"))
+    self.assertEqual(res.decision, types.StopDecision.ALLOW_STOP)
+    self.assertEqual(res.reason, "Finished: sync test")
+
+  async def test_decorator_stop_with_context(self):
+    """Verifies @stop decorator passes context and data correctly."""
+
+    @hooks.stop
+    async def my_hook(
+        context: hooks.HookContext, data: types.StopArgs
+    ) -> types.StopHookResult:
+      return types.StopHookResult(
+          decision=types.StopDecision.ALLOW_STOP,
+          reason=(
+              f"ctx_type={type(context).__name__}, text={data.response_text}"
+          ),
+      )
+
+    ctx = hooks.HookContext()
+    res = await my_hook.run(ctx, types.StopArgs(response_text="ctx test"))
+    self.assertEqual(res.reason, "ctx_type=HookContext, text=ctx test")
+
 
 if __name__ == "__main__":
   unittest.main()

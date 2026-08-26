@@ -75,7 +75,7 @@ async def _poll_queue_callback(ctx: TriggerContext) -> None:
     # ctx.send pushes an automated trigger notification into the connection.
     # The agent's model will see this message in its conversation history.
     await ctx.send(
-        "[SYSTEM ALERT] New critical ticket assigned: b/98765. Title: "
+        "[SYSTEM ALERT] New critical ticket assigned: (internal issue). Title: "
         "Database Connection Leak in Prod."
     )
 

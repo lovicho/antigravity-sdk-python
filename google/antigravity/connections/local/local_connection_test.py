@@ -17,13 +17,16 @@
 import asyncio
 import base64
 import datetime
+import enum
 import importlib
 import io
+import json
 import os
 import pathlib
 import struct
 import subprocess
 import tempfile
+from typing import Any, Literal, Union
 import typing
 import unittest
 from unittest import mock
@@ -43,6 +46,7 @@ from google.antigravity.connections.local import test_utils
 from google.antigravity.hooks import hook_runner
 from google.antigravity.hooks import hooks as hooks_base
 from google.antigravity.hooks import policy
+from google.antigravity.tools import tool_context
 from google.antigravity.tools import tool_runner
 
 
@@ -64,6 +68,196 @@ class PromptSanitizationTest(unittest.TestCase):
   def test_to_proto_input_content_sanitizes_strings(self):
     part = local_connection.to_proto_input_content("Bad\x00Input\x7f")
     self.assertEqual(part.text, "Bad Input ")
+
+
+class CallableToToolProtoTest(unittest.TestCase):
+  """Tests for callable_to_tool_proto schema conversion."""
+
+  def test_callable_to_tool_proto_schema_lowercase_types(self):
+    def get_temperature(location: str) -> str:
+      """Get the current temperature."""
+      return f"The temperature in {location} is 72°F."
+
+    proto = local_connection.callable_to_tool_proto(get_temperature)
+    schema = json.loads(proto.parameters_json_schema)
+    self.assertEqual(schema.get("type"), "object")
+    self.assertEqual(
+        schema.get("properties", {}).get("location", {}).get("type"),
+        "string",
+    )
+
+  def test_callable_to_tool_proto_complex_types(self):
+    class ItemDetail(pydantic.BaseModel):
+      item_name: str
+      quantity: int = 1
+
+    # pylint: disable=unused-argument
+    def create_order(
+        order_id: str,
+        count: int,
+        price: float,
+        is_express: bool,
+        tags: list[str],
+        items: list[ItemDetail],
+    ) -> dict[str, str]:
+      """Create a new order with details."""
+      return {"order_id": order_id}
+    # pylint: enable=unused-argument
+
+    proto = local_connection.callable_to_tool_proto(create_order)
+    schema = json.loads(proto.parameters_json_schema)
+    self.assertEqual(schema.get("type"), "object")
+    props = schema.get("properties", {})
+    self.assertEqual(props.get("order_id", {}).get("type"), "string")
+    self.assertEqual(props.get("count", {}).get("type"), "integer")
+    self.assertEqual(props.get("price", {}).get("type"), "number")
+    self.assertEqual(props.get("is_express", {}).get("type"), "boolean")
+    self.assertEqual(props.get("tags", {}).get("type"), "array")
+    self.assertEqual(
+        props.get("tags", {}).get("items", {}).get("type"), "string"
+    )
+    self.assertEqual(props.get("items", {}).get("type"), "array")
+
+  def test_callable_to_tool_proto_enum_preserves_values(self):
+    class Direction(enum.Enum):
+      NORTH = "NORTH"
+      SOUTH = "SOUTH"
+      EAST = "EAST"
+      WEST = "WEST"
+
+    def navigate(direction: Direction) -> str:
+      """Navigate in a direction."""
+      return f"Heading {direction.value}"
+
+    proto = local_connection.callable_to_tool_proto(navigate)
+    schema = json.loads(proto.parameters_json_schema)
+    self.assertEqual(schema.get("type"), "object")
+    dir_prop = schema.get("properties", {}).get("direction", {})
+    self.assertEqual(dir_prop.get("type"), "string")
+    self.assertEqual(
+        dir_prop.get("enum"), ["NORTH", "SOUTH", "EAST", "WEST"]
+    )
+
+  def test_callable_to_tool_proto_no_params(self):
+    def get_version() -> str:
+      """Return system version."""
+      return "1.0.0"
+
+    proto = local_connection.callable_to_tool_proto(get_version)
+    schema = json.loads(proto.parameters_json_schema)
+    self.assertEqual(schema.get("type"), "object")
+
+  def test_callable_to_tool_proto_tool_with_schema(self):
+    def raw_search(query: str) -> str:
+      """Search documents."""
+      return query
+
+    tool = tool_runner.ToolWithSchema(
+        fn=raw_search,
+        input_schema={
+            "type": "OBJECT",
+            "properties": {"query": {"type": "STRING"}},
+        },
+    )
+
+    proto = local_connection.callable_to_tool_proto(tool)
+    schema = json.loads(proto.parameters_json_schema)
+    self.assertEqual(schema.get("type"), "object")
+    self.assertEqual(
+        schema.get("properties", {}).get("query", {}).get("type"), "string"
+    )
+
+  def test_callable_to_tool_proto_param_named_type_collision(self):
+    # pylint: disable=redefined-builtin
+    def configure(type: str, timeout: int) -> dict[str, Any]:
+      """Configure system with type and timeout."""
+      return {"type": type, "timeout": timeout}
+    # pylint: enable=redefined-builtin
+
+    proto = local_connection.callable_to_tool_proto(configure)
+    schema = json.loads(proto.parameters_json_schema)
+    self.assertEqual(schema.get("type"), "object")
+    props = schema.get("properties", {})
+    self.assertIn("type", props)
+    self.assertEqual(props["type"].get("type"), "string")
+    self.assertEqual(props.get("timeout", {}).get("type"), "integer")
+
+  def test_callable_to_tool_proto_literal_enum_preservation(self):
+    def set_log_level(
+        level: Literal["DEBUG", "INFO", "WARNING", "ERROR"],
+    ) -> str:
+      """Set logging level."""
+      return level
+
+    proto = local_connection.callable_to_tool_proto(set_log_level)
+    schema = json.loads(proto.parameters_json_schema)
+    self.assertEqual(schema.get("type"), "object")
+    level_prop = schema.get("properties", {}).get("level", {})
+    self.assertEqual(level_prop.get("type"), "string")
+    self.assertEqual(
+        level_prop.get("enum"), ["DEBUG", "INFO", "WARNING", "ERROR"]
+    )
+
+  def test_callable_to_tool_proto_union_combiners(self):
+    def process_id(identifier: Union[int, str]) -> str:
+      """Process an identifier that can be int or str."""
+      return str(identifier)
+
+    proto = local_connection.callable_to_tool_proto(process_id)
+    schema = json.loads(proto.parameters_json_schema)
+    self.assertEqual(schema.get("type"), "object")
+    id_prop = schema.get("properties", {}).get("identifier", {})
+    self.assertIn("anyOf", id_prop)
+    self.assertNotIn("any_of", id_prop)
+    combiner = id_prop["anyOf"]
+    types_in_union = {c.get("type") for c in combiner if isinstance(c, dict)}
+    self.assertTrue({"integer", "string"}.issubset(types_in_union))
+
+  def test_callable_to_tool_proto_tool_context_injection_stripping(self):
+    # pylint: disable=unused-argument
+    def inspect_tool(ctx: tool_context.ToolContext, query: str) -> str:
+      """Tool that requests context injection."""
+      return query
+    # pylint: enable=unused-argument
+
+    runner = tool_runner.ToolRunner([inspect_tool])
+    proto = local_connection.callable_to_tool_proto(
+        inspect_tool, tool_runner=runner
+    )
+    schema = json.loads(proto.parameters_json_schema)
+    self.assertEqual(schema.get("type"), "object")
+    props = schema.get("properties", {})
+    self.assertNotIn("ctx", props)
+    self.assertIn("query", props)
+    self.assertEqual(props["query"].get("type"), "string")
+
+  def test_callable_to_tool_proto_tool_with_schema_uppercase_types(self):
+    def raw_fn(x: int) -> int:
+      return x
+
+    tool = tool_runner.ToolWithSchema(
+        fn=raw_fn,
+        input_schema={
+            "type": "OBJECT",
+            "properties": {
+                "count": {"type": "INTEGER"},
+                "rate": {"type": "NUMBER"},
+            },
+            "const": "UPPERCASE_CONST",
+            "default": "DEFAULT_VAL",
+        },
+    )
+    proto = local_connection.callable_to_tool_proto(tool)
+    schema = json.loads(proto.parameters_json_schema)
+    self.assertEqual(schema.get("type"), "object")
+    self.assertEqual(
+        schema.get("properties", {}).get("count", {}).get("type"), "integer"
+    )
+    self.assertEqual(
+        schema.get("properties", {}).get("rate", {}).get("type"), "number"
+    )
+    self.assertEqual(schema.get("const"), "UPPERCASE_CONST")
+    self.assertEqual(schema.get("default"), "DEFAULT_VAL")
 
 
 class LocalConnectionTest(unittest.IsolatedAsyncioTestCase):
@@ -1563,7 +1757,10 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
         subagents=localharness_pb2.SubagentsConfig(enabled=False),
         user_questions=localharness_pb2.UserQuestionsConfig(enabled=False),
         run_command=localharness_pb2.RunCommandToolConfig(
-            enabled=False, enable_daemon_commands=False, max_timeout_ms=0
+            enabled=False,
+            enable_daemon_commands=False,
+            max_timeout_ms=0,
+            enable_sandbox=False,
         ),
         find=localharness_pb2.FindToolConfig(enabled=False),
         generate_image=localharness_pb2.GenerateImageToolConfig(enabled=False),
@@ -1626,6 +1823,33 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
         config.harness_side_tools.run_command.max_timeout_ms,
         0,
     )
+
+  def test_capabilities_config_run_command_sandbox_forwarded(self):
+    """Verifies the OS-sandbox opt-in maps onto RunCommandToolConfig.
+
+    Why: The ACP server sets run_command_config.enable_sandbox to honor the
+    enterprise PROCEED_IN_SANDBOX / sandbox_mode admin controls; it must reach
+    the harness/cortex over the wire.
+    """
+    strategy = self._make_strategy(
+        capabilities_config=types.CapabilitiesConfig(
+            run_command_config=types.RunCommandConfig(enable_sandbox=True),
+        )
+    )
+    config = strategy._build_harness_config()
+
+    run_command = config.harness_side_tools.run_command
+    self.assertTrue(run_command.enabled)
+    self.assertTrue(run_command.enable_sandbox)
+
+  def test_capabilities_config_run_command_sandbox_defaults_off(self):
+    strategy = self._make_strategy(
+        capabilities_config=types.CapabilitiesConfig()
+    )
+    config = strategy._build_harness_config()
+
+    run_command = config.harness_side_tools.run_command
+    self.assertFalse(run_command.enable_sandbox)
 
   def test_capabilities_config_max_subagent_depth_and_allowed_subagents(self):
     """Verifies max_subagent_depth and allowed_subagents map to SubagentsConfig."""
@@ -3313,6 +3537,87 @@ class LocalConnectionCompactionHookTest(unittest.IsolatedAsyncioTestCase):
     strategy = local_connection.LocalConnectionStrategy(hook_runner=hr)
     enabled = strategy._get_enabled_hooks()
     self.assertIn(localharness_pb2.LIFECYCLE_HOOK_ON_COMPACTION, enabled)
+
+
+class LocalConnectionStopHookTest(unittest.IsolatedAsyncioTestCase):
+  """Tests for Stop lifecycle hook dispatch."""
+
+  def setUp(self):
+    super().setUp()
+    self.mock_process = mock.MagicMock()
+
+  def test_get_enabled_hooks_includes_stop(self):
+    """Verifies _get_enabled_hooks includes LIFECYCLE_HOOK_STOP."""
+    hr = hook_runner.HookRunner()
+
+    class StopHook(hooks_base.StopHook):
+
+      async def run(self, context, data):
+        return types.StopHookResult()
+
+    hr.register_hook(StopHook())
+    strategy = local_connection.LocalConnectionStrategy(hook_runner=hr)
+    enabled = strategy._get_enabled_hooks()
+    self.assertIn(localharness_pb2.LIFECYCLE_HOOK_STOP, enabled)
+
+  async def test_stop_hook_dispatched_via_local_harness(self):
+    """Verifies StopHook fires and returns StopResult over the wire."""
+    captured = []
+    event = asyncio.Event()
+
+    class CustomStopHook(hooks_base.StopHook):
+
+      async def run(self, context, data):
+        captured.append(data)
+        event.set()
+        return types.StopHookResult(
+            decision=types.StopDecision.CONTINUE,
+            reason="Continue working",
+        )
+
+    hr = hook_runner.HookRunner()
+    hr.register_hook(CustomStopHook())
+
+    harness = test_utils.TestLocalHarness(
+        test_case=self,
+        process=self.mock_process,
+        hook_runner=hr,
+    )
+
+    req = localharness_pb2.CallHookRequest(
+        request_id="req_stop_1",
+        name="Stop",
+        type=localharness_pb2.LIFECYCLE_HOOK_STOP,
+        stop_args=localharness_pb2.StopArgs(
+            response_text="Done with task",
+            trajectory_id="main_traj",
+            continuation_count=0,
+            stop_reason=localharness_pb2.TrajectoryStateUpdate.STOP_REASON_UNSPECIFIED,
+            error_message="",
+        ),
+    )
+    output_event = localharness_pb2.OutputEvent(call_hook_request=req)
+    await harness.send_event(output_event)
+
+    await asyncio.wait_for(event.wait(), timeout=1.0)
+    self.assertEqual(len(captured), 1)
+    self.assertEqual(captured[0].response_text, "Done with task")
+    self.assertEqual(captured[0].trajectory_id, "main_traj")
+    self.assertEqual(captured[0].continuation_count, 0)
+    self.assertEqual(captured[0].stop_reason, types.StopReason.UNSPECIFIED)
+
+    resp = await harness.wait_for_response(timeout=1.0)
+    self.assertIn("callHookResponse", resp)
+    self.assertEqual(resp["callHookResponse"]["requestId"], "req_stop_1")
+    self.assertIn("stopResult", resp["callHookResponse"])
+    self.assertEqual(
+        resp["callHookResponse"]["stopResult"]["decision"],
+        "CONTINUE",
+    )
+    self.assertEqual(
+        resp["callHookResponse"]["stopResult"]["reason"],
+        "Continue working",
+    )
 
 
 class LocalConnectionSubagentHookTest(unittest.IsolatedAsyncioTestCase):

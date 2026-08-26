@@ -371,7 +371,7 @@ class ConnectionStrategy(abc.ABC):
     Raises:
       RuntimeError: If the connection has not been established.
     """
-    # TODO(kibergus): This method is meant to return a new independent
+    # TODO: This method is meant to return a new independent
     # connection, but at the moment most of the implementations return the same
     # connection. This will be rectified in a separate CL.
     ...

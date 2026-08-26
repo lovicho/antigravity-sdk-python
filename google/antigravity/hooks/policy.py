@@ -645,7 +645,7 @@ _DECISION_TO_PROTO = {
 }
 
 
-# TODO(b/539696157): Add explicit server_name field to Policy dataclass to
+# TODO: Add explicit server_name field to Policy dataclass to
 # eliminate slashed "server/tool" string packing and remove _parse_tool_target.
 def _parse_tool_target(tool: str) -> tuple[str, str]:
   """Decomposes 'server/tool' format into (tool_name, server_name) for proto.
@@ -689,7 +689,7 @@ def _to_policy_config_proto(
   proto_rules: list[localharness_pb2.PolicyRule] = []
 
   for i, p in enumerate(flat):
-    # TODO(b/539696157): Remove _parse_tool_target once Policy has server_name.
+    # TODO: Remove _parse_tool_target once Policy has server_name.
     tool_name, server_name = _parse_tool_target(p.tool)
     is_workspace_only = p.name == _WORKSPACE_ONLY_POLICY_NAME
     is_dynamic = (

@@ -31,11 +31,13 @@ import sys
 
 from google.antigravity import Agent
 from google.antigravity import LocalAgentConfig
+from google.antigravity import types
 from google.antigravity.utils import interactive  # pyrefly: ignore[missing-module-attribute]
 
 
 async def main() -> None:
-  # Default config enables all tools, including ASK_QUESTION.
+  # Configure interactive agent behavior to enable interactive tools like
+  # ASK_QUESTION.
   config = LocalAgentConfig(
       system_instructions=(
           "When you need clarification or more information from the user to "
@@ -43,6 +45,9 @@ async def main() -> None:
           "prompt them."
       ),
       hooks=[interactive.AskQuestionHook()],
+      capabilities=types.CapabilitiesConfig(
+          agent_behavior=types.AgentBehavior.INTERACTIVE,
+      ),
   )
 
   async with Agent(config) as my_agent:

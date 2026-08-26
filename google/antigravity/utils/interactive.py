@@ -365,7 +365,8 @@ async def run_interactive_loop(
   """Runs an interactive CLI loop for debugging and development.
 
   Constructs and runs the agent within an interactive session, registering an
-  ``AskQuestionHook`` and upgrading ``confirm_run_command()`` to ASK_USER
+  ``AskQuestionHook``, upgrading ``confirm_run_command()`` to ASK_USER, and
+  ensuring ``agent_behavior`` is set to ``AgentBehavior.INTERACTIVE``
   so the user can answer prompts from the model.
 
   Type ``exit`` or ``quit`` to end the session. Ctrl+C also exits cleanly.
@@ -380,8 +381,18 @@ async def run_interactive_loop(
 
   policies_list = _upgrade_policies_list(config.policies)
 
+  capabilities = config.capabilities
+  if capabilities.agent_behavior != types.AgentBehavior.INTERACTIVE:
+    capabilities = capabilities.model_copy(
+        update={"agent_behavior": types.AgentBehavior.INTERACTIVE}
+    )
+
   upgraded_config = config.model_copy(
-      update={"hooks": hooks_list, "policies": policies_list}
+      update={
+          "hooks": hooks_list,
+          "policies": policies_list,
+          "capabilities": capabilities,
+      }
   )
   agent = agent_class(upgraded_config)
 

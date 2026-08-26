@@ -18,21 +18,42 @@ import argparse
 import asyncio
 from collections.abc import AsyncIterator
 import contextlib
-import socket
+import importlib
 import sys
-from typing import Literal, Sequence
+from typing import Any, Literal, Sequence
 
-from mcp.server.fastmcp import server
 import uvicorn
 
 Transport = Literal["stdio", "sse", "streamable-http"]
 
 
-def _create_server(port: int) -> server.FastMCP:
-  """Creates and configures the FastMCP server."""
+def _get_mcp_server_class() -> Any:
+  """Resolves the MCP server class for MCP 1.0 (FastMCP) or 2.0 (MCPServer)."""
+  for mod_name, attr_name in [
+      ("mcp.server.fastmcp", "FastMCP"),
+      ("mcp.server.mcpserver", "MCPServer"),
+      ("mcp.server", "MCPServer"),
+  ]:
+    try:
+      mod = importlib.import_module(mod_name)
+      if hasattr(mod, attr_name):
+        return getattr(mod, attr_name)
+    except ImportError:
+      continue
+  raise ImportError(
+      "Could not find FastMCP (mcp 1.0) or MCPServer (mcp 2.0) in mcp package."
+  )
+
+
+def _create_server(port: int = 0) -> Any:
+  """Creates and configures the FastMCP or MCPServer instance."""
   # Footgun: You gotta run this on 0.0.0.0, not localhost, as we healthcheck
   # from the actor.
-  mcp = server.FastMCP("Pirate Math", host="0.0.0.0", port=port)
+  mcp_cls = _get_mcp_server_class()
+  try:
+    mcp = mcp_cls("Pirate Math", host="0.0.0.0", port=port)
+  except TypeError:
+    mcp = mcp_cls("Pirate Math")
 
   @mcp.tool()
   def pirate_multiply(a: int, b: int) -> str:
@@ -101,8 +122,9 @@ async def run(transport: str, port: int = 0) -> AsyncIterator[int]:
           "Use 'sse' or 'streamable-http'."
       )
 
+  host = getattr(getattr(mcp, "settings", None), "host", "0.0.0.0") or "0.0.0.0"
   config = uvicorn.Config(
-      starlette_app, host=mcp.settings.host, port=port, log_level="warning"
+      starlette_app, host=host, port=port, log_level="warning"
   )
   uvicorn_server = uvicorn.Server(config)
   task = asyncio.create_task(uvicorn_server.serve())
@@ -137,7 +159,10 @@ def main(argv: Sequence[str]) -> None:
   args = parser.parse_args(argv[1:])
 
   mcp = _create_server(args.port)
-  mcp.run(transport=args.transport)
+  try:
+    mcp.run(transport=args.transport, host="0.0.0.0", port=args.port)
+  except TypeError:
+    mcp.run(transport=args.transport)
 
 
 if __name__ == "__main__":

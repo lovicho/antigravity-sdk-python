@@ -236,6 +236,7 @@ async def run():
       ],
       tools=[greet, broken_tool],
       capabilities=types.CapabilitiesConfig(
+          agent_behavior=types.AgentBehavior.INTERACTIVE,
           enable_subagents=True,
       ),
   )

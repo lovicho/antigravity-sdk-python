@@ -102,6 +102,31 @@ async def on_error(data: Exception):
     return None  # Let the error propagate
 ```
 
+### Stop Hook
+
+Invoked when the root trajectory reaches fully idle — i.e. the agent is about to
+stop. Return `types.StopHookResult(decision=types.StopDecision.CONTINUE,
+reason="...")` to inject a system message and resume the agent loop, or return
+`types.StopHookResult(decision=types.StopDecision.ALLOW_STOP)` (or default
+`types.StopHookResult()`) to let the turn end. Note that `decision=CONTINUE`
+strictly requires a non-empty `reason` (raises `ValueError` if omitted or
+empty). Multiple stop hooks are evaluated sequentially; the first `CONTINUE`
+short-circuits.
+
+```python
+from google.antigravity import types
+from google.antigravity.hooks import hooks
+
+@hooks.stop
+async def on_stop(data: types.StopArgs) -> types.StopHookResult:
+    if data.continuation_count == 0 and "summary" not in data.response_text.lower():
+        return types.StopHookResult(
+            decision=types.StopDecision.CONTINUE,
+            reason="Please provide a brief summary before finishing.",
+        )
+    return types.StopHookResult(decision=types.StopDecision.ALLOW_STOP)
+```
+
 ### Interaction Hook
 
 Invoked when the agent needs user interaction (e.g., asking a question).
@@ -134,6 +159,7 @@ Hooks are registered when creating the `LocalAgentConfig`.
 
 ```python
 from google.antigravity.connections.local import LocalAgentConfig
+from google.antigravity import types
 
 config = LocalAgentConfig(
     hooks=[
@@ -144,8 +170,12 @@ config = LocalAgentConfig(
         pre_tool,
         post_tool,
         on_error,
+        on_stop,
         on_compact,
         on_interact,
     ],
+    capabilities=types.CapabilitiesConfig(
+        agent_behavior=types.AgentBehavior.INTERACTIVE,
+    ),
 )
 ```

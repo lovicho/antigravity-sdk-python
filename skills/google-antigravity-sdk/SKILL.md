@@ -98,7 +98,7 @@ relevant information.
     events or file system triggers in the background, read
     `examples/getting_started/periodic_trigger.md`.
 -   If the user needs to intercept agent lifecycle events (e.g., pre/post turn,
-    tool execution, errors) to customize execution flow, read
+    stop, tool execution, errors) to customize execution flow, read
     `examples/getting_started/hooks.md`.
 -   If the user needs to implement turn-level cancellation or programmatic
     stream aborts, read `examples/getting_started/cancellation.md`.

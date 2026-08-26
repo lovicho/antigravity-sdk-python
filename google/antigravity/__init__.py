@@ -28,6 +28,7 @@ from google.antigravity.types import CapabilitiesConfig
 from google.antigravity.types import Content
 from google.antigravity.types import CustomSystemInstructions
 from google.antigravity.types import Document
+from google.antigravity.types import from_bytes
 from google.antigravity.types import from_file
 from google.antigravity.types import GeminiAPIEndpoint
 from google.antigravity.types import GeminiModelOptions
@@ -79,5 +80,6 @@ __all__ = [
     "VertexEndpoint",
     "Video",
     "ToolExecutionError",
+    "from_bytes",
     "from_file",
 ]

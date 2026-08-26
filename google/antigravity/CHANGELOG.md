@@ -1,11 +1,43 @@
 # Changelog
 
-<!-- disableFinding(LINE_OVER_80) -->
-<!-- disableFinding(LIST_NO_LINE) -->
+
+
 
 All notable changes to the Google Antigravity Python SDK will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
+
+## [0.1.15] - 2026-08-25
+
+Antigravity Python SDK v0.1.15 introduces subagent-exclusive tool scoping to reduce context overhead, adds an `on_compaction` lifecycle hook for observing context checkpointing, expands platform compatibility with Alpine Linux musl wheels, resolves workspace path normalization and custom Vertex endpoint routing, and adds universal JSON Schema normalization for custom Python tools when targeting local OpenAI-compatible LLM endpoints.
+
+### 🌟 Key Highlights
+- **Subagent-Scoped Custom Tools**: Custom tools can now be registered directly on subagents without requiring registration on the root agent. Subagent-specific tools are strictly isolated to the subagent's execution context and will not leak into the root agent's prompt or consume root context tokens.
+- **Context Compaction Lifecycle Hook**: Improved support for the `on_compaction` lifecycle hook to more precisely capture compaction events and summaries whenever long-running conversations trigger checkpointing.
+- **Custom Base URL & Secure Vertex Proxy Support**: `VertexEndpoint` now supports routing requests to custom `base_url` reverse proxies or enterprise gateways without leaking ambient Google Cloud Application Default Credentials (ADC) OAuth tokens or conflicting with project/location configurations.
+- **Universal JSON Schema Normalization for Custom Tools**: Custom Python tools now produce standard OpenAPI / JSON Schema compliant parameter definitions with lowercase types and camelCase combiners, eliminating HTTP 400 Bad Request schema errors when connecting to local OpenAI-compatible engines such as Ollama, LM Studio, or vLLM.
+
+---
+
+### 📋 Detailed Changes
+
+#### Features & Enhancements
+- **`from_bytes` Helper Export**: Exported the `from_bytes` helper in top-level `google.antigravity` alongside `from_file` for creating binary/multimodal content payloads.
+- **PEP 656 musllinux Wheel Support**: Added `musllinux_1_1` wheel platform tags for x86_64 and aarch64 architectures, enabling direct installation via pip on Alpine Linux containers.
+- **Isolated Harness Environment Configuration**: Added per-connection environment dictionary resolution for `ANTIGRAVITY_HARNESS_PATH`, avoiding the need to mutate global `os.environ`.
+- **Tool Call Metadata Preservation**: Preserved `id`, `step_id`, and `server_name` metadata across all `ToolResult` executions, including batch calls, errors, and unknown tools.
+
+#### Model & Default Changes
+- **Relative Workspace Path Normalization**: `LocalAgentConfig(workspaces=...)` now resolves relative directory paths and tilde (`~`) expansions against the current working directory (`os.getcwd()`). Previously, relative paths were passed unresolved to the harness and interpreted as absolute root paths, causing workspace indexing failures. Pass absolute paths or `pathlib.Path` instances if referencing directories outside the current working tree.
+- **Deprecated `TriggerDelivery` Removal**: Removed the unused `TriggerDelivery` enum from `types.py`.
+
+#### Bug Fixes
+- **Local OpenAI Tool Schema Validation**: Fixed HTTP 400 "Invalid discriminator value" errors on local OpenAI endpoints by canonicalizing tool parameter schemas to standard JSON Schema.
+- **Vertex Custom Gateway Token Leaks**: Fixed host GCP OAuth bearer token leakage and environment variable collisions when using custom `base_url` endpoints with `VertexEndpoint`.
+- **Subagent Custom Tool Routing**: Fixed tool dispatch failures when subagents defined tools not registered on the root agent.
+- **`UsageMetadata` Service Tier Loss**: Fixed `UsageMetadata.__sub__` dropping the `service_tier` field when calculating per-turn usage deltas.
+- **WebSocket Deprecation Warnings**: Resolved `DeprecationWarning` exceptions when reading WebSocket close codes across varying websockets library versions.
+- **OpenTelemetry Optional Dependency Guard**: Fixed test collection failures on minimal environments lacking `opentelemetry.sdk`.
 
 ## [0.1.14] - 2026-08-21
 

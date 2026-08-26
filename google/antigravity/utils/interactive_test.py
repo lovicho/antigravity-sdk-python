@@ -449,6 +449,92 @@ class RunInteractiveLoopTest(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(len(called_config.hooks), 1)
     self.assertIs(called_config.hooks[0], existing_hook)
 
+  @mock.patch(
+      "google.antigravity.utils.interactive.async_input",
+      new_callable=mock.AsyncMock,
+  )
+  async def test_run_interactive_loop_upgrades_agent_behavior_to_interactive(
+      self, mock_async_input
+  ):
+    """Verifies that agent_behavior is upgraded to INTERACTIVE.
+
+    Also verifies that other configured capability fields are preserved.
+    """
+    mock_async_input.side_effect = ["exit"]
+
+    mock_agent_instance = mock.MagicMock(spec=agent.Agent)
+    mock_agent_instance.__aenter__ = mock.AsyncMock(
+        return_value=mock_agent_instance
+    )
+    mock_agent_instance.__aexit__ = mock.AsyncMock()
+    mock_agent_class = mock.Mock(return_value=mock_agent_instance)
+
+    config = local_connection.LocalAgentConfig(
+        system_instructions="test",
+        capabilities=types.CapabilitiesConfig(
+            enable_subagents=True,
+            disabled_tools=[types.BuiltinTools.SEARCH_WEB],
+        ),
+    )
+    self.assertEqual(
+        config.capabilities.agent_behavior, types.AgentBehavior.AUTONOMOUS
+    )
+
+    with mock.patch("builtins.print"):
+      await interactive.run_interactive_loop(
+          config, agent_class=mock_agent_class
+      )
+
+    mock_agent_class.assert_called_once()
+    called_config = mock_agent_class.call_args[0][0]
+    self.assertEqual(
+        called_config.capabilities.agent_behavior,
+        types.AgentBehavior.INTERACTIVE,
+    )
+    self.assertTrue(called_config.capabilities.enable_subagents)
+    self.assertEqual(
+        called_config.capabilities.disabled_tools,
+        [types.BuiltinTools.SEARCH_WEB],
+    )
+
+  @mock.patch(
+      "google.antigravity.utils.interactive.async_input",
+      new_callable=mock.AsyncMock,
+  )
+  async def test_run_interactive_loop_preserves_existing_interactive_behavior(
+      self, mock_async_input
+  ):
+    """Verifies that agent_behavior remains INTERACTIVE if already configured."""
+    mock_async_input.side_effect = ["exit"]
+
+    mock_agent_instance = mock.MagicMock(spec=agent.Agent)
+    mock_agent_instance.__aenter__ = mock.AsyncMock(
+        return_value=mock_agent_instance
+    )
+    mock_agent_instance.__aexit__ = mock.AsyncMock()
+    mock_agent_class = mock.Mock(return_value=mock_agent_instance)
+
+    config = local_connection.LocalAgentConfig(
+        system_instructions="test",
+        capabilities=types.CapabilitiesConfig(
+            agent_behavior=types.AgentBehavior.INTERACTIVE,
+            enable_subagents=True,
+        ),
+    )
+
+    with mock.patch("builtins.print"):
+      await interactive.run_interactive_loop(
+          config, agent_class=mock_agent_class
+      )
+
+    mock_agent_class.assert_called_once()
+    called_config = mock_agent_class.call_args[0][0]
+    self.assertEqual(
+        called_config.capabilities.agent_behavior,
+        types.AgentBehavior.INTERACTIVE,
+    )
+    self.assertTrue(called_config.capabilities.enable_subagents)
+
 
 class FormatStepSpinnerMessageTest(unittest.TestCase):
   """Tests for _format_step_spinner_message (mock-free)."""

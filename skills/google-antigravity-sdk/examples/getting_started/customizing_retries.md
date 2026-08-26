@@ -1,4 +1,4 @@
-<!-- disableFinding(LINE_OVER_80) -->
+
 # Customizing Retry & Backoff Behavior
 
 By default, the agent backend automatically enables retries for transient errors:

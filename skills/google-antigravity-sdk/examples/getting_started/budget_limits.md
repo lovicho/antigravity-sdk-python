@@ -1,4 +1,4 @@
-<!-- disableFinding(LINE_OVER_80) -->
+
 # Session Budget Limits & Stop Reasons
 
 This guide demonstrates how to configure operational limits and proactive token budget controls using `BudgetConfig`, and how to inspect turn termination causes via `StopReason`.

@@ -33,7 +33,7 @@ python3 --version
 
 echo "--- Installing build tools with hash verification ---"
 # Install build/release tools with hash verification.
-# See go/pip-install-remediation.
+# See (internal link).
 python3 -m pip install \
   --require-hashes \
   --no-deps \
@@ -44,7 +44,7 @@ echo "--- Installing runtime and test dependencies with hash verification ---"
 # The lockfile is generated from pyproject.toml via:
 #   pip-compile --allow-unsafe --generate-hashes --extra dev pyproject.toml \
 #     -o .kokoro/requirements-test.txt
-# See go/pip-install-remediation.
+# See (internal link).
 python3 -m pip install \
   --require-hashes \
   --no-deps \

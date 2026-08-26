@@ -103,14 +103,14 @@ def _make_public_callable(
   if _is_async(fn):
 
     @functools.wraps(fn)
-    async def _proxy(**kwargs):
-      return await fn(**kwargs)
+    async def _proxy(*args: Any, **kwargs: Any) -> Any:
+      return await fn(*args, **kwargs)
 
   else:
 
     @functools.wraps(fn)
-    def _proxy(**kwargs):
-      return fn(**kwargs)
+    def _proxy(*args: Any, **kwargs: Any) -> Any:
+      return fn(*args, **kwargs)
 
   setattr(_proxy, "__signature__", public_sig)
   return _proxy
@@ -125,8 +125,8 @@ class ToolWithSchema:
     self.__name__ = getattr(fn, "__name__", None) or type(fn).__name__
     self.__doc__ = getattr(fn, "__doc__", None)
 
-  def __call__(self, **kwargs: Any) -> Any:
-    return self.fn(**kwargs)
+  def __call__(self, *args: Any, **kwargs: Any) -> Any:
+    return self.fn(*args, **kwargs)
 
 
 def _is_async(callable_obj: Any) -> bool:
@@ -365,12 +365,25 @@ class ToolRunner:
       try:
         if tc.name not in self._tools:
           return types.ToolResult(
-              name=tc.name, error=f"Unknown tool: '{tc.name}'"
+              id=tc.id,
+              step_id=tc.step_id,
+              server_name=tc.server_name,
+              name=tc.name,
+              error=f"Unknown tool: '{tc.name}'",
           )
         result = await self.execute(tc.name, **tc.args)
-        return types.ToolResult(name=tc.name, result=result)
+        return types.ToolResult(
+            id=tc.id,
+            step_id=tc.step_id,
+            server_name=tc.server_name,
+            name=tc.name,
+            result=result,
+        )
       except Exception as e:  # pylint: disable=broad-except
         return types.ToolResult(
+            id=tc.id,
+            step_id=tc.step_id,
+            server_name=tc.server_name,
             name=tc.name,
             error=str(e),
             exception=e,

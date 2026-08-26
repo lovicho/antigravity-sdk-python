@@ -794,16 +794,19 @@ class CapabilitiesConfigTest(unittest.TestCase):
     run_cmd_default = types.RunCommandConfig()
     self.assertFalse(run_cmd_default.enable_daemons)
     self.assertIsNone(run_cmd_default.timeout_seconds)
+    self.assertFalse(run_cmd_default.enable_sandbox)
 
     config_custom = types.CapabilitiesConfig(
         run_command_config=types.RunCommandConfig(
             enable_daemons=True,
             timeout_seconds=600.0,
+            enable_sandbox=True,
         )
     )
     self.assertIsNotNone(config_custom.run_command_config)
     self.assertTrue(config_custom.run_command_config.enable_daemons)
     self.assertEqual(config_custom.run_command_config.timeout_seconds, 600.0)
+    self.assertTrue(config_custom.run_command_config.enable_sandbox)
 
     subagent_caps = types.SubagentCapabilities(
         run_command_config=types.RunCommandConfig(timeout_seconds=30.0)
@@ -1171,6 +1174,31 @@ class ContentFromFileResolverTest(parameterized.TestCase):
       ):
         with self.assertRaisesRegex(OSError, "Failed to read file"):
           types.from_file(tmp_file)
+
+
+class ContentFromBytesResolverTest(parameterized.TestCase):
+  """Validates the global from_bytes content resolver helper function."""
+
+  @parameterized.named_parameters(
+      ("image", "image/png", types.Image),
+      ("document", "application/pdf", types.Document),
+      ("audio", "audio/mpeg", types.Audio),
+      ("video", "video/mp4", types.Video),
+  )
+  def test_resolves_from_bytes(self, mime_type, expected_class):
+    """Verifies that bytes and MIME type are resolved to the correct Content primitives."""
+    res = types.from_bytes(
+        b"fake_bytes", mime_type=mime_type, description="byte asset"
+    )
+    self.assertIsInstance(res, expected_class)
+    self.assertEqual(res.mime_type, mime_type)
+    self.assertEqual(res.description, "byte asset")
+    self.assertEqual(res.data, b"fake_bytes")
+
+  def test_unsupported_mime_type_raises_error(self):
+    """Verifies that an unsupported MIME type raises a descriptive ValueError."""
+    with self.assertRaisesRegex(ValueError, "Unsupported MIME type"):
+      types.from_bytes(b"data", mime_type="application/x-unsupported-custom")
 
 
 class ChatResponseStreamTest(unittest.IsolatedAsyncioTestCase):
@@ -2029,6 +2057,65 @@ class UsageMetadataTest(unittest.TestCase):
     u = types.UsageMetadata(prompt_token_count=10)
     self.assertEqual(u.__add__(1), NotImplemented)
 
+  def test_sub_operator(self):
+    """Verifies that __sub__ subtracts token usage fields correctly."""
+    u1 = types.UsageMetadata(
+        prompt_token_count=300,
+        cached_content_token_count=60,
+        candidates_token_count=70,
+        thoughts_token_count=25,
+        total_token_count=395,
+    )
+    u2 = types.UsageMetadata(
+        prompt_token_count=100,
+        cached_content_token_count=50,
+        candidates_token_count=30,
+        thoughts_token_count=20,
+        total_token_count=150,
+    )
+    res = u1 - u2
+    self.assertEqual(res.prompt_token_count, 200)
+    self.assertEqual(res.cached_content_token_count, 10)
+    self.assertEqual(res.candidates_token_count, 40)
+    self.assertEqual(res.thoughts_token_count, 5)
+    self.assertEqual(res.total_token_count, 245)
+
+  def test_sub_operator_with_none(self):
+    """Verifies that __sub__ treats None fields as zero."""
+    u1 = types.UsageMetadata(
+        prompt_token_count=100,
+    )
+    u2 = types.UsageMetadata(
+        candidates_token_count=50,
+    )
+    res = u1 - u2
+    self.assertEqual(res.prompt_token_count, 100)
+    self.assertEqual(res.cached_content_token_count, 0)
+    self.assertEqual(res.candidates_token_count, -50)
+    self.assertEqual(res.thoughts_token_count, 0)
+    self.assertEqual(res.total_token_count, 0)
+
+  def test_sub_operator_service_tier(self):
+    """Verifies that __sub__ preserves and resolves service_tier correctly."""
+    u_none = types.UsageMetadata()
+    u_std = types.UsageMetadata(service_tier=types.ServiceTier.STANDARD)
+    u_pri = types.UsageMetadata(service_tier=types.ServiceTier.PRIORITY)
+    u_flex = types.UsageMetadata(service_tier=types.ServiceTier.FLEX)
+
+    self.assertEqual((u_pri - u_pri).service_tier, types.ServiceTier.PRIORITY)
+    self.assertEqual((u_flex - u_flex).service_tier, types.ServiceTier.FLEX)
+    self.assertEqual((u_pri - u_none).service_tier, types.ServiceTier.PRIORITY)
+    self.assertEqual((u_none - u_flex).service_tier, types.ServiceTier.FLEX)
+    self.assertEqual((u_pri - u_flex).service_tier, types.ServiceTier.PRIORITY)
+    self.assertEqual((u_flex - u_pri).service_tier, types.ServiceTier.FLEX)
+    self.assertEqual((u_pri - u_std).service_tier, types.ServiceTier.PRIORITY)
+    self.assertIsNone((u_none - u_none).service_tier)
+
+  def test_sub_operator_invalid_type(self):
+    """Verifies that __sub__ returns NotImplemented for invalid types."""
+    u = types.UsageMetadata(prompt_token_count=10)
+    self.assertEqual(u.__sub__(1), NotImplemented)
+
 
 class RetryConfigTest(unittest.TestCase):
   """Tests for RetryConfig presets and explicit configuration."""
@@ -2139,6 +2226,77 @@ class BudgetEnforcementTypesTest(absltest.TestCase):
         response.stop_reason,
         types.StopReason.QUOTA_EXHAUSTED,
     )
+
+
+class StopHookTypesTest(absltest.TestCase):
+  """Tests for StopDecision, StopHookResult, and StopArgs."""
+
+  def test_stop_decision_enum(self):
+    self.assertEqual(types.StopDecision.ALLOW_STOP, "ALLOW_STOP")
+    self.assertEqual(types.StopDecision.CONTINUE, "CONTINUE")
+
+  def test_stop_hook_result_defaults(self):
+    res = types.StopHookResult()
+    self.assertEqual(res.decision, types.StopDecision.ALLOW_STOP)
+    self.assertEqual(res.reason, "")
+
+  def test_stop_hook_result_custom(self):
+    res = types.StopHookResult(
+        decision=types.StopDecision.CONTINUE,
+        reason="Needs revision",
+    )
+    self.assertEqual(res.decision, types.StopDecision.CONTINUE)
+    self.assertEqual(res.reason, "Needs revision")
+
+  def test_stop_hook_result_extra_fields_ignored(self):
+    res = types.StopHookResult.model_validate(
+        {"decision": "CONTINUE", "reason": "more work", "extra_field": 123}
+    )
+    self.assertEqual(res.decision, types.StopDecision.CONTINUE)
+    self.assertEqual(res.reason, "more work")
+
+  def test_stop_hook_result_continue_requires_non_empty_reason(self):
+    with self.assertRaisesRegex(ValueError, "requires a non-empty reason"):
+      types.StopHookResult(decision=types.StopDecision.CONTINUE)
+
+    with self.assertRaisesRegex(ValueError, "requires a non-empty reason"):
+      types.StopHookResult(decision=types.StopDecision.CONTINUE, reason="")
+
+    with self.assertRaisesRegex(ValueError, "requires a non-empty reason"):
+      types.StopHookResult(decision=types.StopDecision.CONTINUE, reason="   ")
+
+  def test_stop_args_defaults(self):
+    args = types.StopArgs()
+    self.assertEqual(args.response_text, "")
+    self.assertEqual(args.trajectory_id, "")
+    self.assertEqual(args.continuation_count, 0)
+    self.assertEqual(args.stop_reason, types.StopReason.UNSPECIFIED)
+    self.assertEqual(args.error_message, "")
+
+  def test_stop_args_custom(self):
+    args = types.StopArgs(
+        response_text="All done",
+        trajectory_id="traj_123",
+        continuation_count=2,
+        stop_reason=types.StopReason.MAX_MODEL_CALLS_EXCEEDED,
+        error_message="budget reached",
+    )
+    self.assertEqual(args.response_text, "All done")
+    self.assertEqual(args.trajectory_id, "traj_123")
+    self.assertEqual(args.continuation_count, 2)
+    self.assertEqual(
+        args.stop_reason, types.StopReason.MAX_MODEL_CALLS_EXCEEDED
+    )
+    self.assertEqual(args.error_message, "budget reached")
+
+  def test_stop_args_string_coercion_and_extra_ignored(self):
+    args = types.StopArgs.model_validate({
+        "response_text": "done",
+        "stop_reason": "QUOTA_EXHAUSTED",
+        "unknown_wire_field": "ignore_me",
+    })
+    self.assertEqual(args.response_text, "done")
+    self.assertEqual(args.stop_reason, types.StopReason.QUOTA_EXHAUSTED)
 
 
 if __name__ == "__main__":

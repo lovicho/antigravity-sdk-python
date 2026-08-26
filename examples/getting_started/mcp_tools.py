@@ -43,12 +43,14 @@ from google.antigravity.hooks import policy
 async def mcp_stdio() -> None:
   """Showcases the Stdio transport."""
   print("\n  --- Showcasing Stdio Transport ---")
-  mcp_server_path = os.path.join(
-      os.path.dirname(__file__), "..", "resources", "mcp_server.py"
+  mcp_server_path = os.path.abspath(
+      os.path.join(
+          os.path.dirname(__file__), "..", "resources", "mcp_server.py"
+      )
   )
   stdio_server = types.McpStdioServer(
       name="pirate_math",
-      command="python3",
+      command=sys.executable,
       args=[mcp_server_path, "--transport=stdio"],
   )
 
@@ -84,12 +86,14 @@ async def mcp_http() -> None:
 async def mcp_filtering() -> None:
   """Showcases MCP tool filtering (enabled_tools / disabled_tools)."""
   print("\n  --- Showcasing MCP Tool Filtering (disabled_tools) ---")
-  mcp_server_path = os.path.join(
-      os.path.dirname(__file__), "..", "resources", "mcp_server.py"
+  mcp_server_path = os.path.abspath(
+      os.path.join(
+          os.path.dirname(__file__), "..", "resources", "mcp_server.py"
+      )
   )
   stdio_server = types.McpStdioServer(
       name="pirate_math",
-      command="python3",
+      command=sys.executable,
       args=[mcp_server_path, "--transport=stdio"],
       disabled_tools=["pirate_divide"],
   )
@@ -114,12 +118,14 @@ async def mcp_filtering() -> None:
 async def mcp_policies() -> None:
   """Showcases safety policies for MCP tools using new overloads."""
   print("\n  --- Showcasing MCP Safety Policies ---")
-  mcp_server_path = os.path.join(
-      os.path.dirname(__file__), "..", "resources", "mcp_server.py"
+  mcp_server_path = os.path.abspath(
+      os.path.join(
+          os.path.dirname(__file__), "..", "resources", "mcp_server.py"
+      )
   )
   stdio_server = types.McpStdioServer(
       name="pirate_math",
-      command="python3",
+      command=sys.executable,
       args=[mcp_server_path, "--transport=stdio"],
   )
 

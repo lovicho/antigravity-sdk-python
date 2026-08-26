@@ -1,5 +1,5 @@
-<!-- disableFinding(LINK_RELATIVE_G3DOC) -->
-<!-- disableFinding(LINE_OVER_80) -->
+
+
 
 # MCP Integration in Google Antigravity SDK
 

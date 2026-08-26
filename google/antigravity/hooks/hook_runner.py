@@ -34,6 +34,7 @@ _HOOK_TYPE_REGISTRY: list[tuple[type, str]] = [
     (hooks_base.OnToolErrorHook, '_on_tool_error_hooks'),
     (hooks_base.OnInteractionHook, '_on_interaction_hooks'),
     (hooks_base.OnCompactionHook, '_on_compaction_hooks'),
+    (hooks_base.StopHook, '_stop_hooks'),
     (hooks_base._PreStepHook, '_pre_step_hooks_list'),  # pylint: disable=protected-access
     (hooks_base._PostStepHook, '_post_step_hooks_list'),  # pylint: disable=protected-access
 ]
@@ -55,6 +56,7 @@ class HookRunner:
       on_tool_error_hooks: list[hooks_base.OnToolErrorHook] | None = None,
       on_interaction_hooks: list[hooks_base.OnInteractionHook] | None = None,
       on_compaction_hooks: list[hooks_base.OnCompactionHook] | None = None,
+      stop_hooks: list[hooks_base.StopHook] | None = None,
       _pre_step_hooks: list[hooks_base._PreStepHook] | None = None,  # pylint: disable=invalid-name,protected-access
       _post_step_hooks: list[hooks_base._PostStepHook] | None = None,  # pylint: disable=invalid-name,protected-access
   ):
@@ -67,6 +69,7 @@ class HookRunner:
     self._on_tool_error_hooks = on_tool_error_hooks or []
     self._on_interaction_hooks = on_interaction_hooks or []
     self._on_compaction_hooks = on_compaction_hooks or []
+    self._stop_hooks = stop_hooks or []
     self._pre_step_hooks_list = _pre_step_hooks or []
     self._post_step_hooks_list = _post_step_hooks or []
 
@@ -85,6 +88,7 @@ class HookRunner:
         self._on_tool_error_hooks,
         self._on_interaction_hooks,
         self._on_compaction_hooks,
+        self._stop_hooks,
         self._pre_step_hooks_list,
         self._post_step_hooks_list,
     ))
@@ -126,6 +130,10 @@ class HookRunner:
   @property
   def on_compaction_hooks(self) -> tuple[hooks_base.OnCompactionHook, ...]:
     return tuple(self._on_compaction_hooks)
+
+  @property
+  def stop_hooks(self) -> tuple[hooks_base.StopHook, ...]:
+    return tuple(self._stop_hooks)
 
   @property
   def _pre_step_hooks(self) -> tuple[hooks_base._PreStepHook, ...]:
@@ -316,6 +324,30 @@ class HookRunner:
     op_context = hooks_base.OperationContext(turn_context)
     for hook in self._on_compaction_hooks:
       await hook.run(context=op_context, data=data)
+
+  async def dispatch_stop(
+      self,
+      turn_context: hooks_base.TurnContext,
+      args: types.StopArgs,
+  ) -> types.StopHookResult:
+    """Dispatches stop hook events.
+
+    Iterates stop hooks sequentially and short-circuits on the first
+    `StopDecision.CONTINUE` decision with a non-empty reason.
+
+    Args:
+      turn_context: The current turn context.
+      args: The stop arguments containing response text, trajectory ID,
+        continuation count, stop reason, and error message.
+
+    Returns:
+      A StopHookResult with the decision and optional reason.
+    """
+    for hook in self._stop_hooks:
+      res = await hook.run(context=turn_context, data=args)
+      if res is not None and res.decision == types.StopDecision.CONTINUE:
+        return res
+    return types.StopHookResult(decision=types.StopDecision.ALLOW_STOP)
 
   # Telemetry Internal Step Hooks
   async def dispatch_pre_step(

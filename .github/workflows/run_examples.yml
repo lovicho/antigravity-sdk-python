@@ -65,6 +65,7 @@ jobs:
               echo "Skipping interactive script: $f"
               continue
             fi
-            echo "Running $f"
-            python "$f" || exit 1
+            echo "Running $f..."
+            python "$f" || { echo "❌ $f failed with exit code $?"; exit 1; }
+            echo "✅ $f passed"
           done

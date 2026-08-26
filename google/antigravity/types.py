@@ -100,8 +100,12 @@ __all__ = [
     "Content",
     "ContentPrimitive",
     "from_file",
+    "from_bytes",
     "SlashCommand",
     "BuiltinSlashCommandName",
+    "StopDecision",
+    "StopHookResult",
+    "StopArgs",
 ]
 
 # =============================================================================
@@ -170,17 +174,23 @@ class RunCommandConfig(pydantic.BaseModel):
   """Configuration for the builtin run_command tool.
 
   Attributes:
-    enable_daemons: Whether the agent is authorized to start long-running
-      daemon commands (e.g. background dev servers, watchers) using
+    enable_daemons: Whether the agent is authorized to start long-running daemon
+      commands (e.g. background dev servers, watchers) using
       run_command(IsDaemon=True) without blocking session completion. When True,
       the IsDaemon argument is exposed on the run_command tool schema. Defaults
       to False.
-    timeout_seconds: Maximum execution duration in seconds for commands.
-      When None, the default timeout (10 minutes) is used. Defaults to None.
+    timeout_seconds: Maximum execution duration in seconds for commands. When
+      None, the default timeout (10 minutes) is used. Defaults to None.
+    enable_sandbox: When True, terminal commands (run_command) are executed
+      inside the OS-level sandbox (exebox). Forwarded to the harness/cortex,
+      which enforces the sandbox at command execution time. Has no effect on
+      platforms/environments where the sandbox is unavailable. Defaults to
+      False.
   """
 
   enable_daemons: bool = False
   timeout_seconds: float | None = pydantic.Field(default=None, gt=0)
+  enable_sandbox: bool = False
 
 
 class SubagentCapabilities(pydantic.BaseModel):
@@ -766,6 +776,7 @@ class UsageMetadata(pydantic.BaseModel):
         - (other.thoughts_token_count or 0),
         total_token_count=(self.total_token_count or 0)
         - (other.total_token_count or 0),
+        service_tier=self.service_tier or other.service_tier,
     )
 
 
@@ -1013,6 +1024,68 @@ class AskQuestionInteractionSpec(pydantic.BaseModel):
   questions: list[AskQuestionEntry]
 
 
+class StopDecision(str, enum.Enum):
+  """Decision returned by a Stop lifecycle hook.
+
+  Attributes:
+    ALLOW_STOP: Allows the turn execution to terminate and transition to
+      STATE_FULLY_IDLE.
+    CONTINUE: Blocks termination, injects reason as a system prompt, and resumes
+      the agent execution loop.
+  """
+
+  ALLOW_STOP = "ALLOW_STOP"
+  CONTINUE = "CONTINUE"
+
+
+class StopHookResult(pydantic.BaseModel):
+  """Result returned by a Stop lifecycle hook.
+
+  Attributes:
+    decision: Whether to allow the turn to stop or continue execution.
+    reason: The prompt/feedback injected into the conversation when decision is
+      CONTINUE. Must be non-empty when CONTINUE is selected; otherwise, raises a
+      ValueError. Delivered directly to the model as a system message.
+  """
+
+  model_config = pydantic.ConfigDict(extra="ignore")
+
+  decision: StopDecision = StopDecision.ALLOW_STOP
+  reason: str = ""
+
+  @pydantic.model_validator(mode="after")
+  def _validate_continue_reason(self) -> "StopHookResult":
+    if self.decision == StopDecision.CONTINUE and (
+        not self.reason or not self.reason.strip()
+    ):
+      raise ValueError(
+          "StopHookResult with decision=CONTINUE requires a non-empty reason."
+      )
+    return self
+
+
+class StopArgs(pydantic.BaseModel):
+  """Arguments delivered to a Stop hook when the root turn reaches idle.
+
+  Attributes:
+    response_text: Most recent assistant response text in the turn.
+    trajectory_id: Unique identifier of the trajectory executing this turn.
+    continuation_count: The 0-based iteration count of Stop hook continuations
+      within the current turn cycle.
+    stop_reason: The reason why the trajectory stopped (SDK StopReason enum
+      value).
+    error_message: Error message if execution stopped due to a fatal error.
+  """
+
+  model_config = pydantic.ConfigDict(extra="ignore")
+
+  response_text: str = ""
+  trajectory_id: str = ""
+  continuation_count: int = 0
+  stop_reason: StopReason = StopReason.UNSPECIFIED
+  error_message: str = ""
+
+
 # =============================================================================
 # Error types
 # =============================================================================
@@ -1098,15 +1171,6 @@ class AntigravityValidationError(Exception):
       An AntigravityValidationError wrapping the Pydantic error.
     """
     return cls(message=str(exc), errors=cast(Any, exc.errors()))
-
-
-class TriggerDelivery(str, enum.Enum):
-  """Controls how trigger messages are delivered to the agent."""
-
-  SEND_IMMEDIATELY = "send_immediately"  # Send immediately (non-blocking).
-  WAIT_IDLE = "wait_idle"  # Wait until agent is idle before sending.
-  # TODO: INTERRUPT — cancel current turn, then send. Deferred due to
-  # safety implications for in-flight tool calls (requires Connection.cancel()).
 
 
 # =============================================================================

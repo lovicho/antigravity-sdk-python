@@ -36,6 +36,8 @@ from google.antigravity.hooks.hooks import pre_tool_call_decide
 from google.antigravity.hooks.hooks import pre_turn
 from google.antigravity.hooks.hooks import PreToolCallDecideHook
 from google.antigravity.hooks.hooks import PreTurnHook
+from google.antigravity.hooks.hooks import stop
+from google.antigravity.hooks.hooks import StopHook
 from google.antigravity.hooks.hooks import TransformHook
 
 
@@ -54,6 +56,7 @@ __all__ = [
     "PostTurnHook",
     "PreToolCallDecideHook",
     "PreTurnHook",
+    "StopHook",
     "on_compaction",
     "on_interaction",
     "on_session_end",
@@ -63,4 +66,5 @@ __all__ = [
     "post_turn",
     "pre_tool_call_decide",
     "pre_turn",
+    "stop",
 ]

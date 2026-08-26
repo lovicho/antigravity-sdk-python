@@ -236,6 +236,21 @@ class OnCompactionHook(InspectHook[types.Step]):
   pass
 
 
+class StopHook(TransformHook[types.StopArgs, types.StopHookResult]):
+  """Invoked when the root trajectory reaches fully idle to decide whether to stop or continue.
+
+  The `data` parameter receives a `types.StopArgs` with the response text,
+  trajectory ID, continuation count, stop reason, and error message.
+
+  Return `types.StopHookResult(decision=types.StopDecision.CONTINUE,
+  reason="...")`
+  to inject a system prompt and resume the agent loop, or allow the default
+  `types.StopDecision.ALLOW_STOP` to let the turn complete.
+  """
+
+  pass
+
+
 # --- Decorator Factory ---
 
 
@@ -395,6 +410,7 @@ on_session_end = _make_hook_decorator(OnSessionEndHook, pass_data=False)
 post_turn = _make_hook_decorator(PostTurnHook)
 post_tool_call = _make_hook_decorator(PostToolCallHook)
 on_tool_error = _make_hook_decorator(OnToolErrorHook)
+stop = _make_hook_decorator(StopHook)
 
 
 # Internal hooks for telemetry

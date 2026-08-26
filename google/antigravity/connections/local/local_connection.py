@@ -44,6 +44,7 @@ from google.antigravity.connections.local import event_processor
 from google.antigravity.connections.local import local_connection_config
 from google.antigravity.hooks import hook_runner as h_runner
 from google.antigravity.hooks import policy
+from google.antigravity.tools import schema_utils
 from google.antigravity.tools import tool_runner as t_runner
 
 LocalConnectionStep = event_processor.LocalConnectionStep
@@ -224,7 +225,9 @@ def callable_to_tool_proto(
     return localharness_pb2.Tool(
         name=getattr(fn, "__name__", ""),
         description=fn.__doc__ or "",
-        parameters_json_schema=json.dumps(fn.input_schema),
+        parameters_json_schema=json.dumps(
+            schema_utils.normalize_schema(fn.input_schema)
+        ),
     )
 
   # Use the ToolRunner's public callable to strip injectable params.
@@ -258,11 +261,13 @@ def callable_to_tool_proto(
   elif decl.parameters_json_schema:
     parameters = decl.parameters_json_schema
   else:
-    parameters = {"type": "OBJECT"}
+    parameters = {"type": "object", "properties": {}}
   return localharness_pb2.Tool(
       name=decl.name,
       description=decl.description or "",
-      parameters_json_schema=json.dumps(parameters),
+      parameters_json_schema=json.dumps(
+          schema_utils.normalize_schema(parameters)
+      ),
   )
 
 
@@ -964,6 +969,9 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
         if run_cmd_cfg is not None and run_cmd_cfg.timeout_seconds is not None
         else 0
     )
+    enable_sandbox = (
+        run_cmd_cfg.enable_sandbox if run_cmd_cfg is not None else False
+    )
 
     return localharness_pb2.HarnessSideTools(
         subagents=subagents_proto,
@@ -977,6 +985,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
             enabled=types.BuiltinTools.RUN_COMMAND in active_tools,
             enable_daemon_commands=enable_daemon,
             max_timeout_ms=timeout_ms,
+            enable_sandbox=enable_sandbox,
         ),
         file_edit=localharness_pb2.FileEditToolConfig(
             enabled=types.BuiltinTools.EDIT_FILE in active_tools
@@ -1204,6 +1213,10 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
         (
             self._hook_runner.on_compaction_hooks,
             localharness_pb2.LIFECYCLE_HOOK_ON_COMPACTION,
+        ),
+        (
+            self._hook_runner.stop_hooks,
+            localharness_pb2.LIFECYCLE_HOOK_STOP,
         ),
     ]
     for hooks_list, hook_type in hook_mapping:

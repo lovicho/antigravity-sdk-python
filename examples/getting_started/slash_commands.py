@@ -76,6 +76,9 @@ async def main() -> None:
         workspaces=[tmpdir],
         app_data_dir=tmpdir,
         policies=policies,
+        capabilities=types.CapabilitiesConfig(
+            agent_behavior=types.AgentBehavior.INTERACTIVE,
+        ),
     )
 
     # Programmatic slash command usage with /plan:

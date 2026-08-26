@@ -1187,5 +1187,133 @@ class HookRouterPreToolTest(absltest.TestCase):
     asyncio.run(_test())
 
 
+class HookRouterStopTest(absltest.TestCase):
+  """Verifies Stop hook dispatch through the HookRouter."""
+
+  async def _dispatch_stop_request(
+      self,
+      hook: hooks.StopHook,
+      stop_args: localharness_pb2.StopArgs | None = None,
+  ) -> localharness_pb2.CallHookResponse:
+    """Helper to dispatch a CallHookRequest(LIFECYCLE_HOOK_STOP) and return the response."""
+    hook_runner = h_runner.HookRunner(stop_hooks=[hook])
+    sent_events = []
+
+    async def mock_send(event: localharness_pb2.InputEvent):
+      sent_events.append(event)
+
+    router = HookRouter(hook_runner, mock_send)
+    req = localharness_pb2.CallHookRequest(
+        request_id="test_stop_req",
+        name="Stop",
+        type=localharness_pb2.LIFECYCLE_HOOK_STOP,
+    )
+    if stop_args is not None:
+      req.stop_args.CopyFrom(stop_args)
+    await router.handle(req)
+    self.assertLen(sent_events, 1)
+    return sent_events[0].call_hook_response
+
+  def test_handle_stop_allow_stop(self):
+
+    async def _test():
+      class AllowStopHook(hooks.StopHook):
+
+        async def run(self, context, data):
+          return types.StopHookResult(
+              decision=types.StopDecision.ALLOW_STOP,
+          )
+
+      resp = await self._dispatch_stop_request(
+          AllowStopHook(),
+          stop_args=localharness_pb2.StopArgs(
+              response_text="all done",
+              trajectory_id="traj-1",
+              continuation_count=0,
+          ),
+      )
+      self.assertEqual(resp.request_id, "test_stop_req")
+      self.assertTrue(resp.HasField("stop_result"))
+      self.assertEqual(
+          resp.stop_result.decision,
+          localharness_pb2.StopResult.Decision.ALLOW_STOP,
+      )
+
+    asyncio.run(_test())
+
+  def test_handle_stop_continue_unpacks_all_fields(self):
+
+    async def _test():
+      received_args = []
+
+      class ContinueStopHook(hooks.StopHook):
+
+        async def run(self, context, data):
+          received_args.append(data)
+          return types.StopHookResult(
+              decision=types.StopDecision.CONTINUE,
+              reason="Keep working on the task",
+          )
+
+      resp = await self._dispatch_stop_request(
+          ContinueStopHook(),
+          stop_args=localharness_pb2.StopArgs(
+              response_text="partial answer",
+              trajectory_id="traj-2",
+              continuation_count=1,
+              stop_reason=(
+                  localharness_pb2.TrajectoryStateUpdate.StopReason.STOP_REASON_MAX_MODEL_CALLS_EXCEEDED
+              ),
+              error_message="stopped due to error",
+          ),
+      )
+
+      self.assertLen(received_args, 1)
+      arg = received_args[0]
+      self.assertEqual(arg.response_text, "partial answer")
+      self.assertEqual(arg.trajectory_id, "traj-2")
+      self.assertEqual(arg.continuation_count, 1)
+      self.assertEqual(
+          arg.stop_reason, types.StopReason.MAX_MODEL_CALLS_EXCEEDED
+      )
+      self.assertEqual(arg.error_message, "stopped due to error")
+
+      self.assertTrue(resp.HasField("stop_result"))
+      self.assertEqual(
+          resp.stop_result.decision,
+          localharness_pb2.StopResult.Decision.CONTINUE,
+      )
+      self.assertEqual(resp.stop_result.reason, "Keep working on the task")
+
+    asyncio.run(_test())
+
+  def test_handle_stop_no_args(self):
+
+    async def _test():
+      received_args = []
+
+      class StopCheckHook(hooks.StopHook):
+
+        async def run(self, context, data):
+          received_args.append(data)
+          return types.StopHookResult()
+
+      resp = await self._dispatch_stop_request(StopCheckHook())
+      self.assertLen(received_args, 1)
+      self.assertEqual(received_args[0].response_text, "")
+      self.assertEqual(received_args[0].continuation_count, 0)
+      self.assertEqual(
+          received_args[0].stop_reason, types.StopReason.UNSPECIFIED
+      )
+
+      self.assertTrue(resp.HasField("stop_result"))
+      self.assertEqual(
+          resp.stop_result.decision,
+          localharness_pb2.StopResult.Decision.ALLOW_STOP,
+      )
+
+    asyncio.run(_test())
+
+
 if __name__ == "__main__":
   absltest.main()

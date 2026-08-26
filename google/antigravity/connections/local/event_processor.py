@@ -30,6 +30,7 @@ from google.antigravity.connections.local.local_connection_config import BUILTIN
 from google.antigravity.connections.local.local_connection_config import make_step_id
 from google.antigravity.connections.local.local_connection_config import normalize_wire_path
 from google.antigravity.connections.local.local_connection_config import WIRE_PATH_ARGUMENT_KEYS
+from google.antigravity.connections.local.proto_converters import _parse_stop_reason
 from google.antigravity.hooks import hook_runner as h_runner
 from google.antigravity.hooks import hooks
 from google.antigravity.hooks import policy as policy_lib
@@ -191,35 +192,6 @@ def parse_usage_metadata(
       if usage_metadata.service_tier
       else None,
   )
-
-
-_STOP_REASON_MAP = {
-    localharness_pb2.TrajectoryStateUpdate.StopReason.STOP_REASON_MAX_MODEL_CALLS_EXCEEDED: (
-        types.StopReason.MAX_MODEL_CALLS_EXCEEDED
-    ),
-    localharness_pb2.TrajectoryStateUpdate.StopReason.STOP_REASON_MAX_TOOL_CALLS_EXCEEDED: (
-        types.StopReason.MAX_TOOL_CALLS_EXCEEDED
-    ),
-    localharness_pb2.TrajectoryStateUpdate.StopReason.STOP_REASON_MAX_INPUT_TOKENS_EXCEEDED: (
-        types.StopReason.MAX_INPUT_TOKENS_EXCEEDED
-    ),
-    localharness_pb2.TrajectoryStateUpdate.StopReason.STOP_REASON_MAX_OUTPUT_TOKENS_EXCEEDED: (
-        types.StopReason.MAX_OUTPUT_TOKENS_EXCEEDED
-    ),
-    localharness_pb2.TrajectoryStateUpdate.StopReason.STOP_REASON_MAX_TOTAL_TOKENS_EXCEEDED: (
-        types.StopReason.MAX_TOTAL_TOKENS_EXCEEDED
-    ),
-    localharness_pb2.TrajectoryStateUpdate.StopReason.STOP_REASON_QUOTA_EXHAUSTED: (
-        types.StopReason.QUOTA_EXHAUSTED
-    ),
-}
-
-
-def _parse_stop_reason(
-    reason: localharness_pb2.TrajectoryStateUpdate.StopReason,
-) -> types.StopReason:
-  """Extracts StopReason from proto enum."""
-  return _STOP_REASON_MAP.get(reason, types.StopReason.UNSPECIFIED)
 
 
 class LocalConnectionStep(types.Step):
@@ -626,9 +598,7 @@ class LocalHarnessEventProcessor:
           == localharness_pb2.TrajectoryStateUpdate.State.STATE_FULLY_IDLE
       ):
         if tsu.HasField("error"):
-          await self.step_queue.put(
-              types.AntigravityExecutionError(tsu.error)
-          )
+          await self.step_queue.put(types.AntigravityExecutionError(tsu.error))
         self.is_idle.set()
         await self.step_queue.put(IDLE_SENTINEL)
 
@@ -784,11 +754,8 @@ class LocalHarnessEventProcessor:
 
       if self._tool_runner:
         try:
-          results = await self._tool_runner.process_tool_calls(
-              [types.ToolCall(name=tc.name, args=tc.args)]
-          )
+          results = await self._tool_runner.process_tool_calls([tc])
           result = results[0]
-          result.id = tool_call.id
         except Exception as e:  # pylint: disable=broad-except
           result = types.ToolResult(
               id=tool_call.id,

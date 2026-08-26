@@ -109,7 +109,7 @@ fi
 
 
 # Install build/release tools with hash verification.
-# See go/pip-install-remediation.
+# See (internal link).
 python3 -m pip install \
   --require-hashes \
   -r "${SCRIPT_DIR}/requirements-release.txt"
@@ -280,7 +280,7 @@ if [[ "${PUBLISH:-}" == "true" || -n "${PUBLISH_PREBUILT_VERSION:-}" ]]; then
   # 2. Manifest upload — triggers promotion from AR staging to public PyPI.
   # The OSS Exit Gate uses a GCS manifest as the "publish now" signal.
   # Uploading this file triggers the Exit Gate to verify and publish all
-  # staged artifacts to pypi.org. See go/oss-exit-gate-release-python.
+  # staged artifacts to pypi.org. See (internal link).
   EG_GCS_BUCKET="gs://oss-exit-gate-prod-projects-bucket/google-antigravity/pypi/manifests"
 
   echo ""
@@ -293,7 +293,7 @@ if [[ "${PUBLISH:-}" == "true" || -n "${PUBLISH_PREBUILT_VERSION:-}" ]]; then
 
   echo "  Manifest uploaded: ${EG_GCS_BUCKET}/${MANIFEST_NAME}"
   echo "  The OSS Exit Gate will now verify and publish to pypi.org."
-  echo "  Monitor progress at: http://go/spng2?q=PROJECT%3Agoogle-antigravity%2Fpypi"
+  echo "  Monitor progress at: (internal link)?q=PROJECT%3Agoogle-antigravity%2Fpypi"
   echo ""
   echo "--- Release v${VERSION} published ---"
 else
