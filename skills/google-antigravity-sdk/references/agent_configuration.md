@@ -10,7 +10,7 @@ Google Antigravity SDK agents.
 
 ### Default Model
 
-Google Antigravity SDK's default model is `gemini-3.7-flash`.
+Google Antigravity SDK's default model is `gemini-3.8-flash`.
 
 ### Default Image Generation Model
 
@@ -43,7 +43,7 @@ Here are small code snippets demonstrating advanced configurations using
 from google.antigravity import Agent, LocalAgentConfig
 
 config = LocalAgentConfig(
-    model="gemini-3.7-flash",
+    model="gemini-3.8-flash",
 )
 async with Agent(config=config) as agent:
     # Use the agent
@@ -259,6 +259,11 @@ additional config classes are available:
 -   `LocalOpenAIAgentConfig`: For connecting to any OpenAI-compatible local
     server (e.g., Ollama, LM Studio).
 
+Both config classes support the `.lightweight()` method (e.g.,
+`LiteRTAgentConfig(...).lightweight()`), which automatically configures core
+development tools, prunes system instructions for smaller context windows,
+disables subagents, and tunes context compaction.
+
 For full setup instructions, hardware requirements, and configuration details,
 see [local_models.md](local_models.md).
 
@@ -274,6 +279,26 @@ config = LocalAgentConfig(
     env={"PATH": "/custom/bin:" + os.environ.get("PATH", ""), "MY_CUSTOM_VAR": "foo"},
 )
 ```
+
+### `run_command` Configuration (`RunCommandConfig`)
+
+Configure the built-in `run_command` tool via `RunCommandConfig`, including
+running commands inside an OS-level sandbox with `enable_sandbox`:
+
+```python
+from google.antigravity import Agent, LocalAgentConfig, types
+from google.antigravity.hooks import policy
+
+config = LocalAgentConfig(
+    capabilities=types.CapabilitiesConfig(
+        run_command_config=types.RunCommandConfig(enable_sandbox=True),
+    ),
+    policies=[policy.allow_all()],
+)
+```
+
+For details and caveats, see
+[safety_policies.md](safety_policies.md#defense-in-depth-os-level-command-sandboxing).
 
 ### Session Budget Controls & Stop Reasons
 
@@ -292,3 +317,29 @@ config = LocalAgentConfig(
 ```
 
 For a full guide and multi-turn stop reason handling examples, see [budget_limits.md](../../examples/getting_started/budget_limits.md).
+
+### Context Compaction & Token Limits (`compaction_config`)
+
+Antigravity manages conversation context using a two-stage sliding-window pipeline:
+
+1. **Background Checkpointing**: A background model pre-computes cumulative trajectory summaries (checkpoints) at regular token intervals (`checkpoint_interval_tokens`). Checkpoint generation runs asynchronously and silently in parallel without modifying or truncating the active prompt.
+2. **Prompt Eviction (Compaction)**: When cumulative prompt tokens reach the context ceiling (`max_context_tokens`), the prompt snaps back to the latest completed checkpoint. Earlier checkpoints and older turns preceding the latest checkpoint are evicted from the prompt, while recent turns between the latest checkpoint and the current turn are preserved verbatim with full fidelity.
+
+You can configure both dials using `CompactionConfig`:
+
+```python
+from google.antigravity import Agent, LocalAgentConfig, types
+
+config = LocalAgentConfig(
+    compaction_config=types.CompactionConfig(
+        checkpoint_interval_tokens=40_000,
+        max_context_tokens=100_000,
+    ),
+)
+```
+
+> [!NOTE]
+> When `compaction_config` is omitted (or fields are left unset), the backend's default cadence and context ceiling are used. If configuring custom values, `checkpoint_interval_tokens` cannot exceed `max_context_tokens`.
+
+For a full guide and code examples, see [compaction.md](../../examples/getting_started/compaction.md).
+

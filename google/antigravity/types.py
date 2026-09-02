@@ -27,6 +27,7 @@ import logging
 import mimetypes
 import pathlib
 from typing import Annotated, Any, AsyncIterator, Callable, ClassVar, Literal, TypeVar, cast
+import warnings
 
 import pydantic
 
@@ -75,6 +76,7 @@ __all__ = [
     "StepSource",
     "StepTarget",
     "StepStatus",
+    "BudgetScope",
     "BudgetConfig",
     "StopReason",
     "Step",
@@ -164,10 +166,14 @@ class AgentBehavior(str, enum.Enum):
     INTERACTIVE: The agent works collaboratively with a human, asking for
       clarifications and keeping them in the loop if needed. Enables features
       like slash commands and planning mode.
+    MINIMAL: Streamlined prompt behavior optimized for small-context and
+      on-device models by filtering system instructions down to core identity,
+      guidelines, and communication style.
   """
 
   AUTONOMOUS = "autonomous"
   INTERACTIVE = "interactive"
+  MINIMAL = "minimal"
 
 
 class RunCommandConfig(pydantic.BaseModel):
@@ -199,9 +205,9 @@ class SubagentCapabilities(pydantic.BaseModel):
   Attributes:
     agent_behavior: Operational execution behavior for the subagent. In
       particular, AgentBehavior.AUTONOMOUS incentivizes the agent to solve the
-      task on their own from start to finish while AgentBehavior.INTERACTIVE
-      makes the agent work collaboratively with a human, asking for
-      clarifications and keeping them in the loop if needed. Defaults to
+      task on their own from start to finish, AgentBehavior.INTERACTIVE makes
+      the agent work collaboratively with a human, and AgentBehavior.MINIMAL
+      prunes prompt overhead for small-context models. Defaults to
       AgentBehavior.AUTONOMOUS.
     allowed_subagents: Explicit allowlist of subagent names this subagent may
       directly invoke. When None, all registered subagents are discoverable.
@@ -389,6 +395,25 @@ class BuiltinTools(str, enum.Enum):
     """
     return []
 
+  @classmethod
+  def minimal(cls) -> list["BuiltinTools"]:
+    """Returns the minimal set of software engineering tools.
+
+    Includes run_command, view_file, create_file, edit_file, list_directory, and
+    search_directory.
+
+    Returns:
+        A list of minimal BuiltinTools.
+    """
+    return [
+        cls.RUN_COMMAND,
+        cls.VIEW_FILE,
+        cls.CREATE_FILE,
+        cls.EDIT_FILE,
+        cls.LIST_DIR,
+        cls.SEARCH_DIR,
+    ]
+
 
 class CapabilitiesConfig(pydantic.BaseModel):
   """General agent capability configuration.
@@ -417,9 +442,9 @@ class CapabilitiesConfig(pydantic.BaseModel):
     enable_subagents: Whether the agent can spawn and delegate to sub-agents.
     agent_behavior: Operational execution behavior for the agent. In particular,
       AgentBehavior.AUTONOMOUS incentivizes the agent to solve the task on their
-      own from start to finish while AgentBehavior.INTERACTIVE makes the agent
-      work collaboratively with a human, asking for clarifications and keeping
-      them in the loop if needed. Defaults to AgentBehavior.AUTONOMOUS.
+      own from start to finish, AgentBehavior.INTERACTIVE makes the agent work
+      collaboratively with a human, and AgentBehavior.MINIMAL prunes prompt
+      overhead for small-context models. Defaults to AgentBehavior.AUTONOMOUS.
     enabled_tools: Explicit allowlist of builtin tools to enable. Mutually
       exclusive with disabled_tools. When None, the harness defaults are used
       (all tools enabled). Disabled tools are removed from the model's context,
@@ -428,8 +453,9 @@ class CapabilitiesConfig(pydantic.BaseModel):
       exclusive with enabled_tools. When None, the harness defaults are used
       (all tools enabled). Disabled tools are removed from the model's context,
       saving tokens and preventing the model from even considering them.
-    compaction_threshold: Token count after which the context window may be
-      compacted. When None, the backend's default is used.
+    compaction_threshold: (Deprecated) Configure
+      CompactionConfig(checkpoint_interval_tokens=...) directly on AgentConfig
+      instead.
     finish_tool_schema_json: Optional JSON schema string for the finish tool.
     max_subagent_depth: Global maximum subagent recursion depth for the session.
       When None, defaults to 1 (flat single-level delegation).
@@ -442,7 +468,15 @@ class CapabilitiesConfig(pydantic.BaseModel):
   agent_behavior: AgentBehavior = AgentBehavior.AUTONOMOUS
   enabled_tools: list[BuiltinTools] | None = None
   disabled_tools: list[BuiltinTools] | None = None
-  compaction_threshold: int | None = None
+  compaction_threshold: int | None = pydantic.Field(
+      default=None,
+      gt=0,
+      deprecated=(
+          "CapabilitiesConfig.compaction_threshold is deprecated. Configure"
+          " CompactionConfig(checkpoint_interval_tokens=...) directly on"
+          " AgentConfig instead."
+      ),
+  )
   finish_tool_schema_json: str | None = None
   max_subagent_depth: int | None = pydantic.Field(default=None, ge=1)
   allowed_subagents: list[str] | None = None
@@ -493,6 +527,92 @@ class CapabilitiesConfig(pydantic.BaseModel):
           " INTERACTIVE. Set"
           " CapabilitiesConfig(agent_behavior=AgentBehavior.INTERACTIVE) if"
           " interactive question-and-answer behavior is desired."
+      )
+    return self
+
+  @pydantic.model_validator(mode="after")
+  def _warn_deprecated_compaction_fields(self) -> "CapabilitiesConfig":
+    if self.compaction_threshold is not None:
+      warnings.warn(
+          "CapabilitiesConfig.compaction_threshold is deprecated. Configure"
+          " CompactionConfig(checkpoint_interval_tokens=...) directly on"
+          " AgentConfig instead.",
+          category=DeprecationWarning,
+          stacklevel=2,
+      )
+    return self
+
+
+class CompactionConfig(pydantic.BaseModel):
+  """Configuration for conversation trajectory compaction and context limits.
+
+  Antigravity manages context using a two-stage sliding-window pipeline:
+  1. Background Checkpointing: A "checkpoint" is an asynchronous summary of the
+     conversation trajectory prepared in the background while the agent works.
+     Every checkpoint is cumulative, summarizing history up to that point.
+     Generating a checkpoint does not modify the active prompt or evict turns.
+  2. Prompt Eviction (Compaction): When active history reaches the token
+     ceiling (`max_context_tokens`), the context snaps back to the latest
+     completed checkpoint. Earlier checkpoints and turns preceding the latest
+     checkpoint are evicted from the prompt, while recent turns between the
+     latest checkpoint and the current turn are preserved verbatim with full
+     fidelity.
+
+  Attributes:
+    checkpoint_interval_tokens: The token interval at which background
+      trajectory checkpoints (summaries) are pre-computed. Checkpoint generation
+      runs asynchronously and does not alter the active prompt. When None, the
+      framework's default cadence is used.
+    max_context_tokens: Maximum token ceiling allowed for the prompt before
+      older turns are evicted and replaced with the latest checkpoint summary.
+      When None, the framework's default limit is used.
+    compaction_threshold: Deprecated alias for `checkpoint_interval_tokens`.
+  """
+
+  checkpoint_interval_tokens: int | None = pydantic.Field(default=None, gt=0)
+  max_context_tokens: int | None = pydantic.Field(default=None, gt=0)
+  compaction_threshold: int | None = pydantic.Field(
+      default=None,
+      gt=0,
+      deprecated=(
+          "CompactionConfig.compaction_threshold is deprecated. Use"
+          " checkpoint_interval_tokens instead."
+      ),
+  )
+
+  @pydantic.model_validator(mode="after")
+  def _validate_compaction_and_context_tokens(self) -> "CompactionConfig":
+    if (
+        self.checkpoint_interval_tokens is None
+        and self.compaction_threshold is not None
+    ):
+      self.__dict__["checkpoint_interval_tokens"] = self.compaction_threshold
+      self.__pydantic_fields_set__.add("checkpoint_interval_tokens")
+    elif (
+        self.checkpoint_interval_tokens is not None
+        and self.compaction_threshold is None
+    ):
+      self.__dict__["compaction_threshold"] = self.checkpoint_interval_tokens
+      self.__pydantic_fields_set__.add("compaction_threshold")
+    elif (
+        self.checkpoint_interval_tokens is not None
+        and self.compaction_threshold is not None
+        and self.checkpoint_interval_tokens != self.compaction_threshold
+    ):
+      raise ValueError(
+          "Conflicting values for aliased fields:"
+          f" checkpoint_interval_tokens={self.checkpoint_interval_tokens}"
+          f" vs compaction_threshold={self.compaction_threshold}"
+      )
+    interval = self.checkpoint_interval_tokens
+    if (
+        interval is not None
+        and self.max_context_tokens is not None
+        and interval > self.max_context_tokens
+    ):
+      raise ValueError(
+          f"checkpoint_interval_tokens ({interval}) cannot exceed"
+          f" max_context_tokens ({self.max_context_tokens})"
       )
     return self
 
@@ -835,22 +955,38 @@ class SessionContinuationMode(str, enum.Enum):
   CREATE_ONLY = "create_only"
 
 
+class BudgetScope(str, enum.Enum):
+  """Evaluation scope for budget limits and caps.
+
+  Attributes:
+    LIFETIME: Budget is evaluated against cumulative spend from the start of the
+      session (step 0).
+    FORWARD_LOOKING: Budget is evaluated against spend starting from when the
+      budget was configured or the session was resumed.
+  """
+
+  LIFETIME = "LIFETIME"
+  FORWARD_LOOKING = "FORWARD_LOOKING"
+
+
 class BudgetConfig(pydantic.BaseModel):
   """Configuration for session-level budget limits and caps.
 
   Attributes:
     max_model_calls: Maximum number of model invocations (reasoning steps /
-      generator calls) permitted across the session.
-    max_tool_calls: Maximum number of tool invocations permitted across the
-      session, regardless of tool source.
-    max_input_tokens: Maximum net uncached input tokens permitted across the
-      session (calculated as prompt tokens minus cached content tokens across
-      all turns).
-    max_output_tokens: Maximum output tokens permitted across the session
-      (candidates + thoughts).
-    max_total_tokens: Maximum total net tokens permitted across the session
-      (calculated as net uncached input tokens + output tokens across all
-      turns).
+      generator calls) permitted within the configured scope.
+    max_tool_calls: Maximum number of tool invocations permitted within the
+      configured scope, regardless of tool source.
+    max_input_tokens: Maximum net uncached input tokens permitted within the
+      configured scope (calculated as prompt tokens minus cached content tokens
+      across model turns).
+    max_output_tokens: Maximum output tokens permitted within the configured
+      scope (candidates + thoughts).
+    max_total_tokens: Maximum total net tokens permitted within the configured
+      scope (calculated as net uncached input tokens + output tokens
+      across model turns).
+    scope: The evaluation scope for this budget configuration. Defaults to
+      BudgetScope.LIFETIME.
   """
 
   max_model_calls: int | None = pydantic.Field(
@@ -866,6 +1002,7 @@ class BudgetConfig(pydantic.BaseModel):
   max_total_tokens: int | None = pydantic.Field(
       default=None, ge=1, le=_MAX_INT64
   )
+  scope: BudgetScope = BudgetScope.LIFETIME
 
 
 class StopReason(str, enum.Enum):
@@ -920,8 +1057,9 @@ class Step(pydantic.BaseModel):
       steps per turn may have this flag set; consumers that want only the last
       response should iterate fully.
     structured_output: The structured output extracted from the finish step.
-    usage_metadata: Token usage for this specific step's model invocation, or
-      None if this step did not involve a model call.
+    usage_metadata: (Deprecated) Token usage for this specific step's model
+      invocation. Deprecated in favor of ChatResponse.usage_metadata (turn-level
+      usage) and agent.conversation.total_usage (session cumulative usage).
   """
 
   id: str = ""
@@ -941,7 +1079,16 @@ class Step(pydantic.BaseModel):
   error: str = ""
   is_complete_response: bool | None = None
   structured_output: Any | None = None
-  usage_metadata: UsageMetadata | None = None
+  usage_metadata: UsageMetadata | None = pydantic.Field(
+      default=None,
+      deprecated=(
+          "Step.usage_metadata is deprecated and will be removed in a future"
+          " release. Token usage is emitted per model invocation and does not"
+          " map 1:1 to individual execution steps. Use"
+          " ChatResponse.usage_metadata for turn-level usage or"
+          " agent.conversation.total_usage for cumulative session usage."
+      ),
+  )
 
   model_config = pydantic.ConfigDict(extra="allow")
 

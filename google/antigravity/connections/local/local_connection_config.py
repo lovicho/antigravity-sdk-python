@@ -152,7 +152,8 @@ class BaseLocalAgentConfig(connection.AgentConfig):
     return normalize_workspace_paths(v, default_to_cwd=True)
 
   @pydantic.field_validator("app_data_dir")
-  def _validate_app_data_dir(cls, v: str | None) -> str | None:  # pylint: disable=no-self-argument
+  @classmethod
+  def _validate_app_data_dir(cls, v: str | None) -> str | None:
     if v is not None and not os.path.isabs(v):
       raise ValueError(f"app_data_dir must be an absolute path, got '{v}'")
     return v
@@ -245,6 +246,7 @@ class LocalAgentConfig(BaseLocalAgentConfig):
       skills_paths: list[str] | None = None,
       retry_config: types.RetryConfig | None = None,
       budget_config: types.BudgetConfig | None = None,
+      compaction_config: types.CompactionConfig | None = None,
       model: str | types.ModelTarget | None = None,
       models: list[types.ModelTarget] | None = None,
       api_key: str | None = None,
@@ -367,6 +369,7 @@ class LocalAgentConfig(BaseLocalAgentConfig):
         models=self.models,
         system_instructions=self._get_system_instructions(),
         capabilities_config=self.capabilities,
+        compaction_config=self._get_effective_compaction_config(),
         conversation_id=self.conversation_id,
         session_continuation_mode=self.session_continuation_mode,
         save_dir=self._get_or_create_save_dir(),

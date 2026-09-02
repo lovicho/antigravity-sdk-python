@@ -28,9 +28,11 @@ import abc
 import json
 import logging
 import re
-from typing import Any, AsyncIterator, Callable, Mapping, Sequence
+from typing import Any, AsyncIterator, Callable, Mapping, Sequence, cast
+import warnings
 
 import pydantic
+from typing_extensions import Self
 
 from google.antigravity import types
 from google.antigravity.hooks import hooks as hooks_mod
@@ -74,6 +76,27 @@ class AgentConfig(abc.ABC, pydantic.BaseModel):
   # (AntigravityProdActor) connection strategies; ignored by deprecated JPv1.
   retry_config: types.RetryConfig | None = None
   budget_config: types.BudgetConfig | None = None
+  compaction_config: types.CompactionConfig | None = None
+
+  def _get_effective_compaction_config(self) -> types.CompactionConfig | None:
+    """Returns the effective CompactionConfig, falling back to legacy capabilities."""
+    if self.compaction_config is not None:
+      return self.compaction_config
+    if (
+        self.capabilities is not None
+        and self.capabilities.compaction_threshold is not None
+    ):
+      warnings.warn(
+          "CapabilitiesConfig.compaction_threshold is deprecated. Configure"
+          " CompactionConfig(checkpoint_interval_tokens=...) directly on"
+          " AgentConfig instead.",
+          category=DeprecationWarning,
+          stacklevel=2,
+      )
+      return types.CompactionConfig(
+          checkpoint_interval_tokens=self.capabilities.compaction_threshold,
+      )
+    return None
 
   @pydantic.field_validator("debug_config", mode="before")
   @classmethod
@@ -119,7 +142,10 @@ class AgentConfig(abc.ABC, pydantic.BaseModel):
     return self
 
   @pydantic.field_validator("response_schema")
-  def _validate_schema(cls, v):  # pylint: disable=no-self-argument
+  @classmethod
+  def _validate_schema(
+      cls, v: dict[str, Any] | type[pydantic.BaseModel] | str | None
+  ) -> str | None:
     if v is None:
       return None
     if isinstance(v, str):
@@ -139,7 +165,7 @@ class AgentConfig(abc.ABC, pydantic.BaseModel):
 
   @pydantic.field_validator("policies", mode="before")
   @classmethod
-  def _validate_policies(cls, v):  # pylint: disable=no-self-argument
+  def _validate_policies(cls, v: Any) -> list[policy.Policy]:
     if v is None:
       return []
     if not isinstance(v, (list, tuple, Sequence)) or isinstance(
@@ -207,6 +233,31 @@ class AgentConfig(abc.ABC, pydantic.BaseModel):
             seen_names[name] = tool
             tools.append(tool)
     return tools
+
+  def lightweight(self: Self) -> Self:
+    """Returns a copy of this configuration with lightweight presets applied."""
+    preset_kwargs = {
+        "enabled_tools": types.BuiltinTools.minimal(),
+        "agent_behavior": types.AgentBehavior.MINIMAL,
+        "enable_subagents": False,
+        "compaction_threshold": 65536,
+    }
+    if (
+        "capabilities" in self.model_fields_set
+        and self.capabilities is not None
+    ):
+      user_caps = self.capabilities.model_dump(exclude_unset=True)
+      if "disabled_tools" in user_caps and "enabled_tools" not in user_caps:
+        disabled = set(self.capabilities.disabled_tools or [])
+        preset_kwargs["enabled_tools"] = [
+            t for t in types.BuiltinTools.minimal() if t not in disabled
+        ]
+        user_caps.pop("disabled_tools", None)
+      preset_kwargs.update(user_caps)
+    new_capabilities = types.CapabilitiesConfig(**preset_kwargs)
+    return cast(
+        Self, self.model_copy(update={"capabilities": new_capabilities})
+    )
 
   @abc.abstractmethod
   def create_strategy(

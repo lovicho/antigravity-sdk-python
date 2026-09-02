@@ -34,6 +34,7 @@ enum AgentBehavior {
   AGENT_BEHAVIOR_UNSPECIFIED = 0;
   AGENT_BEHAVIOR_AUTONOMOUS = 1;
   AGENT_BEHAVIOR_INTERACTIVE = 2;
+  AGENT_BEHAVIOR_MINIMAL = 3;
 }
 enum ModelType {
   MODEL_TYPE_UNSPECIFIED = 0;
@@ -105,6 +106,7 @@ message HarnessConfig {
   .antigravity.localharness.PolicyConfig policy_config = 21;
   .antigravity.localharness.AgentBehavior agent_behavior = 22;
   .antigravity.localharness.BudgetConfig budget_config = 23;
+  .antigravity.localharness.CompactionConfig compaction_config = 24;
   extensions 1000 to 1999;
   extensions 2000 to max;
 }
@@ -804,9 +806,19 @@ message PolicyDecisionResponse {
   string deny_reason = 3;
 }
 message BudgetConfig {
+  enum BudgetScope {
+    BUDGET_SCOPE_UNSPECIFIED = 0;
+    BUDGET_SCOPE_LIFETIME = 1;
+    BUDGET_SCOPE_FORWARD_LOOKING = 2;
+  }
   int32 max_model_calls = 1;
   int32 max_tool_calls = 2;
   int64 max_input_tokens = 3;
   int64 max_output_tokens = 4;
   int64 max_total_tokens = 5;
+  .antigravity.localharness.BudgetConfig.BudgetScope scope = 6;
+}
+message CompactionConfig {
+  uint32 checkpoint_interval_tokens = 1;
+  uint32 max_context_tokens = 2;
 }

@@ -1444,6 +1444,27 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
         localharness_pb2.AGENT_BEHAVIOR_INTERACTIVE,
     )
 
+  def test_subagent_minimal_agent_behavior_config_produces_valid_proto(self):
+    """Verifies that SubagentCapabilities.agent_behavior=MINIMAL sets CustomAgent.agent_behavior."""
+    strategy = self._make_strategy(
+        subagents=[
+            types.SubagentConfig(
+                name="minimal_subagent",
+                description="A subagent that runs in minimal behavior.",
+                model="gemini-3.8-flash",
+                capabilities=types.SubagentCapabilities(
+                    agent_behavior=types.AgentBehavior.MINIMAL
+                ),
+            )
+        ]
+    )
+    config = strategy._build_harness_config()
+    self.assertLen(config.custom_subagents, 1)
+    self.assertEqual(
+        config.custom_subagents[0].agent_behavior,
+        localharness_pb2.AGENT_BEHAVIOR_MINIMAL,
+    )
+
   def test_legacy_shorthands_api_key_produces_valid_proto(self):
     """Verifies that the legacy api_key shorthand translates to the models proto."""
     cfg = local_connection_config.LocalAgentConfig(
@@ -1518,14 +1539,14 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
     """Verifies that None fields on ModelConfig are not set on the proto."""
     models = [
         types.ModelTarget(
-            name="gemini-3.7-flash",
+            name="gemini-3.8-flash",
             types=[types.ModelType.TEXT],
             endpoint=types.GeminiAPIEndpoint(),
         )
     ]
     strategy = self._make_strategy(models=models)
     config = strategy._build_harness_config()
-    self.assertEqual(config.models[0].name, "gemini-3.7-flash")
+    self.assertEqual(config.models[0].name, "gemini-3.8-flash")
     # api_key should not be set (proto default empty string).
     self.assertEqual(config.models[0].gemini_api_endpoint.api_key, "")
 
@@ -1898,6 +1919,8 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
     )
     config = strategy._build_harness_config()
     self.assertEqual(config.compaction_threshold, 50000)
+    self.assertTrue(config.HasField("compaction_config"))
+    self.assertEqual(config.compaction_config.checkpoint_interval_tokens, 50000)
 
   def test_capabilities_config_none_uses_defaults(self):
     """Verifies that capabilities_config=None produces default-enabled tools.
@@ -1913,6 +1936,36 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
     self.assertTrue(config.harness_side_tools.run_command.enabled)
     self.assertTrue(config.harness_side_tools.find.enabled)
     self.assertEqual(config.compaction_threshold, 0)
+    self.assertFalse(config.HasField("compaction_config"))
+
+  def test_compaction_config_explicit(self):
+    """Verifies CompactionConfig maps to HarnessConfig.compaction_config."""
+    strategy = self._make_strategy(
+        compaction_config=types.CompactionConfig(
+            checkpoint_interval_tokens=40000, max_context_tokens=80000
+        )
+    )
+    config = strategy._build_harness_config()
+    self.assertEqual(config.compaction_threshold, 40000)
+    self.assertTrue(config.HasField("compaction_config"))
+    self.assertEqual(config.compaction_config.checkpoint_interval_tokens, 40000)
+    self.assertEqual(config.compaction_config.max_context_tokens, 80000)
+
+  def test_compaction_config_precedence_over_capabilities(self):
+    """Verifies that compaction_config takes precedence over CapabilitiesConfig."""
+    strategy = self._make_strategy(
+        capabilities_config=types.CapabilitiesConfig(
+            compaction_threshold=50000
+        ),
+        compaction_config=types.CompactionConfig(
+            checkpoint_interval_tokens=30000, max_context_tokens=60000
+        ),
+    )
+    config = strategy._build_harness_config()
+    self.assertEqual(config.compaction_threshold, 30000)
+    self.assertTrue(config.HasField("compaction_config"))
+    self.assertEqual(config.compaction_config.checkpoint_interval_tokens, 30000)
+    self.assertEqual(config.compaction_config.max_context_tokens, 60000)
 
   def test_cascade_id_passed_through(self):
     """Verifies that session_config.conversation_id maps to HarnessConfig.cascade_id.
@@ -2148,7 +2201,7 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
     """Verifies that Vertex configuration fields propagate to proto."""
     models = [
         types.ModelTarget(
-            name="gemini-3.7-flash",
+            name="gemini-3.8-flash",
             types=[types.ModelType.TEXT],
             endpoint=types.VertexEndpoint(
                 project="my-project",
@@ -2518,6 +2571,43 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
     self.assertEqual(config.budget_config.max_input_tokens, 500)
     self.assertEqual(config.budget_config.max_output_tokens, 200)
     self.assertEqual(config.budget_config.max_total_tokens, 1000)
+    self.assertEqual(
+        config.budget_config.scope,
+        localharness_pb2.BudgetConfig.BUDGET_SCOPE_LIFETIME,
+    )
+
+    budget_cfg_lifetime = types.BudgetConfig(
+        max_total_tokens=1000,
+        scope=types.BudgetScope.LIFETIME,
+    )
+    strategy_lifetime = self._make_strategy(budget_config=budget_cfg_lifetime)
+    config_lifetime = strategy_lifetime._build_harness_config()
+    self.assertTrue(config_lifetime.HasField("budget_config"))
+    self.assertEqual(
+        config_lifetime.budget_config.scope,
+        localharness_pb2.BudgetConfig.BUDGET_SCOPE_LIFETIME,
+    )
+
+    budget_cfg_forward = types.BudgetConfig(
+        max_total_tokens=2000,
+        scope=types.BudgetScope.FORWARD_LOOKING,
+    )
+    strategy_forward = self._make_strategy(budget_config=budget_cfg_forward)
+    config_forward = strategy_forward._build_harness_config()
+    self.assertTrue(config_forward.HasField("budget_config"))
+    self.assertEqual(config_forward.budget_config.max_total_tokens, 2000)
+    self.assertEqual(
+        config_forward.budget_config.scope,
+        localharness_pb2.BudgetConfig.BUDGET_SCOPE_FORWARD_LOOKING,
+    )
+
+    # Test direct helper with normalized inputs
+    self.assertIsNone(
+        local_connection.build_budget_config_proto(None)
+    )
+    self.assertIsNone(
+        local_connection.build_budget_config_proto(types.BudgetConfig())
+    )
 
   def test_retry_config_api_retry_only(self):
     """Verifies translation when only api_retry is configured."""
@@ -2646,7 +2736,7 @@ class LocalConnectionStrategyApiKeyTest(unittest.IsolatedAsyncioTestCase):
     """
     models = [
         types.ModelTarget(
-            name="gemini-3.7-flash",
+            name="gemini-3.8-flash",
             types=[types.ModelType.TEXT],
         )
     ]
@@ -2664,7 +2754,7 @@ class LocalConnectionStrategyApiKeyTest(unittest.IsolatedAsyncioTestCase):
     """
     models = [
         types.ModelTarget(
-            name="gemini-3.7-flash",
+            name="gemini-3.8-flash",
             types=[types.ModelType.TEXT],
             endpoint=types.GeminiAPIEndpoint(api_key=None),
         )
@@ -2680,7 +2770,7 @@ class LocalConnectionStrategyApiKeyTest(unittest.IsolatedAsyncioTestCase):
     """Verifies strategy raises validation error when Vertex is set but no project/location provided."""
     models = [
         types.ModelTarget(
-            name="gemini-3.7-flash",
+            name="gemini-3.8-flash",
             types=[types.ModelType.TEXT],
             endpoint=types.VertexEndpoint(project=None, location=None),
         )
@@ -2707,7 +2797,7 @@ class LocalConnectionStrategyApiKeyTest(unittest.IsolatedAsyncioTestCase):
 
     models = [
         types.ModelTarget(
-            name="gemini-3.7-flash",
+            name="gemini-3.8-flash",
             types=[types.ModelType.TEXT],
             endpoint=types.VertexEndpoint(
                 project="my-project",
@@ -2739,7 +2829,7 @@ class LocalConnectionStrategyApiKeyTest(unittest.IsolatedAsyncioTestCase):
     mock_proc.stdout.read.return_value = b""
     mock_popen.return_value = mock_proc
 
-    cfg = local_connection_config.LocalAgentConfig(model="gemini-3.7-flash")
+    cfg = local_connection_config.LocalAgentConfig(model="gemini-3.8-flash")
     self.assertIsInstance(cfg.models[0].endpoint, types.VertexEndpoint)
     self.assertEqual(cfg.models[0].endpoint.project, "env-project")
     self.assertEqual(cfg.models[0].endpoint.location, "env-location")
@@ -2753,7 +2843,7 @@ class LocalConnectionStrategyApiKeyTest(unittest.IsolatedAsyncioTestCase):
   )
   def test_bare_config_routes_to_vertex_via_use_enterprise_env(self):
     """USE_ENTERPRISE alone also triggers Vertex routing (GEAP recipe)."""
-    cfg = local_connection_config.LocalAgentConfig(model="gemini-3.7-flash")
+    cfg = local_connection_config.LocalAgentConfig(model="gemini-3.8-flash")
     self.assertIsInstance(cfg.models[0].endpoint, types.VertexEndpoint)
 
   @mock.patch.dict(
@@ -2851,7 +2941,7 @@ class LocalConnectionStrategyApiKeyTest(unittest.IsolatedAsyncioTestCase):
     """Verifies that api_key on VertexEndpoint propagates to localharness proto."""
     models = [
         types.ModelTarget(
-            name="gemini-3.7-flash",
+            name="gemini-3.8-flash",
             types=[types.ModelType.TEXT],
             endpoint=types.VertexEndpoint(api_key="express-key"),
         )
@@ -2990,7 +3080,7 @@ class LocalConnectionStrategyApiKeyTest(unittest.IsolatedAsyncioTestCase):
     mock_popen.return_value = mock_proc
     models = [
         types.ModelTarget(
-            name="gemini-3.7-flash",
+            name="gemini-3.8-flash",
             types=[types.ModelType.TEXT],
             endpoint=types.GeminiAPIEndpoint(api_key="explicit-key"),
         )
@@ -4506,6 +4596,57 @@ class LocalAgentConfigTest(absltest.TestCase):
     allow_policy = config.policies[1]
     self.assertEqual(allow_policy.tool, "*")
     self.assertEqual(allow_policy.decision, policy.Decision.APPROVE)
+
+  def test_lightweight_method(self):
+    config = local_connection_config.LocalAgentConfig(
+        model="gemini-3.8-flash",
+    ).lightweight()
+    self.assertIsInstance(config, local_connection_config.LocalAgentConfig)
+    self.assertEqual(config.model, "gemini-3.8-flash")
+    self.assertEqual(
+        config.capabilities.agent_behavior, types.AgentBehavior.MINIMAL
+    )
+    self.assertEqual(
+        config.capabilities.enabled_tools, types.BuiltinTools.minimal()
+    )
+    self.assertEqual(config.capabilities.compaction_threshold, 65536)
+    self.assertFalse(config.capabilities.enable_subagents)
+
+    # Verify HarnessConfig proto serialization with agent_behavior
+    strategy = config.create_strategy(tool_runner=None, hook_runner=None)
+    harness_config = strategy._build_harness_config()
+    self.assertEqual(
+        harness_config.agent_behavior,
+        localharness_pb2.AGENT_BEHAVIOR_MINIMAL,
+    )
+    self.assertEqual(harness_config.compaction_threshold, 65536)
+    self.assertFalse(harness_config.harness_side_tools.subagents.enabled)
+    self.assertTrue(harness_config.harness_side_tools.run_command.enabled)
+    self.assertTrue(harness_config.harness_side_tools.view_file.enabled)
+    self.assertTrue(harness_config.harness_side_tools.write_to_file.enabled)
+    self.assertTrue(harness_config.harness_side_tools.file_edit.enabled)
+    self.assertTrue(harness_config.harness_side_tools.list_dir.enabled)
+    self.assertTrue(harness_config.harness_side_tools.grep_search.enabled)
+    self.assertFalse(harness_config.harness_side_tools.find.enabled)
+    self.assertFalse(harness_config.harness_side_tools.user_questions.enabled)
+
+  def test_lightweight_method_with_overrides(self):
+    config = local_connection_config.LocalAgentConfig(
+        model="gemini-2.5-flash-lite",
+        capabilities=types.CapabilitiesConfig(
+            compaction_threshold=8000,
+        ),
+    ).lightweight()
+    self.assertIsInstance(config, local_connection_config.LocalAgentConfig)
+    self.assertEqual(config.model, "gemini-2.5-flash-lite")
+    self.assertEqual(config.capabilities.compaction_threshold, 8000)
+    self.assertFalse(config.capabilities.enable_subagents)
+    self.assertEqual(
+        config.capabilities.agent_behavior, types.AgentBehavior.MINIMAL
+    )
+    self.assertEqual(
+        config.capabilities.enabled_tools, types.BuiltinTools.minimal()
+    )
 
   def test_safe_defaults_with_default_workspace(self):
     """LocalAgentConfig defaults to CWD workspace when not specified."""

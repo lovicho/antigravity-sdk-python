@@ -25,6 +25,7 @@ import tempfile
 from typing import Any, cast
 import unittest
 from unittest import mock
+import warnings
 
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -689,6 +690,18 @@ class BuiltinToolsTest(parameterized.TestCase):
     """Verifies that none() returns an empty list."""
     self.assertEqual(types.BuiltinTools.none(), [])
 
+  def test_minimal_returns_six_minimal_tools(self):
+    """Verifies that minimal() returns exactly the 6 core software engineering tools."""
+    expected = [
+        types.BuiltinTools.RUN_COMMAND,
+        types.BuiltinTools.VIEW_FILE,
+        types.BuiltinTools.CREATE_FILE,
+        types.BuiltinTools.EDIT_FILE,
+        types.BuiltinTools.LIST_DIR,
+        types.BuiltinTools.SEARCH_DIR,
+    ]
+    self.assertEqual(types.BuiltinTools.minimal(), expected)
+
 
 class AgentBehaviorTest(unittest.TestCase):
   """Tests for the AgentBehavior enum."""
@@ -696,6 +709,7 @@ class AgentBehaviorTest(unittest.TestCase):
   def test_enum_values(self):
     self.assertEqual(types.AgentBehavior.AUTONOMOUS, "autonomous")
     self.assertEqual(types.AgentBehavior.INTERACTIVE, "interactive")
+    self.assertEqual(types.AgentBehavior.MINIMAL, "minimal")
 
 
 class CapabilitiesConfigTest(unittest.TestCase):
@@ -719,6 +733,12 @@ class CapabilitiesConfigTest(unittest.TestCase):
     self.assertEqual(config.agent_behavior, types.AgentBehavior.INTERACTIVE)
     config_str = types.CapabilitiesConfig(agent_behavior="interactive")
     self.assertEqual(config_str.agent_behavior, types.AgentBehavior.INTERACTIVE)
+    config_min = types.CapabilitiesConfig(
+        agent_behavior=types.AgentBehavior.MINIMAL
+    )
+    self.assertEqual(config_min.agent_behavior, types.AgentBehavior.MINIMAL)
+    config_min_str = types.CapabilitiesConfig(agent_behavior="minimal")
+    self.assertEqual(config_min_str.agent_behavior, types.AgentBehavior.MINIMAL)
 
   def test_enabled_tools(self):
     """Verifies that enabled_tools accepts a list of BuiltinTools."""
@@ -747,9 +767,19 @@ class CapabilitiesConfigTest(unittest.TestCase):
       )
 
   def test_compaction_threshold_explicit(self):
-    """Verifies that compaction_threshold accepts an explicit integer."""
-    config = types.CapabilitiesConfig(compaction_threshold=50000)
-    self.assertEqual(config.compaction_threshold, 50000)
+    """Verifies that compaction_threshold accepts an integer and emits DeprecationWarning."""
+    with warnings.catch_warnings(record=True) as w:
+      warnings.simplefilter("always")
+      config = types.CapabilitiesConfig(compaction_threshold=50000)
+      self.assertEqual(config.compaction_threshold, 50000)
+      self.assertTrue(
+          any(
+              issubclass(item.category, DeprecationWarning)
+              and "CapabilitiesConfig.compaction_threshold is deprecated"
+              in str(item.message)
+              for item in w
+          )
+      )
 
   def test_ask_question_warning_when_not_interactive(self):
     """Verifies warning when ASK_QUESTION is enabled and not interactive."""
@@ -916,6 +946,93 @@ class CapabilitiesConfigTest(unittest.TestCase):
             for msg in log_cm.output
         )
     )
+
+
+class CompactionConfigTest(unittest.TestCase):
+  """Validates the CompactionConfig Pydantic model."""
+
+  def test_defaults(self):
+    """Verifies that CompactionConfig fields default to None."""
+    cfg = types.CompactionConfig()
+    self.assertIsNone(cfg.checkpoint_interval_tokens)
+    self.assertIsNone(cfg.max_context_tokens)
+    self.assertIsNone(cfg.compaction_threshold)
+
+  def test_explicit_fields(self):
+    """Verifies construction with explicit integer limits."""
+    cfg = types.CompactionConfig(
+        checkpoint_interval_tokens=50000, max_context_tokens=100000
+    )
+    self.assertEqual(cfg.checkpoint_interval_tokens, 50000)
+    self.assertEqual(cfg.max_context_tokens, 100000)
+    self.assertEqual(cfg.compaction_threshold, 50000)
+
+  def test_legacy_compaction_threshold_migrates(self):
+    """Verifies backward compatibility with compaction_threshold keyword."""
+    cfg = types.CompactionConfig(
+        compaction_threshold=50000, max_context_tokens=100000
+    )
+    self.assertEqual(cfg.checkpoint_interval_tokens, 50000)
+    self.assertEqual(cfg.compaction_threshold, 50000)
+    self.assertEqual(cfg.max_context_tokens, 100000)
+
+  def test_interval_equal_max_context_tokens(self):
+    """Verifies that checkpoint_interval_tokens == max_context_tokens is valid."""
+    cfg = types.CompactionConfig(
+        checkpoint_interval_tokens=100000, max_context_tokens=100000
+    )
+    self.assertEqual(cfg.checkpoint_interval_tokens, 100000)
+    self.assertEqual(cfg.max_context_tokens, 100000)
+
+  def test_interval_exceeds_max_context_tokens_raises(self):
+    """Verifies validation error when checkpoint_interval_tokens > max_context_tokens."""
+    with self.assertRaisesRegex(
+        pydantic.ValidationError,
+        "checkpoint_interval_tokens .* cannot exceed max_context_tokens",
+    ):
+      types.CompactionConfig(
+          checkpoint_interval_tokens=150000, max_context_tokens=100000
+      )
+
+  def test_conflicting_aliased_values_raises(self):
+    """Verifies validation error when conflicting values are passed for aliased fields."""
+    with self.assertRaisesRegex(
+        pydantic.ValidationError,
+        "Conflicting values for aliased fields",
+    ):
+      types.CompactionConfig(
+          checkpoint_interval_tokens=40000, compaction_threshold=80000
+      )
+
+  def test_bidirectional_aliasing_and_model_copy(self):
+    """Verifies bidirectional sync between checkpoint_interval_tokens and compaction_threshold."""
+    cfg1 = types.CompactionConfig(checkpoint_interval_tokens=40000)
+    self.assertEqual(cfg1.checkpoint_interval_tokens, 40000)
+    self.assertEqual(cfg1.compaction_threshold, 40000)
+
+    cfg2 = types.CompactionConfig(compaction_threshold=40000)
+    self.assertEqual(cfg2.checkpoint_interval_tokens, 40000)
+    self.assertEqual(cfg2.compaction_threshold, 40000)
+
+    # Validation from existing model instance preserves aliased fields
+    cfg3 = types.CompactionConfig.model_validate(cfg2)
+    self.assertEqual(cfg3.checkpoint_interval_tokens, 40000)
+    self.assertEqual(cfg3.compaction_threshold, 40000)
+
+  def test_non_positive_values_raise(self):
+    """Verifies that values must be strictly greater than 0."""
+    with self.assertRaises(pydantic.ValidationError):
+      types.CompactionConfig(checkpoint_interval_tokens=0)
+    with self.assertRaises(pydantic.ValidationError):
+      types.CompactionConfig(checkpoint_interval_tokens=-1)
+    with self.assertRaises(pydantic.ValidationError):
+      types.CompactionConfig(compaction_threshold=0)
+    with self.assertRaises(pydantic.ValidationError):
+      types.CompactionConfig(compaction_threshold=-1)
+    with self.assertRaises(pydantic.ValidationError):
+      types.CompactionConfig(max_context_tokens=0)
+    with self.assertRaises(pydantic.ValidationError):
+      types.CompactionConfig(max_context_tokens=-1)
 
 
 class AntigravityConnectionErrorTest(unittest.TestCase):
@@ -2156,6 +2273,7 @@ class BudgetEnforcementTypesTest(absltest.TestCase):
     self.assertIsNone(cfg.max_input_tokens)
     self.assertIsNone(cfg.max_output_tokens)
     self.assertIsNone(cfg.max_total_tokens)
+    self.assertEqual(cfg.scope, types.BudgetScope.LIFETIME)
 
     cfg_valid = types.BudgetConfig(
         max_model_calls=5,
@@ -2163,12 +2281,14 @@ class BudgetEnforcementTypesTest(absltest.TestCase):
         max_input_tokens=500,
         max_output_tokens=200,
         max_total_tokens=1000,
+        scope=types.BudgetScope.FORWARD_LOOKING,
     )
     self.assertEqual(cfg_valid.max_model_calls, 5)
     self.assertEqual(cfg_valid.max_tool_calls, 10)
     self.assertEqual(cfg_valid.max_input_tokens, 500)
     self.assertEqual(cfg_valid.max_output_tokens, 200)
     self.assertEqual(cfg_valid.max_total_tokens, 1000)
+    self.assertEqual(cfg_valid.scope, types.BudgetScope.FORWARD_LOOKING)
 
     with self.assertRaises(pydantic.ValidationError):
       types.BudgetConfig(max_model_calls=0)
@@ -2190,6 +2310,12 @@ class BudgetEnforcementTypesTest(absltest.TestCase):
       types.BudgetConfig(max_total_tokens=0)
     with self.assertRaises(pydantic.ValidationError):
       types.BudgetConfig(max_total_tokens=2**63)
+    with self.assertRaises(pydantic.ValidationError):
+      types.BudgetConfig.model_validate({"scope": "INVALID_SCOPE"})
+
+  def test_budget_scope_enum(self):
+    self.assertEqual(types.BudgetScope.LIFETIME, "LIFETIME")
+    self.assertEqual(types.BudgetScope.FORWARD_LOOKING, "FORWARD_LOOKING")
 
   def test_stop_reason_enum(self):
     self.assertEqual(types.StopReason.UNSPECIFIED, "UNSPECIFIED")

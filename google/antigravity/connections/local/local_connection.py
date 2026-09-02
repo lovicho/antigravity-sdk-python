@@ -77,12 +77,11 @@ def to_proto_session_continuation_mode(
 
 
 _AGENT_BEHAVIOR_MAP = {
-    types.AgentBehavior.AUTONOMOUS: (
-        localharness_pb2.AGENT_BEHAVIOR_AUTONOMOUS
-    ),
+    types.AgentBehavior.AUTONOMOUS: localharness_pb2.AGENT_BEHAVIOR_AUTONOMOUS,
     types.AgentBehavior.INTERACTIVE: (
         localharness_pb2.AGENT_BEHAVIOR_INTERACTIVE
     ),
+    types.AgentBehavior.MINIMAL: localharness_pb2.AGENT_BEHAVIOR_MINIMAL,
 }
 
 
@@ -102,6 +101,30 @@ def to_proto_model_type(
   if model_type == types.ModelType.IMAGE:
     return localharness_pb2.MODEL_TYPE_IMAGE
   return localharness_pb2.MODEL_TYPE_UNSPECIFIED
+
+
+def to_proto_compaction_config(
+    compaction_config: types.CompactionConfig | None,
+    capabilities: types.CapabilitiesConfig | None,
+) -> tuple[localharness_pb2.CompactionConfig | None, int]:
+  """Converts SDK CompactionConfig and legacy capabilities to proto and legacy threshold."""
+  effective_compaction = compaction_config
+  if effective_compaction is None and capabilities is not None:
+    if capabilities.compaction_threshold is not None:
+      effective_compaction = types.CompactionConfig(
+          checkpoint_interval_tokens=capabilities.compaction_threshold,
+      )
+
+  if effective_compaction is None:
+    return None, 0
+
+  proto = localharness_pb2.CompactionConfig(
+      checkpoint_interval_tokens=effective_compaction.checkpoint_interval_tokens
+      or 0,
+      max_context_tokens=effective_compaction.max_context_tokens or 0,
+  )
+  legacy_threshold = effective_compaction.checkpoint_interval_tokens or 0
+  return proto, legacy_threshold
 
 
 def build_gemini_options_proto(
@@ -154,8 +177,31 @@ def build_budget_config_proto(
   if not config:
     return None
   data = config.model_dump(exclude_none=True)
-  if not data:
+  has_limits = any(
+      k in data
+      for k in (
+          "max_model_calls",
+          "max_tool_calls",
+          "max_input_tokens",
+          "max_output_tokens",
+          "max_total_tokens",
+      )
+  )
+  if not has_limits:
     return None
+  if "scope" in data:
+    scope_val = getattr(data["scope"], "value", data["scope"])
+    if isinstance(scope_val, int):
+      data["scope"] = scope_val
+    elif isinstance(scope_val, str):
+      scope_name = (
+          scope_val
+          if scope_val.startswith("BUDGET_SCOPE_")
+          else f"BUDGET_SCOPE_{scope_val}"
+      )
+      data["scope"] = (
+          localharness_pb2.BudgetConfig.BudgetScope.Value(scope_name)
+      )
   return localharness_pb2.BudgetConfig(**data)
 
 
@@ -553,7 +599,7 @@ class LocalConnection(connection.Connection):
     """Reads OutputEvents from the WebSocket and delegates to processor."""
     try:
       async for raw_msg in self._ws:
-        logging.info("RAW WS MSG: %s", raw_msg)
+        logging.debug("RAW WS MSG: %s", raw_msg)
         event = localharness_pb2.OutputEvent()
         json_format.Parse(raw_msg, event)
         await self._processor.process_event(event)
@@ -823,6 +869,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
       skills_paths: list[str] | None = None,
       system_instructions: str | types.SystemInstructions | None = None,
       capabilities_config: types.CapabilitiesConfig | None = None,
+      compaction_config: types.CompactionConfig | None = None,
       conversation_id: str | None = None,
       session_continuation_mode: types.SessionContinuationMode | None = None,
       save_dir: str | None = None,
@@ -846,6 +893,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
       skills_paths: Optional list of paths to search for skills.
       system_instructions: Optional SystemInstructions or string shorthand.
       capabilities_config: Optional CapabilitiesConfig to configure tools.
+      compaction_config: Optional CompactionConfig to configure compaction.
       conversation_id: Optional conversation identifier.
       session_continuation_mode: Optional mode for establishing a connection.
       save_dir: Optional directory to save trajectories.
@@ -887,6 +935,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
     self._capabilities_config = (
         capabilities_config or types.CapabilitiesConfig()
     )
+    self._compaction_config = compaction_config
     self._conversation_id = conversation_id
     self._session_continuation_mode = session_continuation_mode
     self._save_dir = save_dir
@@ -1125,6 +1174,10 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
 
     enabled_hooks = self._get_enabled_hooks()
 
+    compaction_proto, legacy_threshold = to_proto_compaction_config(
+        self._compaction_config, self._capabilities_config
+    )
+
     custom_agents_protos = self._build_custom_subagents_protos(all_tool_protos)
     harness_config = localharness_pb2.HarnessConfig(
         tools=root_tool_protos,
@@ -1137,10 +1190,8 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
         workspaces=workspace_protos,
         skills_paths=self._skills_paths or [],
         harness_side_tools=harness_side_tools,
-        # 0 tells the harness to use its default (50000 tokens).
-        compaction_threshold=(
-            self._capabilities_config.compaction_threshold or 0
-        ),
+        compaction_threshold=legacy_threshold,
+        compaction_config=compaction_proto,
         finish_tool_schema_json=(
             self._capabilities_config.finish_tool_schema_json or ""
         ),

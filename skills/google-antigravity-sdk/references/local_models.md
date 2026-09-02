@@ -34,10 +34,13 @@ from google.antigravity import Agent, LiteRTAgentConfig, LiteRTBackend
 - `backend` (`'gpu'` | `'cpu'` | `'npu'`, default `'gpu'`): Hardware backend
   for inference. Use `LiteRTBackend.GPU`, `LiteRTBackend.CPU`, or
   `LiteRTBackend.NPU`.
-- `max_context_tokens` (int | None, default None): KV-cache pre-allocation size.
-  Set to `65536` to accommodate most local hardware setups. The model supports
-  larger windows, but 64k balances capability with memory constraints. When
-  unset, defaults to `4096` from model metadata.
+- `compaction_config` (`CompactionConfig` | None, default None): Configure
+  compaction and context limits, including `max_context_tokens` for KV-cache
+  pre-allocation size. Set to `65536` to accommodate most local hardware setups.
+  The model supports larger windows, but 64k balances capability with memory
+  constraints. When unset, defaults to `4096` from model metadata.
+- `capabilities` (`CapabilitiesConfig` | None, default None): Configure agent
+  capabilities (subagents, tool allowlists, behavior mode).
 - `enable_speculative_decoding` (bool, default False): Enable multi-token
   prediction for faster generation.
 - `cache_dir` (str | None): Directory for compilation caching. Speeds up
@@ -55,6 +58,10 @@ All standard `AgentConfig` parameters are also supported: `system_instructions`,
 
 ### Basic Example
 
+For local execution, prefer `.lightweight()` to minimize prompt overhead,
+restrict tools to core coding capabilities, disable subagents, and configure
+context compaction for local models:
+
 ```python
 import os
 
@@ -64,7 +71,7 @@ config = LiteRTAgentConfig(
     model_path=os.path.expanduser(
         "~/.litert-lm/models/gemma4-26b/model.litertlm"
     ),
-)
+).lightweight()
 async with Agent(config=config) as agent:
     response = await agent.chat("Explain Python generators.")
     print(response)
@@ -80,7 +87,7 @@ config = LiteRTAgentConfig(
     model_path=os.path.expanduser(
         "~/.litert-lm/models/gemma4-26b/model.litertlm"
     ),
-    max_context_tokens=65536,
+    compaction_config=CompactionConfig(max_context_tokens=65536),
 )
 ```
 
@@ -161,7 +168,8 @@ Start Ollama and pull a model first:
 ollama pull gemma3:4b
 ```
 
-Then create an agent:
+Then create an agent (using `.lightweight()` for optimized prompt overhead and
+core coding tools):
 
 ```python
 from google.antigravity import Agent, LocalOpenAIAgentConfig
@@ -169,7 +177,7 @@ from google.antigravity import Agent, LocalOpenAIAgentConfig
 config = LocalOpenAIAgentConfig(
     model="gemma3:4b",
     base_url="http://localhost:11434/v1",
-)
+).lightweight()
 async with Agent(config=config) as agent:
     response = await agent.chat("What is the capital of France?")
     print(response)
@@ -183,7 +191,7 @@ from google.antigravity import Agent, LocalOpenAIAgentConfig
 config = LocalOpenAIAgentConfig(
     model="gemma-4-26B-A4B-it",
     base_url="http://localhost:1234/v1",
-)
+).lightweight()
 async with Agent(config=config) as agent:
     response = await agent.chat("Summarize this document.")
     print(response)
