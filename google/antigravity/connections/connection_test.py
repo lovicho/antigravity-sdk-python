@@ -223,7 +223,22 @@ class AgentConfigTest(unittest.TestCase):
         config.capabilities.enabled_tools, types.BuiltinTools.minimal()
     )
     self.assertFalse(config.capabilities.enable_subagents)
-    self.assertEqual(config.capabilities.compaction_threshold, 65536)
+    self.assertIsNotNone(config.compaction_config)
+    self.assertEqual(config.compaction_config.token_threshold, 65536)
+
+  def test_lightweight_method_preserves_explicit_compaction_config(self):
+    class ConcreteConfig(connection.AgentConfig):
+
+      def create_strategy(self, *, tool_runner, hook_runner):
+        return None
+
+    user_compaction = types.CompactionConfig(
+        token_threshold=12345,
+    )
+    config = ConcreteConfig(
+        compaction_config=user_compaction,
+    ).lightweight()
+    self.assertEqual(config.compaction_config.token_threshold, 12345)
 
   def test_lightweight_method_merges_with_custom_capabilities(self):
     class ConcreteConfig(connection.AgentConfig):
@@ -295,7 +310,6 @@ class AgentConfigTest(unittest.TestCase):
     self.assertEqual(
         config.capabilities.enabled_tools, types.BuiltinTools.minimal()
     )
-    self.assertEqual(config.capabilities.compaction_threshold, 65536)
 
   def test_lightweight_method_filters_disabled_tools_from_minimal_presets(self):
     class ConcreteConfig(connection.AgentConfig):
@@ -315,6 +329,105 @@ class AgentConfigTest(unittest.TestCase):
         types.BuiltinTools.VIEW_FILE, config.capabilities.enabled_tools
     )
     self.assertIsNone(config.capabilities.disabled_tools)
+
+  def test_compute_lightweight_presets_classmethod(self):
+    class ConcreteConfig(connection.AgentConfig):
+
+      def create_strategy(self, *, tool_runner, hook_runner):
+        return None
+
+    presets = ConcreteConfig._compute_lightweight_presets()
+    self.assertIn("capabilities", presets)
+    self.assertEqual(
+        presets["capabilities"].enabled_tools, types.BuiltinTools.minimal()
+    )
+    self.assertEqual(
+        presets["capabilities"].agent_behavior, types.AgentBehavior.MINIMAL
+    )
+    self.assertFalse(presets["capabilities"].enable_subagents)
+    self.assertIn("compaction_config", presets)
+    self.assertEqual(presets["compaction_config"].token_threshold, 65536)
+
+  def test_compute_lightweight_presets_with_dict_capabilities(self):
+    class ConcreteConfig(connection.AgentConfig):
+
+      def create_strategy(self, *, tool_runner, hook_runner):
+        return None
+
+    presets = ConcreteConfig._compute_lightweight_presets({
+        "capabilities": {"disabled_tools": [types.BuiltinTools.RUN_COMMAND]}
+    })
+    self.assertNotIn(
+        types.BuiltinTools.RUN_COMMAND, presets["capabilities"].enabled_tools
+    )
+    self.assertIn(
+        types.BuiltinTools.VIEW_FILE, presets["capabilities"].enabled_tools
+    )
+
+  def test_compute_lightweight_presets_with_dict_compaction_threshold(self):
+    class ConcreteConfig(connection.AgentConfig):
+
+      def create_strategy(self, *, tool_runner, hook_runner):
+        return None
+
+    presets = ConcreteConfig._compute_lightweight_presets({
+        "capabilities": {"compaction_threshold": 3000}
+    })
+    self.assertEqual(presets["capabilities"].compaction_threshold, 3000)
+    self.assertNotIn("compaction_config", presets)
+
+
+class ResolveActiveToolsTest(unittest.TestCase):
+  """Tests for resolve_active_tools helper."""
+
+  def test_none_config_returns_default(self):
+    expected = set(types.BuiltinTools.default())
+    self.assertEqual(connection.resolve_active_tools(None), expected)
+
+  def test_enabled_tools_overrides_defaults(self):
+    cfg = types.CapabilitiesConfig(
+        enabled_tools=[
+            types.BuiltinTools.VIEW_FILE,
+            types.BuiltinTools.ASK_QUESTION,
+        ]
+    )
+    expected = {types.BuiltinTools.VIEW_FILE, types.BuiltinTools.ASK_QUESTION}
+    self.assertEqual(connection.resolve_active_tools(cfg), expected)
+
+  def test_disabled_tools_subtracts_from_default(self):
+    cfg = types.CapabilitiesConfig(
+        disabled_tools=[types.BuiltinTools.RUN_COMMAND]
+    )
+    expected = set(types.BuiltinTools.default()) - {
+        types.BuiltinTools.RUN_COMMAND
+    }
+    self.assertEqual(connection.resolve_active_tools(cfg), expected)
+    self.assertNotIn(
+        types.BuiltinTools.ASK_QUESTION,
+        connection.resolve_active_tools(cfg),
+    )
+
+  def test_custom_defaults(self):
+    custom_defaults = [
+        types.BuiltinTools.VIEW_FILE,
+        types.BuiltinTools.LIST_DIR,
+    ]
+    cfg = types.CapabilitiesConfig(
+        disabled_tools=[types.BuiltinTools.LIST_DIR]
+    )
+    result = connection.resolve_active_tools(cfg, defaults=custom_defaults)
+    self.assertEqual(result, {types.BuiltinTools.VIEW_FILE})
+
+  def test_subagent_capabilities(self):
+    subagent_cfg = types.SubagentCapabilities(
+        disabled_tools=[types.BuiltinTools.RUN_COMMAND]
+    )
+    expected = set(types.BuiltinTools.default()) - {
+        types.BuiltinTools.RUN_COMMAND
+    }
+    self.assertEqual(
+        connection.resolve_active_tools(subagent_cfg), expected
+    )
 
 
 if __name__ == "__main__":

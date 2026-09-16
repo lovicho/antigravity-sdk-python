@@ -36,6 +36,34 @@ MAIN_TRAJECTORY_ID = "cbb3a5135a32671ae8152a25a857c4bc"
 SUBAGENT_TRAJECTORY_ID = "9121f3e9937e263b74a4a43ff6fb0117"
 
 
+class ParseInitializeResponseTest(absltest.TestCase):
+  """Tests for event_processor.parse_initialize_response sandbox parsing."""
+
+  def test_parses_available_sandbox_status(self):
+    resp = localharness_pb2.InitializeConversationResponse()
+    resp.sandbox_status.available = True
+    result = event_processor.parse_initialize_response(resp)
+    self.assertIsNotNone(result.sandbox_status)
+    self.assertTrue(result.sandbox_status.available)
+    self.assertIsNone(result.sandbox_status.unavailable_reason)
+
+  def test_parses_unavailable_sandbox_status(self):
+    resp = localharness_pb2.InitializeConversationResponse()
+    resp.sandbox_status.available = False
+    resp.sandbox_status.unavailable_reason = "android: VM boundary"
+    result = event_processor.parse_initialize_response(resp)
+    self.assertIsNotNone(result.sandbox_status)
+    self.assertFalse(result.sandbox_status.available)
+    self.assertEqual(
+        result.sandbox_status.unavailable_reason, "android: VM boundary"
+    )
+
+  def test_sandbox_status_none_when_unset(self):
+    resp = localharness_pb2.InitializeConversationResponse()
+    result = event_processor.parse_initialize_response(resp)
+    self.assertIsNone(result.sandbox_status)
+
+
 class EventProcessorHelperTest(absltest.TestCase):
   """Tests for standalone helper functions in event_processor."""
 
@@ -91,6 +119,18 @@ class EventProcessorHelperTest(absltest.TestCase):
     self.assertIsNone(meta.thoughts_token_count)
     self.assertIsNone(meta.total_token_count)
     self.assertIsNone(meta.service_tier)
+
+  def test_parse_usage_metadata_unknown_service_tier_is_dropped(self):
+    # Vertex AI reports tiers the Gemini Developer API does not define. Raising
+    # here escapes the websocket reader loop and kills a turn whose response has
+    # already been delivered, so the tier is dropped and the counts survive.
+    pb = localharness_pb2.UsageMetadata(
+        total_token_count=250,
+        service_tier="PROVISIONED_THROUGHPUT",
+    )
+    meta = event_processor.parse_usage_metadata(pb)
+    self.assertIsNone(meta.service_tier)
+    self.assertEqual(meta.total_token_count, 250)
 
   def test_parse_stop_reason(self):
     self.assertEqual(

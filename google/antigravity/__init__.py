@@ -40,11 +40,14 @@ from google.antigravity.types import ModelOutputRetryConfig
 from google.antigravity.types import ModelTarget
 from google.antigravity.types import ModelType
 from google.antigravity.types import RetryConfig
+from google.antigravity.types import SandboxStatus
+from google.antigravity.types import ServiceTier
 from google.antigravity.types import SystemInstructions
 from google.antigravity.types import SystemInstructionSection
 from google.antigravity.types import TemplatedSystemInstructions
 from google.antigravity.types import ThinkingLevel
 from google.antigravity.types import ToolExecutionError
+from google.antigravity.types import ToolOutputTruncationConfig
 from google.antigravity.types import UsageMetadata
 from google.antigravity.types import VertexEndpoint
 from google.antigravity.types import Video
@@ -74,10 +77,13 @@ __all__ = [
     "ModelTarget",
     "ModelType",
     "RetryConfig",
+    "SandboxStatus",
+    "ServiceTier",
     "SystemInstructions",
     "SystemInstructionSection",
     "TemplatedSystemInstructions",
     "ThinkingLevel",
+    "ToolOutputTruncationConfig",
     "UsageMetadata",
     "VertexEndpoint",
     "Video",

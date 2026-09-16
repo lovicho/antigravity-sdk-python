@@ -23,47 +23,60 @@ import "google/antigravity/proto/hooks.proto";
 import "google/antigravity/proto/interaction.proto";
 import "google/antigravity/proto/models.proto";
 import "google/antigravity/proto/sse_events.proto";
+import "google/antigravity/proto/state_update.proto";
 import "google/antigravity/proto/steps.proto";
 import "google/antigravity/proto/tools.proto";
 import "google/antigravity/proto/genai_json_annotations.proto";
 
 option features = { field_presence : IMPLICIT enum_type : OPEN utf8_validation : NONE };
 
+message ClientEventBatch {
+  oneof connect_request {
+    .genai.CreateInteractionEvent create_interaction = 7;
+  }
+  oneof end_request {
+    .genai.CompleteInteractionEvent complete_interaction = 5;
+    .genai.CancelInteractionEvent cancel_interaction = 6;
+    .genai.DisconnectEvent disconnect = 9;
+  }
+  repeated .genai.ClientEvent events = 1;
+  int64 ack_output_seq_num = 2;
+}
 message ClientEvent {
   oneof event_type {
-    option (gaos.parsing.subtype_source) = true;
-
     .genai.Payload payload = 3;
   }
   int64 seq_num = 10;
   int64 timestamp_micros = 11;
 }
-message StateUpdate {
-  enum State {
-    STATE_UNSPECIFIED = 0;
-    STATE_RUNNING = 1;
-    STATE_WAITING_FOR_TASKS = 2;
-    STATE_FULLY_IDLE = 3;
-    STATE_CANCELLED = 4;
+message ServerEventBatch {
+  oneof connect_reply {
+    .genai.InteractionCreatedEvent interaction_created = 7;
   }
-  enum Reason {
-    REASON_UNSPECIFIED = 0;
-    REASON_MAX_MODEL_CALLS_EXCEEDED = 1;
-    REASON_MAX_TOOL_CALLS_EXCEEDED = 2;
-    REASON_MAX_INPUT_TOKENS_EXCEEDED = 3;
-    REASON_MAX_OUTPUT_TOKENS_EXCEEDED = 4;
-    REASON_MAX_TOTAL_TOKENS_EXCEEDED = 5;
-    REASON_QUOTA_EXHAUSTED = 6;
+  oneof end_signal {
+    .genai.InteractionCompletedEvent interaction_completed = 6;
   }
-  string parent_interaction_id = 7;
-  .genai.StateUpdate.State state = 3;
-  string error = 4;
-  .genai.StateUpdate.Reason reason = 5;
+  repeated .genai.ServerEvent events = 1;
+  int64 ack_input_seq_num = 2;
 }
 message FunctionInvocation {
   string call_id = 1;
   string name = 2;
   .genai.Struct arguments = 3;
+}
+message SkillDeclaration {
+  string name = 1;
+  string description = 2;
+}
+message SlashCommandDeclaration {
+  string name = 1;
+  string description = 2;
+}
+message CapabilitiesUpdate {
+  repeated .genai.SkillDeclaration available_skills = 1;
+  repeated .genai.SkillDeclaration added_skills = 2;
+  repeated string removed_skill_names = 3;
+  repeated .genai.SlashCommandDeclaration available_slash_commands = 4;
 }
 message ServerEvent {
   oneof event_type {
@@ -103,6 +116,17 @@ message CreateInteractionEvent {
 }
 message InteractionCreatedEvent {
   string interaction_id = 1;
+  repeated .genai.SkillDeclaration available_skills = 2;
+  repeated .genai.SlashCommandDeclaration available_slash_commands = 3;
+}
+message CompleteInteractionEvent {}
+message CancelInteractionEvent {}
+message DisconnectEvent {}
+message InteractionCompletedEvent {
+  reserved 1;
+  string created = 2;
+  string updated = 3;
+  extensions 1000 to max;
 }
 message Payload {
   oneof event_type {
@@ -118,6 +142,7 @@ message Payload {
     .genai.StateUpdate state_update = 13;
     .genai.FunctionInvocation function_invocation = 14;
     .genai.CallHookRequest call_hook_request = 15;
+    .genai.CapabilitiesUpdate capabilities_update = 17;
     .genai.CallHookResponse call_hook_response = 16;
   }
   string sub_interaction_id = 6;

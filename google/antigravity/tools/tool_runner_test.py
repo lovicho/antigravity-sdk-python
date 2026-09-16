@@ -17,6 +17,7 @@
 import asyncio
 import dataclasses
 import threading
+import typing
 from typing import Optional, Union
 from unittest import mock
 
@@ -199,8 +200,8 @@ class ToolRunnerTest(absltest.TestCase):
     be executed safely by the ToolRunner.
     Why: Covers manual wrapping use-cases where users need explicit schemas
     attached to synchronous methods.
-    How: Registers a wrapped synchronous placeholder tool, executes it, and asserts
-    expected return string.
+    How: Registers a wrapped synchronous placeholder tool, executes it, and
+      asserts expected return string.
     """
     tool = tool_runner.ToolWithSchema(_sample_tool, {"type": "object"})
     runner = tool_runner.ToolRunner([tool])
@@ -214,8 +215,8 @@ class ToolRunnerTest(absltest.TestCase):
     be executed safely by the ToolRunner.
     Why: Covers manual wrapping use-cases where users need explicit schemas
     attached to asynchronous methods (e.g. MCP tools).
-    How: Registers a wrapped asynchronous placeholder tool, executes it, and asserts
-    expected return sum.
+    How: Registers a wrapped asynchronous placeholder tool, executes it, and
+      asserts expected return sum.
     """
     tool = tool_runner.ToolWithSchema(_async_tool, {"type": "object"})
     runner = tool_runner.ToolRunner([tool])
@@ -281,6 +282,31 @@ class ToolRunnerTest(absltest.TestCase):
     tool = SyncCallable()
     wrapped = tool_runner.ToolWithSchema(tool, {"type": "object"})
     self.assertEqual(wrapped.__name__, "SyncCallable")
+    self.assertEqual(wrapped.__qualname__, SyncCallable.__qualname__)
+
+  def test_tool_with_schema_preserves_wrapper_metadata(self):
+    """Verifies ToolWithSchema preserves function metadata and __wrapped__."""
+    import inspect  # pylint: disable=g-import-not-at-top
+
+    def custom_func(x: int) -> int:
+      """Custom documentation."""
+      return x * 2
+
+    wrapped = tool_runner.ToolWithSchema(custom_func, {"type": "object"})
+    self.assertEqual(wrapped.__name__, "custom_func")
+    self.assertEqual(wrapped.__doc__, "Custom documentation.")
+    self.assertEqual(wrapped.__module__, custom_func.__module__)
+    self.assertEqual(wrapped.__qualname__, custom_func.__qualname__)
+    self.assertIs(getattr(wrapped, "__wrapped__", None), custom_func)
+    self.assertIs(inspect.unwrap(wrapped), custom_func)
+
+    sig = inspect.signature(wrapped)
+    self.assertEqual(list(sig.parameters.keys()), ["x"])
+    self.assertEqual(sig.return_annotation, int)
+
+    nested = tool_runner.ToolWithSchema(wrapped, {"type": "nested"})
+    self.assertIs(inspect.unwrap(nested), custom_func)
+    self.assertEqual(inspect.signature(nested), sig)
 
   def test_coerce_args_basic_types(self):
     """Verifies that _coerce_args converts strings to basic Python types."""
@@ -627,6 +653,29 @@ class ProcessToolCallsTest(absltest.TestCase):
     self.assertEqual(results[0].server_name, "unknown_server")
     self.assertIn("Unknown tool", results[0].error)
 
+  def test_process_tool_calls_default_omitted_metadata(self):
+    """Verifies default/omitted id and server_name remain None across all paths."""
+
+    def _failing_tool():
+      raise RuntimeError("boom")
+
+    runner = tool_runner.ToolRunner([_sample_tool, _failing_tool])
+    results = asyncio.run(
+        runner.process_tool_calls([
+            sdk_types.ToolCall(name="_sample_tool", args={"arg1": "World"}),
+            sdk_types.ToolCall(name="_failing_tool"),
+            sdk_types.ToolCall(name="nonexistent_tool"),
+        ])
+    )
+    self.assertLen(results, 3)
+    for res in results:
+      self.assertIsNone(res.id)
+      self.assertIsNone(res.step_id)
+      self.assertIsNone(res.server_name)
+    self.assertEqual(results[0].result, "Hello World")
+    self.assertEqual(results[1].error, "boom")
+    self.assertIn("Unknown tool", results[2].error)
+
 
 class ContextInjectionTest(absltest.TestCase):
   """Validates ToolContext injection into tools.
@@ -871,6 +920,121 @@ class ContextInjectionTest(absltest.TestCase):
     self.assertEqual(result, "got hello")
     self.assertIs(received_ctx, mock_ctx)
 
+  def test_is_tool_context_annotation(self):
+    """Verifies that _is_tool_context_annotation handles various annotation forms."""
+    from google.antigravity.tools import tool_context  # pylint: disable=g-import-not-at-top
+
+    # Direct type
+    self.assertTrue(
+        tool_runner._is_tool_context_annotation(tool_context.ToolContext)
+    )
+    # Direct strings
+    self.assertTrue(tool_runner._is_tool_context_annotation("ToolContext"))
+    self.assertTrue(
+        tool_runner._is_tool_context_annotation("tool_context.ToolContext")
+    )
+    self.assertTrue(
+        tool_runner._is_tool_context_annotation(
+            "tool_context_module.ToolContext"
+        )
+    )
+    # Union types
+    self.assertTrue(
+        tool_runner._is_tool_context_annotation(
+            Optional[tool_context.ToolContext]
+        )
+    )
+    self.assertTrue(
+        tool_runner._is_tool_context_annotation(
+            Union[tool_context.ToolContext, None]
+        )
+    )
+    self.assertTrue(
+        tool_runner._is_tool_context_annotation(tool_context.ToolContext | None)
+    )
+    # Stringified unions / optionals
+    self.assertTrue(
+        tool_runner._is_tool_context_annotation("ToolContext | None")
+    )
+    self.assertTrue(
+        tool_runner._is_tool_context_annotation("Optional[ToolContext]")
+    )
+    self.assertTrue(
+        tool_runner._is_tool_context_annotation(
+            "Optional[tool_context.ToolContext]"
+        )
+    )
+    # Annotated types
+    self.assertTrue(
+        tool_runner._is_tool_context_annotation(
+            typing.Annotated[tool_context.ToolContext, "meta"]
+        )
+    )
+    # Generic container types (MUST return False)
+    self.assertFalse(
+        tool_runner._is_tool_context_annotation(
+            list[tool_context.ToolContext]
+        )
+    )
+    self.assertFalse(
+        tool_runner._is_tool_context_annotation("list[ToolContext]")
+    )
+    self.assertFalse(
+        tool_runner._is_tool_context_annotation("dict[str, ToolContext]")
+    )
+    self.assertFalse(
+        tool_runner._is_tool_context_annotation("Callable[[ToolContext], None]")
+    )
+    self.assertFalse(
+        tool_runner._is_tool_context_annotation("set[ToolContext | None]")
+    )
+    self.assertFalse(
+        tool_runner._is_tool_context_annotation("tuple[ToolContext, ...]")
+    )
+    self.assertFalse(
+        tool_runner._is_tool_context_annotation(
+            "typing.List[ToolContext] | None"
+        )
+    )
+    # Nested types with commas in Union
+    self.assertTrue(
+        tool_runner._is_tool_context_annotation(
+            "Union[dict[str, str], ToolContext]"
+        )
+    )
+    # Non-context types
+    self.assertFalse(tool_runner._is_tool_context_annotation(str))
+    self.assertFalse(tool_runner._is_tool_context_annotation(int))
+    self.assertFalse(tool_runner._is_tool_context_annotation("str"))
+    self.assertFalse(tool_runner._is_tool_context_annotation("OtherContext"))
+    self.assertFalse(tool_runner._is_tool_context_annotation(Optional[str]))
+
+  def test_forward_ref_string_context_detection_and_injection(self):
+    """Verifies that forward ref string annotations for ToolContext are injected."""
+    from google.antigravity.tools import tool_context  # pylint: disable=g-import-not-at-top
+
+    received_ctx = None
+
+    def _string_annotated_tool(
+        query: str, ctx: "tool_context.ToolContext"  # type: ignore[name-defined]
+    ) -> str:
+      nonlocal received_ctx
+      received_ctx = ctx
+      return f"queried:{query}"
+
+    runner = tool_runner.ToolRunner([_string_annotated_tool])
+    self.assertEqual(
+        runner._context_params.get("_string_annotated_tool"), "ctx"
+    )
+
+    mock_ctx = self._make_mock_context()
+    runner.set_context(mock_ctx)
+    result = asyncio.run(
+        runner.execute("_string_annotated_tool", query="test_term")
+    )
+    self.assertEqual(result, "queried:test_term")
+    self.assertIs(received_ctx, mock_ctx)
+
 
 class SchemaGenerationTest(absltest.TestCase):
   """Validates get_public_callable schema generation.
@@ -1077,6 +1241,74 @@ class SchemaGenerationTest(absltest.TestCase):
     self.assertEqual(ctx.get_state("called_count"), 25)
 
 
+class TypeAdapterCachingTest(absltest.TestCase):
+  """Validates TypeAdapter caching and argument coercion optimization."""
+
+  def setUp(self):
+    super().setUp()
+    tool_runner._cached_type_adapter.cache_clear()
+
+  def test_type_adapter_caching(self):
+    """Verifies that _get_type_adapter returns cached instances for repeated calls."""
+    adapter1 = tool_runner._get_type_adapter(int)
+    adapter2 = tool_runner._get_type_adapter(int)
+    self.assertIsNotNone(adapter1)
+    self.assertIs(adapter1, adapter2)
+
+    adapter_model1 = tool_runner._get_type_adapter(_CustomData)
+    adapter_model2 = tool_runner._get_type_adapter(_CustomData)
+    self.assertIsNotNone(adapter_model1)
+    self.assertIs(adapter_model1, adapter_model2)
+
+  def test_repeated_coercion_with_models_and_cache_hits(self):
+    """Verifies that argument coercion functions efficiently and utilizes cache hits."""
+    def _model_tool(item: _CustomData, multiplier: int) -> int:
+      return item.value * multiplier
+
+    runner = tool_runner.ToolRunner([_model_tool])
+    initial_hits = tool_runner._cached_type_adapter.cache_info().hits
+
+    result1 = asyncio.run(
+        runner.execute("_model_tool", item={"value": 10}, multiplier="3")
+    )
+    self.assertEqual(result1, 30)
+
+    # Second execution should hit the cache for both item (_CustomData)
+    # and multiplier (int)
+    result2 = asyncio.run(
+        runner.execute("_model_tool", item={"value": 5}, multiplier="4")
+    )
+    self.assertEqual(result2, 20)
+    second_hits = tool_runner._cached_type_adapter.cache_info().hits
+    self.assertGreater(second_hits, initial_hits)
+
+  def test_unhashable_annotation_coercion(self):
+    """Verifies that unhashable annotations fallback gracefully without raising TypeError."""
+    # Dict metadata makes Annotated unhashable
+    unhashable_type = typing.Annotated[int, {"key": "val"}]
+
+    def _unhashable_tool(val: unhashable_type) -> int:
+      return val * 2
+
+    runner = tool_runner.ToolRunner([_unhashable_tool])
+    result = asyncio.run(runner.execute("_unhashable_tool", val="15"))
+    self.assertEqual(result, 30)
+
+  def test_invalid_annotation_falls_back_uncoerced(self):
+    """Verifies that invalid/uncompilable annotations preserve raw value."""
+    self.assertIsNone(tool_runner._get_type_adapter(object()))
+
+    def _tool_with_invalid_ann(val):
+      return val
+
+    _tool_with_invalid_ann.__annotations__ = {"val": object()}
+
+    runner = tool_runner.ToolRunner([_tool_with_invalid_ann])
+    result = asyncio.run(
+        runner.execute("_tool_with_invalid_ann", val="raw_str")
+    )
+    self.assertEqual(result, "raw_str")
+
+
 if __name__ == "__main__":
   absltest.main()
-

@@ -26,6 +26,57 @@ from google.antigravity.hooks import hooks as hooks_mod
 from google.antigravity.hooks import policy
 from google.antigravity.triggers import triggers as triggers_mod
 
+# Default maximum KV-cache capacity (in tokens) for LiteRT engine allocation.
+_DEFAULT_MAX_KV_CACHE_TOKENS = 65536
+# Maximum output tokens per turn.
+_DEFAULT_MAX_OUTPUT_TOKENS = 16384
+# Safety headroom to prevent KV-cache overflow during turn generation.
+_COMPACTION_BUFFER_TOKENS = 8192
+# Minimum floor for derived compaction context ceiling.
+_MIN_COMPACTION_CEILING_TOKENS = 1024
+
+
+def derive_litert_compaction_config(
+    max_kv_cache_tokens: int = _DEFAULT_MAX_KV_CACHE_TOKENS,
+    max_output_tokens: int = _DEFAULT_MAX_OUTPUT_TOKENS,
+) -> types.CompactionConfig:
+  """Derives the default compaction configuration for a LiteRT model.
+
+  Calculates a safe token threshold based on the engine's KV-cache capacity
+  (`max_kv_cache_tokens`), per-turn generation limit (`max_output_tokens`), and
+  an 8192 token safety buffer to prevent engine KV-cache overflow during
+  generation.
+
+  Args:
+    max_kv_cache_tokens: Maximum KV-cache capacity (in tokens) of the engine.
+      Defaults to _DEFAULT_MAX_KV_CACHE_TOKENS (65536).
+    max_output_tokens: Maximum number of tokens generated per turn. Defaults to
+      _DEFAULT_MAX_OUTPUT_TOKENS (16384).
+
+  Returns:
+    A CompactionConfig with derived token threshold.
+
+  Raises:
+    ValueError: If max_kv_cache_tokens <= 0 or max_output_tokens <= 0.
+  """
+  if max_kv_cache_tokens <= 0:
+    raise ValueError(
+        f"max_kv_cache_tokens must be positive, got {max_kv_cache_tokens}"
+    )
+  if max_output_tokens <= 0:
+    raise ValueError(
+        f"max_output_tokens must be positive, got {max_output_tokens}"
+    )
+
+  ceiling = max(
+      _MIN_COMPACTION_CEILING_TOKENS,
+      max_kv_cache_tokens - max_output_tokens - _COMPACTION_BUFFER_TOKENS,
+  )
+  return types.CompactionConfig(
+      token_threshold=ceiling,
+  )
+
+
 
 class LiteRTBackend(str, enum.Enum):
   CPU = "cpu"
@@ -107,22 +158,15 @@ class LiteRTAgentConfig(BaseLocalAgentConfig):
     if isinstance(vision_backend, str):
       vision_backend = LiteRTBackend(vision_backend.lower())
 
-    if capabilities is None:
-      capabilities = types.CapabilitiesConfig(
-          file_reads=True,
-          file_writes=True,
-          command_execution=True,
-          subagents=True,
-          mcp=True,
-      )
-
     init_data = {
-        k: v for k, v in locals().items() if k != "self" and v is not None
+        k: v
+        for k, v in locals().items()
+        if k not in ("self", "kwargs") and v is not None
     }
-    if "kwargs" in init_data:
-      kwargs_dict = init_data.pop("kwargs")
-      if isinstance(kwargs_dict, dict):
-        init_data.update(kwargs_dict)
+    if kwargs:
+      init_data.update(kwargs)
+
+    init_data.update(self._compute_lightweight_presets(init_data))
     pydantic.BaseModel.__init__(self, **init_data)
 
   def create_strategy(
@@ -167,3 +211,8 @@ class LiteRTAgentConfig(BaseLocalAgentConfig):
         debug_config=self.debug_config,
         retry_config=self.retry_config,
     )
+
+  @classmethod
+  def _default_compaction_config(cls) -> types.CompactionConfig | None:
+    """Returns the LiteRT-specific compaction configuration for lightweight preset."""
+    return derive_litert_compaction_config()

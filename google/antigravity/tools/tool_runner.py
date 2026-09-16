@@ -28,6 +28,7 @@ automatically. Schema generation (``get_public_callable``) strips
 injectable parameters so the model never sees them.
 """
 
+import ast
 import asyncio
 import functools
 import inspect
@@ -39,15 +40,110 @@ import pydantic
 from google.antigravity import types
 from google.antigravity.tools import tool_context as tool_context_module
 
+_TOOL_CONTEXT_LOCALNS: dict[str, Any] = {
+    "ToolContext": tool_context_module.ToolContext,
+    "tool_context": tool_context_module,
+    "tool_context_module": tool_context_module,
+}
+
 
 def _get_type_hints(target: Any) -> dict[str, Any]:
   """Resolves type hints for functions, methods, and callable objects."""
   if not inspect.isroutine(target) and hasattr(target, "__call__"):
     target = target.__call__
   try:
-    return typing.get_type_hints(target)
+    return typing.get_type_hints(target, localns=_TOOL_CONTEXT_LOCALNS)
   except (TypeError, NameError, AttributeError):
-    return {}
+    try:
+      return typing.get_type_hints(target)
+    except (TypeError, NameError, AttributeError):
+      return {}
+
+
+@functools.lru_cache(maxsize=512)
+def _cached_type_adapter(ann: Any) -> pydantic.TypeAdapter[Any] | None:
+  """Returns a cached Pydantic TypeAdapter for the given annotation, if valid."""
+  try:
+    return pydantic.TypeAdapter(ann)
+  except Exception:  # pylint: disable=broad-except
+    return None
+
+
+def _get_type_adapter(ann: Any) -> pydantic.TypeAdapter[Any] | None:
+  """Returns a Pydantic TypeAdapter, utilizing an LRU cache when hashable."""
+  try:
+    return _cached_type_adapter(ann)
+  except TypeError:
+    # Unhashable type annotation (e.g. Annotated with unhashable metadata)
+    try:
+      return pydantic.TypeAdapter(ann)
+    except Exception:  # pylint: disable=broad-except
+      return None
+
+
+def _is_tool_context_ast_node(node: ast.AST) -> bool:
+  """Returns True if the AST node refers to ToolContext."""
+  if isinstance(node, ast.Name):
+    return node.id == "ToolContext"
+  if isinstance(node, ast.Attribute):
+    return node.attr == "ToolContext" and (
+        (
+            isinstance(node.value, ast.Name)
+            and node.value.id in ("tool_context", "tool_context_module")
+        )
+        or (
+            isinstance(node.value, ast.Attribute)
+            and node.value.attr == "tool_context"
+        )
+    )
+  if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+    return _is_tool_context_ast_node(node.left) or _is_tool_context_ast_node(
+        node.right
+    )
+  if isinstance(node, ast.Subscript) and isinstance(
+      node.value, (ast.Name, ast.Attribute)
+  ):
+    wrapper = (
+        node.value.id
+        if isinstance(node.value, ast.Name)
+        else node.value.attr
+    )
+    if wrapper == "Optional":
+      return _is_tool_context_ast_node(node.slice)
+    if wrapper == "Union":
+      if isinstance(node.slice, ast.Tuple):
+        return any(_is_tool_context_ast_node(elt) for elt in node.slice.elts)
+      return _is_tool_context_ast_node(node.slice)
+    if wrapper == "Annotated":
+      if isinstance(node.slice, ast.Tuple) and node.slice.elts:
+        return _is_tool_context_ast_node(node.slice.elts[0])
+      return _is_tool_context_ast_node(node.slice)
+  return False
+
+
+def _is_tool_context_annotation(ann: Any) -> bool:
+  """Returns True if the annotation refers to ToolContext."""
+  if ann is tool_context_module.ToolContext:
+    return True
+
+  origin = typing.get_origin(ann)
+  if origin is typing.Annotated:
+    args = typing.get_args(ann)
+    return bool(args) and _is_tool_context_annotation(args[0])
+
+  if origin is typing.Union or origin is std_types.UnionType:
+    return any(
+        _is_tool_context_annotation(arg) for arg in typing.get_args(ann)
+    )
+
+  if isinstance(ann, str):
+    try:
+      tree = ast.parse(ann.strip(), mode="eval")
+      return _is_tool_context_ast_node(tree.body)
+    except (SyntaxError, ValueError):
+      return False
+
+  return False
 
 
 def _find_context_param(fn: Callable[..., Any]) -> str | None:
@@ -55,7 +151,7 @@ def _find_context_param(fn: Callable[..., Any]) -> str | None:
 
   Uses ``typing.get_type_hints`` to resolve annotations — including
   stringified ones from ``from __future__ import annotations`` — and
-  checks for an exact match against ``ToolContext``.
+  checks for a match against ``ToolContext`` or its Union/Optional forms.
 
   Args:
     fn: The callable to inspect. If it's a ``ToolWithSchema``, the inner ``.fn``
@@ -72,13 +168,8 @@ def _find_context_param(fn: Callable[..., Any]) -> str | None:
   for name, ann in hints.items():
     if name == "return":
       continue
-    if ann is tool_context_module.ToolContext:
+    if _is_tool_context_annotation(ann):
       return name
-    # Handle Optional[ToolContext] / ToolContext | None forms.
-    origin = typing.get_origin(ann)
-    if origin is typing.Union or origin is std_types.UnionType:
-      if tool_context_module.ToolContext in typing.get_args(ann):
-        return name
 
   # Fallback to direct inspection of signature parameter annotations
   try:
@@ -87,12 +178,8 @@ def _find_context_param(fn: Callable[..., Any]) -> str | None:
       ann = param.annotation
       if ann is inspect.Parameter.empty:
         continue
-      if ann is tool_context_module.ToolContext or ann == "ToolContext":
+      if _is_tool_context_annotation(ann):
         return name
-      origin = typing.get_origin(ann)
-      if origin is typing.Union or origin is std_types.UnionType:
-        if tool_context_module.ToolContext in typing.get_args(ann):
-          return name
   except (ValueError, TypeError):
     pass
 
@@ -145,9 +232,19 @@ class ToolWithSchema:
 
   def __init__(self, fn: Callable[..., Any], input_schema: dict[str, Any]):
     self.fn = fn
+    try:
+      functools.update_wrapper(self, fn, updated=())
+    except Exception:  # pylint: disable=broad-except
+      pass
     self.input_schema = input_schema
-    self.__name__ = getattr(fn, "__name__", None) or type(fn).__name__
-    self.__doc__ = getattr(fn, "__doc__", None)
+    if not getattr(self, "__name__", None):
+      self.__name__ = getattr(fn, "__name__", None) or type(fn).__name__
+    if not getattr(self, "__qualname__", None):
+      self.__qualname__ = (
+          getattr(fn, "__qualname__", None) or type(fn).__qualname__
+      )
+    if not getattr(self, "__doc__", None):
+      self.__doc__ = getattr(fn, "__doc__", None)
 
   def __call__(self, *args: Any, **kwargs: Any) -> Any:
     return self.fn(*args, **kwargs)
@@ -323,10 +420,13 @@ class ToolRunner:
         coerced[name] = val
         continue
 
-      try:
-        adapter = pydantic.TypeAdapter(ann)
-        coerced[name] = adapter.validate_python(val)
-      except Exception:  # pylint: disable=broad-except
+      adapter = _get_type_adapter(ann)
+      if adapter is not None:
+        try:
+          coerced[name] = adapter.validate_python(val)
+        except Exception:  # pylint: disable=broad-except
+          coerced[name] = val
+      else:
         coerced[name] = val
 
     # Retain any extra arguments passed that were not in signature (e.g. kwargs)
@@ -368,7 +468,9 @@ class ToolRunner:
 
     Tool calls are executed in parallel via ``asyncio.gather``.  Unknown
     tools and execution failures produce ToolResult with an error message
-    rather than raising.
+    rather than raising. Correlation metadata (``id``, ``step_id``, and
+    ``server_name``) is propagated from each ``ToolCall`` to its corresponding
+    ``ToolResult`` across all execution paths.
 
     Note: tools execute concurrently; callers must not depend on
     sequential side-effect ordering.

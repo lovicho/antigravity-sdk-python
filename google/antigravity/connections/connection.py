@@ -40,6 +40,32 @@ from google.antigravity.hooks import policy
 from google.antigravity.triggers import triggers as triggers_mod
 
 
+def resolve_active_tools(
+    cfg: types.CapabilitiesConfig | types.SubagentCapabilities | None,
+    *,
+    defaults: list[types.BuiltinTools] | None = None,
+) -> set[types.BuiltinTools]:
+  """Resolves the set of active builtin tools from a capabilities config.
+
+  Args:
+    cfg: A CapabilitiesConfig or SubagentCapabilities instance, or None.
+    defaults: Optional base set of default tools. When omitted, defaults to
+      `BuiltinTools.default()`.
+
+  Returns:
+    A set of active BuiltinTools.
+  """
+  default_set = set(
+      defaults if defaults is not None else types.BuiltinTools.default()
+  )
+  if cfg is not None:
+    if cfg.enabled_tools is not None:
+      return set(cfg.enabled_tools)
+    if cfg.disabled_tools is not None:
+      return default_set - set(cfg.disabled_tools)
+  return default_set
+
+
 class AgentConfig(abc.ABC, pydantic.BaseModel):
   """Abstract base class for agent configuration.
 
@@ -88,13 +114,13 @@ class AgentConfig(abc.ABC, pydantic.BaseModel):
     ):
       warnings.warn(
           "CapabilitiesConfig.compaction_threshold is deprecated. Configure"
-          " CompactionConfig(checkpoint_interval_tokens=...) directly on"
+          " CompactionConfig(token_threshold=...) directly on"
           " AgentConfig instead.",
           category=DeprecationWarning,
           stacklevel=2,
       )
       return types.CompactionConfig(
-          checkpoint_interval_tokens=self.capabilities.compaction_threshold,
+          token_threshold=self.capabilities.compaction_threshold,
       )
     return None
 
@@ -234,30 +260,83 @@ class AgentConfig(abc.ABC, pydantic.BaseModel):
             tools.append(tool)
     return tools
 
-  def lightweight(self: Self) -> Self:
-    """Returns a copy of this configuration with lightweight presets applied."""
+  @classmethod
+  def _default_compaction_config(cls) -> types.CompactionConfig | None:
+    """Returns the default compaction configuration for lightweight preset."""
+    return types.CompactionConfig(token_threshold=65536)
+
+  @classmethod
+  def _compute_lightweight_presets(
+      cls,
+      data: Mapping[str, Any] | None = None,
+  ) -> dict[str, Any]:
+    """Computes lightweight preset updates, preserving caller-provided overrides.
+
+    Args:
+      data: Optional mapping of field names to values that were explicitly
+        configured by the caller or present on the instance.
+
+    Returns:
+      A dictionary of field updates (e.g. 'capabilities', 'compaction_config')
+      with lightweight defaults applied.
+    """
+    data = data or {}
     preset_kwargs = {
         "enabled_tools": types.BuiltinTools.minimal(),
         "agent_behavior": types.AgentBehavior.MINIMAL,
         "enable_subagents": False,
-        "compaction_threshold": 65536,
     }
-    if (
-        "capabilities" in self.model_fields_set
-        and self.capabilities is not None
-    ):
-      user_caps = self.capabilities.model_dump(exclude_unset=True)
-      if "disabled_tools" in user_caps and "enabled_tools" not in user_caps:
-        disabled = set(self.capabilities.disabled_tools or [])
+    user_caps = data.get("capabilities")
+    user_caps_dict = {}
+    if user_caps is not None:
+      user_caps_dict = (
+          user_caps.model_dump(exclude_unset=True)
+          if hasattr(user_caps, "model_dump")
+          else dict(user_caps)
+          if isinstance(user_caps, Mapping)
+          else {}
+      )
+      if (
+          "disabled_tools" in user_caps_dict
+          and "enabled_tools" not in user_caps_dict
+      ):
+        disabled = set(user_caps_dict.get("disabled_tools") or [])
         preset_kwargs["enabled_tools"] = [
             t for t in types.BuiltinTools.minimal() if t not in disabled
         ]
-        user_caps.pop("disabled_tools", None)
-      preset_kwargs.update(user_caps)
-    new_capabilities = types.CapabilitiesConfig(**preset_kwargs)
-    return cast(
-        Self, self.model_copy(update={"capabilities": new_capabilities})
+        user_caps_dict.pop("disabled_tools", None)
+      preset_kwargs.update(user_caps_dict)
+
+    updates: dict[str, Any] = {
+        "capabilities": types.CapabilitiesConfig(**preset_kwargs)
+    }
+
+    # Compaction preset is only applied if the caller has not explicitly
+    # configured a compaction policy:
+    # 1. Modern API: caller explicitly passed a non-None `compaction_config`
+    #    (tracked via `model_fields_set` or present in `data`).
+    # 2. Legacy API: caller explicitly configured compaction threshold via
+    #    `capabilities.compaction_threshold`.
+    has_explicit_compaction = (
+        data.get("compaction_config") is not None
+        or (user_caps_dict.get("compaction_threshold") is not None)
     )
+    if not has_explicit_compaction:
+      default_compaction = cls._default_compaction_config()
+      if default_compaction is not None:
+        updates["compaction_config"] = default_compaction
+
+    return updates
+
+  def lightweight(self: Self) -> Self:
+    """Returns a copy of this configuration with lightweight presets applied."""
+    user_explicit = {
+        field: getattr(self, field)
+        for field in self.model_fields_set
+        if getattr(self, field) is not None
+    }
+    updates = self._compute_lightweight_presets(user_explicit)
+    return cast(Self, self.model_copy(update=updates))
 
   @abc.abstractmethod
   def create_strategy(
@@ -328,6 +407,15 @@ class Connection(abc.ABC):
     an empty dictionary (no tracking).
     """
     return {}
+
+  @property
+  def sandbox_status(self) -> types.SandboxStatus | None:
+    """Returns the OS command sandbox status reported at handshake.
+
+    Subclasses override to provide live status. Default returns None
+    (no sandbox status reported / not applicable to this connection type).
+    """
+    return None
 
   @property
   def _last_turn_stop_reason(self) -> types.StopReason:

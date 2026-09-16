@@ -61,12 +61,18 @@ enum PolicyEvaluationOutcome {
   POLICY_EVALUATION_OUTCOME_DENY = 2;
   POLICY_EVALUATION_OUTCOME_NO_MATCH = 3;
 }
+enum ToolExecutionMode {
+  TOOL_EXECUTION_MODE_UNSPECIFIED = 0;
+  TOOL_EXECUTION_MODE_SYNC = 1;
+  TOOL_EXECUTION_MODE_ASYNC = 2;
+}
 message InputConfig {
   string storage_directory = 1;
   uint32 port = 2;
   string bind_address = 3 [default = "localhost"];
   .antigravity.localharness.ClientInfo client_info = 4;
   map<string, string> env = 5;
+  bool use_interactions_api = 6;
 }
 message InitializeConversationEvent {
   .antigravity.localharness.HarnessConfig config = 1;
@@ -107,8 +113,12 @@ message HarnessConfig {
   .antigravity.localharness.AgentBehavior agent_behavior = 22;
   .antigravity.localharness.BudgetConfig budget_config = 23;
   .antigravity.localharness.CompactionConfig compaction_config = 24;
+  .antigravity.localharness.RulesConfig rules_config = 28;
   extensions 1000 to 1999;
   extensions 2000 to max;
+}
+message RulesConfig {
+  repeated string filenames = 1;
 }
 message ModelAPIRetryConfig {
   uint32 max_retries = 1;
@@ -239,6 +249,7 @@ message RunCommandToolConfig {
   uint32 max_timeout_ms = 2;
   bool enable_daemon_commands = 3;
   bool enable_sandbox = 4;
+  .antigravity.localharness.ToolExecutionMode execution_mode = 5;
 }
 message SubagentsConfig {
   bool enabled = 1;
@@ -308,11 +319,16 @@ message OutputEvent {
   int64 seq_num = 1;
   int64 timestamp_micros = 2;
 }
+message SandboxStatus {
+  bool available = 1;
+  string unavailable_reason = 2;
+}
 message InitializeConversationResponse {
   string cascade_id = 1;
   repeated .antigravity.localharness.StepUpdate history = 2;
   .antigravity.localharness.UsageMetadata cumulative_usage = 3;
   repeated .antigravity.localharness.TrajectoryUsageEntry trajectory_usage = 4;
+  .antigravity.localharness.SandboxStatus sandbox_status = 5;
 }
 message StepUpdate {
   enum State {
@@ -538,6 +554,7 @@ message ToolCall {
   string name = 2;
   string arguments_json = 3;
   .genai.Struct arguments = 4;
+  string trajectory_id = 6;
   extensions 1000 to 1999;
   extensions 2000 to max;
 }
@@ -714,7 +731,7 @@ message PreToolResult {
   }
   .antigravity.localharness.PreToolResult.Decision decision = 1;
   string reason = 2;
-  string modified_arguments_json = 3;
+  .genai.Struct modified_args = 4;
 }
 message PreTurnResult {
   enum Decision {
@@ -819,6 +836,7 @@ message BudgetConfig {
   .antigravity.localharness.BudgetConfig.BudgetScope scope = 6;
 }
 message CompactionConfig {
-  uint32 checkpoint_interval_tokens = 1;
-  uint32 max_context_tokens = 2;
+  uint32 token_threshold = 1;
+  uint32 checkpoint_interval_tokens = 2;
+  uint32 max_context_tokens = 3;
 }

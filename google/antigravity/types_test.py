@@ -702,6 +702,17 @@ class BuiltinToolsTest(parameterized.TestCase):
     ]
     self.assertEqual(types.BuiltinTools.minimal(), expected)
 
+  def test_default_excludes_ask_question(self):
+    """Verifies that default() returns all tools except ASK_QUESTION."""
+    expected = set(types.BuiltinTools) - {types.BuiltinTools.ASK_QUESTION}
+    self.assertEqual(set(types.BuiltinTools.default()), expected)
+    self.assertNotIn(
+        types.BuiltinTools.ASK_QUESTION, types.BuiltinTools.default()
+    )
+    self.assertLen(
+        types.BuiltinTools.default(), len(types.BuiltinTools) - 1
+    )
+
 
 class AgentBehaviorTest(unittest.TestCase):
   """Tests for the AgentBehavior enum."""
@@ -947,6 +958,62 @@ class CapabilitiesConfigTest(unittest.TestCase):
         )
     )
 
+  def test_tool_output_truncation_config_default(self):
+    """Verifies default tool_output_truncation_config is None."""
+    config = types.CapabilitiesConfig()
+    self.assertIsNone(config.tool_output_truncation_config)
+
+  def test_tool_output_truncation_config_int_shorthand(self):
+    """Verifies int shorthand is coerced to ToolOutputTruncationConfig."""
+    config = types.CapabilitiesConfig(tool_output_truncation_config=2048)
+    self.assertEqual(
+        config.tool_output_truncation_config,
+        types.ToolOutputTruncationConfig(max_tokens=2048),
+    )
+
+  def test_tool_output_truncation_config_zero(self):
+    """Verifies 0 max_tokens is permitted to disable truncation."""
+    config = types.CapabilitiesConfig(tool_output_truncation_config=0)
+    self.assertEqual(
+        config.tool_output_truncation_config,
+        types.ToolOutputTruncationConfig(max_tokens=0),
+    )
+
+  def test_tool_output_truncation_config_instance(self):
+    """Verifies passing ToolOutputTruncationConfig instance."""
+    instance = types.ToolOutputTruncationConfig(max_tokens=1024)
+    config = types.CapabilitiesConfig(tool_output_truncation_config=instance)
+    self.assertIs(config.tool_output_truncation_config, instance)
+
+  def test_tool_output_truncation_config_dict(self):
+    """Verifies passing dict representation."""
+    config = types.CapabilitiesConfig(
+        tool_output_truncation_config={"max_tokens": 512}
+    )
+    self.assertEqual(
+        config.tool_output_truncation_config,
+        types.ToolOutputTruncationConfig(max_tokens=512),
+    )
+
+  def test_tool_output_truncation_config_boolean_rejected(self):
+    """Verifies boolean is rejected."""
+    with self.assertRaises(TypeError):
+      types.CapabilitiesConfig(tool_output_truncation_config=True)
+    with self.assertRaises(TypeError):
+      types.CapabilitiesConfig(tool_output_truncation_config=False)
+
+  def test_tool_output_truncation_config_invalid_types_rejected(self):
+    """Verifies non-int non-dict invalid types raise TypeError."""
+    with self.assertRaises(TypeError):
+      types.CapabilitiesConfig(tool_output_truncation_config="unlimited")
+
+  def test_tool_output_truncation_config_negative_or_overflow_raises(self):
+    """Verifies negative or overflowing int values raise ValidationError."""
+    with self.assertRaises(pydantic.ValidationError):
+      types.CapabilitiesConfig(tool_output_truncation_config=-1)
+    with self.assertRaises(pydantic.ValidationError):
+      types.CapabilitiesConfig(tool_output_truncation_config=2**31)
+
 
 class CompactionConfigTest(unittest.TestCase):
   """Validates the CompactionConfig Pydantic model."""
@@ -954,85 +1021,43 @@ class CompactionConfigTest(unittest.TestCase):
   def test_defaults(self):
     """Verifies that CompactionConfig fields default to None."""
     cfg = types.CompactionConfig()
-    self.assertIsNone(cfg.checkpoint_interval_tokens)
-    self.assertIsNone(cfg.max_context_tokens)
-    self.assertIsNone(cfg.compaction_threshold)
+    self.assertIsNone(cfg.token_threshold)
 
   def test_explicit_fields(self):
     """Verifies construction with explicit integer limits."""
-    cfg = types.CompactionConfig(
-        checkpoint_interval_tokens=50000, max_context_tokens=100000
-    )
-    self.assertEqual(cfg.checkpoint_interval_tokens, 50000)
-    self.assertEqual(cfg.max_context_tokens, 100000)
-    self.assertEqual(cfg.compaction_threshold, 50000)
-
-  def test_legacy_compaction_threshold_migrates(self):
-    """Verifies backward compatibility with compaction_threshold keyword."""
-    cfg = types.CompactionConfig(
-        compaction_threshold=50000, max_context_tokens=100000
-    )
-    self.assertEqual(cfg.checkpoint_interval_tokens, 50000)
-    self.assertEqual(cfg.compaction_threshold, 50000)
-    self.assertEqual(cfg.max_context_tokens, 100000)
-
-  def test_interval_equal_max_context_tokens(self):
-    """Verifies that checkpoint_interval_tokens == max_context_tokens is valid."""
-    cfg = types.CompactionConfig(
-        checkpoint_interval_tokens=100000, max_context_tokens=100000
-    )
-    self.assertEqual(cfg.checkpoint_interval_tokens, 100000)
-    self.assertEqual(cfg.max_context_tokens, 100000)
-
-  def test_interval_exceeds_max_context_tokens_raises(self):
-    """Verifies validation error when checkpoint_interval_tokens > max_context_tokens."""
-    with self.assertRaisesRegex(
-        pydantic.ValidationError,
-        "checkpoint_interval_tokens .* cannot exceed max_context_tokens",
-    ):
-      types.CompactionConfig(
-          checkpoint_interval_tokens=150000, max_context_tokens=100000
-      )
-
-  def test_conflicting_aliased_values_raises(self):
-    """Verifies validation error when conflicting values are passed for aliased fields."""
-    with self.assertRaisesRegex(
-        pydantic.ValidationError,
-        "Conflicting values for aliased fields",
-    ):
-      types.CompactionConfig(
-          checkpoint_interval_tokens=40000, compaction_threshold=80000
-      )
-
-  def test_bidirectional_aliasing_and_model_copy(self):
-    """Verifies bidirectional sync between checkpoint_interval_tokens and compaction_threshold."""
-    cfg1 = types.CompactionConfig(checkpoint_interval_tokens=40000)
-    self.assertEqual(cfg1.checkpoint_interval_tokens, 40000)
-    self.assertEqual(cfg1.compaction_threshold, 40000)
-
-    cfg2 = types.CompactionConfig(compaction_threshold=40000)
-    self.assertEqual(cfg2.checkpoint_interval_tokens, 40000)
-    self.assertEqual(cfg2.compaction_threshold, 40000)
-
-    # Validation from existing model instance preserves aliased fields
-    cfg3 = types.CompactionConfig.model_validate(cfg2)
-    self.assertEqual(cfg3.checkpoint_interval_tokens, 40000)
-    self.assertEqual(cfg3.compaction_threshold, 40000)
+    cfg = types.CompactionConfig(token_threshold=50000)
+    self.assertEqual(cfg.token_threshold, 50000)
 
   def test_non_positive_values_raise(self):
     """Verifies that values must be strictly greater than 0."""
     with self.assertRaises(pydantic.ValidationError):
-      types.CompactionConfig(checkpoint_interval_tokens=0)
+      types.CompactionConfig(token_threshold=0)
     with self.assertRaises(pydantic.ValidationError):
-      types.CompactionConfig(checkpoint_interval_tokens=-1)
+      types.CompactionConfig(token_threshold=-1)
+
+
+class ToolOutputTruncationConfigTest(unittest.TestCase):
+  """Validates the ToolOutputTruncationConfig Pydantic model."""
+
+  def test_defaults(self):
+    """Verifies default values for ToolOutputTruncationConfig."""
+    cfg = types.ToolOutputTruncationConfig(max_tokens=2048)
+    self.assertEqual(cfg.max_tokens, 2048)
+
+  def test_zero_max_tokens_allowed(self):
+    """Verifies max_tokens=0 is permitted to explicitly disable truncation."""
+    cfg = types.ToolOutputTruncationConfig(max_tokens=0)
+    self.assertEqual(cfg.max_tokens, 0)
+
+  def test_negative_max_tokens_raises(self):
+    """Verifies validation error when max_tokens is negative."""
     with self.assertRaises(pydantic.ValidationError):
-      types.CompactionConfig(compaction_threshold=0)
+      types.ToolOutputTruncationConfig(max_tokens=-1)
+
+  def test_overflow_max_tokens_raises(self):
+    """Verifies validation error when max_tokens exceeds int32."""
     with self.assertRaises(pydantic.ValidationError):
-      types.CompactionConfig(compaction_threshold=-1)
-    with self.assertRaises(pydantic.ValidationError):
-      types.CompactionConfig(max_context_tokens=0)
-    with self.assertRaises(pydantic.ValidationError):
-      types.CompactionConfig(max_context_tokens=-1)
+      types.ToolOutputTruncationConfig(max_tokens=2**31)
 
 
 class AntigravityConnectionErrorTest(unittest.TestCase):
@@ -2232,6 +2257,149 @@ class UsageMetadataTest(unittest.TestCase):
     """Verifies that __sub__ returns NotImplemented for invalid types."""
     u = types.UsageMetadata(prompt_token_count=10)
     self.assertEqual(u.__sub__(1), NotImplemented)
+
+  def test_radd_operator(self):
+    """Verifies that __radd__ and 0 identity work as expected."""
+    u1 = types.UsageMetadata(
+        prompt_token_count=100,
+        cached_content_token_count=50,
+        candidates_token_count=30,
+        thoughts_token_count=20,
+        total_token_count=150,
+        service_tier=types.ServiceTier.PRIORITY,
+    )
+    u2 = types.UsageMetadata(
+        prompt_token_count=200,
+        cached_content_token_count=10,
+        candidates_token_count=40,
+        thoughts_token_count=5,
+        total_token_count=245,
+        service_tier=types.ServiceTier.PRIORITY,
+    )
+
+    # 0 + u1 == u1 and u1 + 0 == u1 (copy independence)
+    res_l = 0 + u1
+    self.assertEqual(res_l, u1)
+    self.assertIsNot(res_l, u1)
+
+    res_r = u1 + 0
+    self.assertEqual(res_r, u1)
+    self.assertIsNot(res_r, u1)
+
+    # sum([u1, u2]) and single-element sum([u1])
+    res_sum = sum([u1, u2])
+    self.assertEqual(res_sum, u1 + u2)
+    self.assertIsNot(res_sum, u1)
+    self.assertIsNot(res_sum, u2)
+
+    res_single = sum([u1])
+    self.assertEqual(res_single, u1)
+    self.assertIsNot(res_single, u1)
+
+    # Direct __radd__ call between UsageMetadata instances
+    self.assertEqual(u2.__radd__(u1), u1 + u2)
+
+    # Invalid types: direct dunder returns NotImplemented
+    self.assertEqual(u1.__radd__("invalid"), NotImplemented)
+
+    # Operator expressions raise TypeError for both left and right
+    # invalid operands.
+    with self.assertRaises(TypeError):
+      _ = False + u1
+    with self.assertRaises(TypeError):
+      _ = u1 + False
+    with self.assertRaises(TypeError):
+      _ = True + u1
+    with self.assertRaises(TypeError):
+      _ = u1 + True
+    with self.assertRaises(TypeError):
+      _ = "invalid" + u1
+    with self.assertRaises(TypeError):
+      _ = u1 + "invalid"
+
+  def test_mul_operator(self):
+    """Verifies that scalar multiplication scales token counts correctly."""
+    u = types.UsageMetadata(
+        prompt_token_count=100,
+        cached_content_token_count=50,
+        candidates_token_count=31,
+        thoughts_token_count=21,
+        total_token_count=152,
+        service_tier=types.ServiceTier.PRIORITY,
+    )
+
+    # Integer scaling
+    u2 = u * 2
+    self.assertEqual(u2.prompt_token_count, 200)
+    self.assertEqual(u2.cached_content_token_count, 100)
+    self.assertEqual(u2.candidates_token_count, 62)
+    self.assertEqual(u2.thoughts_token_count, 42)
+    self.assertEqual(u2.total_token_count, 304)
+    self.assertEqual(u2.service_tier, types.ServiceTier.PRIORITY)
+
+    # Float scaling with explicit rounded integer values (round-half-to-even)
+    u_float = u * 1.5
+    self.assertEqual(u_float.prompt_token_count, 150)
+    self.assertEqual(u_float.cached_content_token_count, 75)
+    self.assertEqual(u_float.candidates_token_count, 46)
+    self.assertEqual(u_float.thoughts_token_count, 32)
+    self.assertEqual(u_float.total_token_count, 228)
+    self.assertEqual(u_float.service_tier, types.ServiceTier.PRIORITY)
+
+    # Zero scaling
+    u0 = u * 0
+    self.assertEqual(u0.prompt_token_count, 0)
+    self.assertEqual(u0.cached_content_token_count, 0)
+    self.assertEqual(u0.candidates_token_count, 0)
+    self.assertEqual(u0.thoughts_token_count, 0)
+    self.assertEqual(u0.total_token_count, 0)
+    self.assertEqual(u0.service_tier, types.ServiceTier.PRIORITY)
+
+    # None field preservation
+    u_none = types.UsageMetadata(prompt_token_count=100)
+    u_none_scaled = u_none * 2
+    self.assertEqual(u_none_scaled.prompt_token_count, 200)
+    self.assertIsNone(u_none_scaled.cached_content_token_count)
+    self.assertIsNone(u_none_scaled.candidates_token_count)
+    self.assertIsNone(u_none_scaled.thoughts_token_count)
+    self.assertIsNone(u_none_scaled.total_token_count)
+    self.assertIsNone(u_none_scaled.service_tier)
+
+    # Commutativity
+    self.assertEqual(3 * u, u * 3)
+
+    # Invalid types: direct dunder returns NotImplemented
+    self.assertEqual(u.__mul__("invalid"), NotImplemented)
+    self.assertEqual(u.__mul__(False), NotImplemented)
+    self.assertEqual(u.__mul__(True), NotImplemented)
+
+    # Operator expressions raise TypeError
+    with self.assertRaises(TypeError):
+      _ = u * False
+    with self.assertRaises(TypeError):
+      _ = False * u
+    with self.assertRaises(TypeError):
+      _ = u * True
+    with self.assertRaises(TypeError):
+      _ = True * u
+    with self.assertRaises(TypeError):
+      _ = u * "invalid"
+    with self.assertRaises(TypeError):
+      _ = "invalid" * u
+
+    # Invalid numbers: negative and non-finite raise ValueError
+    with self.assertRaises(ValueError):
+      _ = u * -1
+    with self.assertRaises(ValueError):
+      _ = -1 * u
+    with self.assertRaises(ValueError):
+      _ = u * float("nan")
+    with self.assertRaises(ValueError):
+      _ = float("nan") * u
+    with self.assertRaises(ValueError):
+      _ = u * float("inf")
+    with self.assertRaises(ValueError):
+      _ = float("inf") * u
 
 
 class RetryConfigTest(unittest.TestCase):

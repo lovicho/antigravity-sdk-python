@@ -24,6 +24,7 @@ import asyncio
 from collections.abc import Sequence
 import enum
 import logging
+import math
 import mimetypes
 import pathlib
 from typing import Annotated, Any, AsyncIterator, Callable, ClassVar, Literal, TypeVar, cast
@@ -61,6 +62,8 @@ __all__ = [
     "BuiltinTools",
     "RunCommandConfig",
     "CapabilitiesConfig",
+    "CompactionConfig",
+    "ToolOutputTruncationConfig",
     "ModelAPIRetryConfig",
     "ModelOutputRetryConfig",
     "RetryConfig",
@@ -174,6 +177,28 @@ class AgentBehavior(str, enum.Enum):
   AUTONOMOUS = "autonomous"
   INTERACTIVE = "interactive"
   MINIMAL = "minimal"
+
+
+_MAX_INT32 = 2**31 - 1  # Maximum value for protobuf int32 wire fields
+_MAX_UINT32 = 2**32 - 1  # Maximum value for protobuf uint32 wire fields
+_MAX_INT64 = 2**63 - 1  # Maximum value for protobuf int64 wire fields
+
+
+class ToolOutputTruncationConfig(pydantic.BaseModel):
+  """Configuration for truncating large tool outputs.
+
+  When a tool's output exceeds `max_tokens`, the harness preserves the beginning
+  (prefix) of the output up to the limit and truncates the remainder (tail),
+  appending a notice informing the model that the output was truncated.
+
+  Attributes:
+    max_tokens: Maximum number of estimated tokens for a single tool response.
+      Must be non-negative. Preserves the beginning (prefix) of the tool
+      response and truncates the end (tail). Setting to 0 explicitly disables
+      truncation.
+  """
+
+  max_tokens: int = pydantic.Field(ge=0, le=_MAX_INT32)
 
 
 class RunCommandConfig(pydantic.BaseModel):
@@ -414,6 +439,17 @@ class BuiltinTools(str, enum.Enum):
         cls.SEARCH_DIR,
     ]
 
+  @classmethod
+  def default(cls) -> list["BuiltinTools"]:
+    """Returns the default set of builtin tools for autonomous agents.
+
+    Excludes ASK_QUESTION because autonomous agents cannot prompt the user.
+
+    Returns:
+        A list of default BuiltinTools.
+    """
+    return [t for t in cls if t != cls.ASK_QUESTION]
+
 
 class CapabilitiesConfig(pydantic.BaseModel):
   """General agent capability configuration.
@@ -447,21 +483,26 @@ class CapabilitiesConfig(pydantic.BaseModel):
       overhead for small-context models. Defaults to AgentBehavior.AUTONOMOUS.
     enabled_tools: Explicit allowlist of builtin tools to enable. Mutually
       exclusive with disabled_tools. When None, the harness defaults are used
-      (all tools enabled). Disabled tools are removed from the model's context,
-      saving tokens and preventing the model from even considering them.
+      (all tools enabled except ASK_QUESTION). Disabled tools are removed
+      from the model's context, saving tokens and preventing the model from
+      even considering them.
     disabled_tools: Explicit denylist of builtin tools to disable. Mutually
-      exclusive with enabled_tools. When None, the harness defaults are used
-      (all tools enabled). Disabled tools are removed from the model's context,
-      saving tokens and preventing the model from even considering them.
+      exclusive with enabled_tools. When specified, the given tools are
+      subtracted from default() (which already excludes ASK_QUESTION).
+      When None, all default tools are enabled. Disabled tools are removed
+      from the model's context, saving tokens and preventing the model from
+      even considering them. Note that to enable ASK_QUESTION, it must be
+      explicitly included in enabled_tools.
     compaction_threshold: (Deprecated) Configure
-      CompactionConfig(checkpoint_interval_tokens=...) directly on AgentConfig
-      instead.
+      CompactionConfig(token_threshold=...) directly on AgentConfig instead.
     finish_tool_schema_json: Optional JSON schema string for the finish tool.
     max_subagent_depth: Global maximum subagent recursion depth for the session.
       When None, defaults to 1 (flat single-level delegation).
     allowed_subagents: Explicit allowlist of subagent names the root agent may
       directly invoke. When None, all registered subagents are discoverable.
     run_command_config: Optional configuration for the builtin run_command tool.
+    tool_output_truncation_config: Optional configuration or token limit for
+      truncating large tool outputs (preserves beginning, truncates end).
   """
 
   enable_subagents: bool = True
@@ -473,14 +514,33 @@ class CapabilitiesConfig(pydantic.BaseModel):
       gt=0,
       deprecated=(
           "CapabilitiesConfig.compaction_threshold is deprecated. Configure"
-          " CompactionConfig(checkpoint_interval_tokens=...) directly on"
-          " AgentConfig instead."
+          " CompactionConfig(token_threshold=...) directly on AgentConfig"
+          " instead."
       ),
   )
   finish_tool_schema_json: str | None = None
   max_subagent_depth: int | None = pydantic.Field(default=None, ge=1)
   allowed_subagents: list[str] | None = None
   run_command_config: RunCommandConfig | None = None
+  tool_output_truncation_config: ToolOutputTruncationConfig | None = None
+
+  @pydantic.field_validator("tool_output_truncation_config", mode="before")
+  @classmethod
+  def _validate_tool_output_truncation_config(
+      cls, v: Any
+  ) -> ToolOutputTruncationConfig | None:
+    if v is None:
+      return None
+    if isinstance(v, int) and not isinstance(v, bool):
+      return ToolOutputTruncationConfig(max_tokens=v)
+    if isinstance(v, ToolOutputTruncationConfig):
+      return v
+    if isinstance(v, dict):
+      return ToolOutputTruncationConfig.model_validate(v)
+    raise TypeError(
+        "tool_output_truncation_config must be an int or"
+        f" ToolOutputTruncationConfig, got {type(v).__name__}"
+    )
 
   @pydantic.model_validator(mode="after")
   def _check_mutually_exclusive(self) -> "CapabilitiesConfig":
@@ -535,7 +595,7 @@ class CapabilitiesConfig(pydantic.BaseModel):
     if self.compaction_threshold is not None:
       warnings.warn(
           "CapabilitiesConfig.compaction_threshold is deprecated. Configure"
-          " CompactionConfig(checkpoint_interval_tokens=...) directly on"
+          " CompactionConfig(token_threshold=...) directly on"
           " AgentConfig instead.",
           category=DeprecationWarning,
           stacklevel=2,
@@ -546,80 +606,15 @@ class CapabilitiesConfig(pydantic.BaseModel):
 class CompactionConfig(pydantic.BaseModel):
   """Configuration for conversation trajectory compaction and context limits.
 
-  Antigravity manages context using a two-stage sliding-window pipeline:
-  1. Background Checkpointing: A "checkpoint" is an asynchronous summary of the
-     conversation trajectory prepared in the background while the agent works.
-     Every checkpoint is cumulative, summarizing history up to that point.
-     Generating a checkpoint does not modify the active prompt or evict turns.
-  2. Prompt Eviction (Compaction): When active history reaches the token
-     ceiling (`max_context_tokens`), the context snaps back to the latest
-     completed checkpoint. Earlier checkpoints and turns preceding the latest
-     checkpoint are evicted from the prompt, while recent turns between the
-     latest checkpoint and the current turn are preserved verbatim with full
-     fidelity.
+  Antigravity manages context by compacting older conversation history when
+  the active trajectory exceeds `token_threshold`.
 
   Attributes:
-    checkpoint_interval_tokens: The token interval at which background
-      trajectory checkpoints (summaries) are pre-computed. Checkpoint generation
-      runs asynchronously and does not alter the active prompt. When None, the
-      framework's default cadence is used.
-    max_context_tokens: Maximum token ceiling allowed for the prompt before
-      older turns are evicted and replaced with the latest checkpoint summary.
-      When None, the framework's default limit is used.
-    compaction_threshold: Deprecated alias for `checkpoint_interval_tokens`.
+    token_threshold: Token ceiling allowed for the conversation history before
+      compaction occurs. When None, the backend's default limit is used.
   """
 
-  checkpoint_interval_tokens: int | None = pydantic.Field(default=None, gt=0)
-  max_context_tokens: int | None = pydantic.Field(default=None, gt=0)
-  compaction_threshold: int | None = pydantic.Field(
-      default=None,
-      gt=0,
-      deprecated=(
-          "CompactionConfig.compaction_threshold is deprecated. Use"
-          " checkpoint_interval_tokens instead."
-      ),
-  )
-
-  @pydantic.model_validator(mode="after")
-  def _validate_compaction_and_context_tokens(self) -> "CompactionConfig":
-    if (
-        self.checkpoint_interval_tokens is None
-        and self.compaction_threshold is not None
-    ):
-      self.__dict__["checkpoint_interval_tokens"] = self.compaction_threshold
-      self.__pydantic_fields_set__.add("checkpoint_interval_tokens")
-    elif (
-        self.checkpoint_interval_tokens is not None
-        and self.compaction_threshold is None
-    ):
-      self.__dict__["compaction_threshold"] = self.checkpoint_interval_tokens
-      self.__pydantic_fields_set__.add("compaction_threshold")
-    elif (
-        self.checkpoint_interval_tokens is not None
-        and self.compaction_threshold is not None
-        and self.checkpoint_interval_tokens != self.compaction_threshold
-    ):
-      raise ValueError(
-          "Conflicting values for aliased fields:"
-          f" checkpoint_interval_tokens={self.checkpoint_interval_tokens}"
-          f" vs compaction_threshold={self.compaction_threshold}"
-      )
-    interval = self.checkpoint_interval_tokens
-    if (
-        interval is not None
-        and self.max_context_tokens is not None
-        and interval > self.max_context_tokens
-    ):
-      raise ValueError(
-          f"checkpoint_interval_tokens ({interval}) cannot exceed"
-          f" max_context_tokens ({self.max_context_tokens})"
-      )
-    return self
-
-
-_MAX_INT32 = 2**31 - 1  # Maximum value for protobuf int32 wire fields
-_MAX_UINT32 = 2**32 - 1  # Maximum value for protobuf uint32 wire fields
-_MAX_INT64 = 2**63 - 1  # Maximum value for protobuf int64 wire fields
+  token_threshold: int | None = pydantic.Field(default=None, gt=0)
 
 
 class ModelAPIRetryConfig(pydantic.BaseModel):
@@ -826,6 +821,20 @@ PythonTool = Callable[..., Any]
 # =============================================================================
 
 
+class SandboxStatus(pydantic.BaseModel):
+  """OS command sandbox (exebox) status reported by the harness.
+
+  Attributes:
+    available: Whether the sandbox actually enforces isolation. When False,
+      run_command executes unsandboxed even if enable_sandbox was requested.
+    unavailable_reason: Human-readable explanation when available is False; None
+      when the sandbox is available.
+  """
+
+  available: bool
+  unavailable_reason: str | None = None
+
+
 class UsageMetadata(pydantic.BaseModel):
   """Token usage metadata from the model API.
 
@@ -858,7 +867,14 @@ class UsageMetadata(pydantic.BaseModel):
   # Service tier.
   service_tier: ServiceTier | None = None
 
-  def __add__(self, other: UsageMetadata) -> UsageMetadata:
+  def __add__(self, other: Any) -> UsageMetadata:
+    """Adds token counts from another UsageMetadata or returns a copy for 0."""
+    if (
+        isinstance(other, (int, float))
+        and not isinstance(other, bool)
+        and other == 0
+    ):
+      return self.model_copy()
     if not isinstance(other, UsageMetadata):
       return NotImplemented
     if self.service_tier == other.service_tier:
@@ -868,7 +884,7 @@ class UsageMetadata(pydantic.BaseModel):
     else:
       # When combining different service tiers, default to STANDARD.
       merged_tier = ServiceTier.STANDARD
-    return UsageMetadata(
+    return self.__class__(
         prompt_token_count=(self.prompt_token_count or 0)
         + (other.prompt_token_count or 0),
         cached_content_token_count=(self.cached_content_token_count or 0)
@@ -882,10 +898,22 @@ class UsageMetadata(pydantic.BaseModel):
         service_tier=merged_tier,
     )
 
+  def __radd__(self, other: Any) -> UsageMetadata:
+    """Supports reflected addition for sum() accumulators and 0 identity."""
+    if (
+        isinstance(other, (int, float))
+        and not isinstance(other, bool)
+        and other == 0
+    ):
+      return self.model_copy()
+    if isinstance(other, UsageMetadata):
+      return self.__add__(other)
+    return NotImplemented
+
   def __sub__(self, other: UsageMetadata) -> UsageMetadata:
     if not isinstance(other, UsageMetadata):
       return NotImplemented
-    return UsageMetadata(
+    return self.__class__(
         prompt_token_count=(self.prompt_token_count or 0)
         - (other.prompt_token_count or 0),
         cached_content_token_count=(self.cached_content_token_count or 0)
@@ -898,6 +926,48 @@ class UsageMetadata(pydantic.BaseModel):
         - (other.total_token_count or 0),
         service_tier=self.service_tier or other.service_tier,
     )
+
+  def __mul__(self, factor: Any) -> UsageMetadata:
+    """Scales token counts by a non-negative, finite numeric factor."""
+    if isinstance(factor, bool) or not isinstance(factor, (int, float)):
+      return NotImplemented
+    if not math.isfinite(factor) or factor < 0:
+      raise ValueError(
+          "Multiplication factor must be a finite, non-negative number, got"
+          f" {factor}"
+      )
+    return self.__class__(
+        prompt_token_count=(
+            round(self.prompt_token_count * factor)
+            if self.prompt_token_count is not None
+            else None
+        ),
+        cached_content_token_count=(
+            round(self.cached_content_token_count * factor)
+            if self.cached_content_token_count is not None
+            else None
+        ),
+        candidates_token_count=(
+            round(self.candidates_token_count * factor)
+            if self.candidates_token_count is not None
+            else None
+        ),
+        thoughts_token_count=(
+            round(self.thoughts_token_count * factor)
+            if self.thoughts_token_count is not None
+            else None
+        ),
+        total_token_count=(
+            round(self.total_token_count * factor)
+            if self.total_token_count is not None
+            else None
+        ),
+        service_tier=self.service_tier,
+    )
+
+  def __rmul__(self, factor: Any) -> UsageMetadata:
+    """Reflected scalar multiplication delegating to __mul__."""
+    return self.__mul__(factor)
 
 
 class StepType(str, enum.Enum):
