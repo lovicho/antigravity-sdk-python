@@ -110,9 +110,10 @@ def to_proto_compaction_config(
   """Converts SDK CompactionConfig and legacy capabilities to proto and legacy threshold."""
   effective_compaction = compaction_config
   if effective_compaction is None and capabilities is not None:
-    if capabilities.compaction_threshold is not None:
+    raw_threshold = capabilities._get_explicit_compaction_threshold()  # pylint: disable=protected-access
+    if raw_threshold is not None:
       effective_compaction = types.CompactionConfig(
-          token_threshold=capabilities.compaction_threshold,
+          token_threshold=raw_threshold,
       )
 
   if effective_compaction is None:
@@ -1075,6 +1076,15 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
             max_timeout_ms=timeout_ms,
             enable_sandbox=enable_sandbox,
         ),
+        manage_task=localharness_pb2.ManageTaskToolConfig(
+            enabled=(
+                types.BuiltinTools.RUN_COMMAND in active_tools
+                or types.BuiltinTools.SCHEDULE in active_tools
+            )
+        ),
+        schedule=localharness_pb2.ScheduleToolConfig(
+            enabled=types.BuiltinTools.SCHEDULE in active_tools
+        ),
         file_edit=localharness_pb2.FileEditToolConfig(
             enabled=types.BuiltinTools.EDIT_FILE in active_tools
         ),
@@ -1130,6 +1140,12 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
               f" {tool}"
           )
 
+      model_proto = None
+      if subagent.model is not None:
+        # Subagents pin a model name only; they always run against the
+        # agent-level endpoint. See localharness/subagent.go.
+        model_proto = localharness_pb2.ModelConfig(name=subagent.model)
+
       custom_agents_protos.append(
           localharness_pb2.CustomAgent(
               name=subagent.name,
@@ -1144,6 +1160,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
               agent_behavior=to_proto_agent_behavior(
                   capabilities.agent_behavior
               ),
+              model=model_proto,
           )
       )
     return custom_agents_protos

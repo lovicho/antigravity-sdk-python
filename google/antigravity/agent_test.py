@@ -387,6 +387,26 @@ class AgentTest(unittest.IsolatedAsyncioTestCase):
       "local.local_connection.LocalConnectionStrategy"
   )
   @mock.patch.object(conversation.Conversation, "create")
+  async def test_policy_guard_deprecated_read_only_explicit_passes(
+      self, mock_conv_create, mock_strategy_class
+  ):
+    """No guard when deprecated read-only tools are explicitly enabled."""
+    del mock_conv_create
+    mock_strategy_class.return_value = mock.MagicMock(stop=mock.AsyncMock())
+    config = local_connection.LocalAgentConfig(
+        system_instructions="test",
+        capabilities=types.CapabilitiesConfig(
+            enabled_tools=types.BuiltinTools.deprecated(),
+        ),
+    )
+    async with agent.Agent(config):
+      pass  # Should not raise.
+
+  @mock.patch(
+      "google.antigravity.connections."
+      "local.local_connection.LocalConnectionStrategy"
+  )
+  @mock.patch.object(conversation.Conversation, "create")
   async def test_policy_guard_disabling_all_default_write_tools_passes(
       self, mock_conv_create, mock_strategy_class
   ):
@@ -971,6 +991,36 @@ class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
     mock_conv.conversation_id = "test-conv-123"
     a._conversation = mock_conv
     self.assertEqual(a.conversation_id, "test-conv-123")
+
+  @mock.patch(
+      "google.antigravity.connections."
+      "local.local_connection.LocalConnectionStrategy"
+  )
+  @mock.patch.object(conversation.Conversation, "create")
+  async def test_auto_policy_allows_write_tools(
+      self, mock_conv_create, mock_strategy_class
+  ):
+    """When policy.auto() is present, write tools should not be restricted."""
+    del mock_conv_create  # Unused.
+    mock_strategy_instance = mock.MagicMock()
+    mock_strategy_instance.stop = mock.AsyncMock()
+    mock_strategy_class.return_value = mock_strategy_instance
+
+    config = local_connection.LocalAgentConfig(
+        system_instructions="test",
+        capabilities=types.CapabilitiesConfig(),
+        policies=[policy.auto()],
+    )
+    async with agent.Agent(config):
+      _, kwargs = mock_strategy_class.call_args
+      capabilities_config = kwargs.get("capabilities_config")
+      self.assertIsNotNone(capabilities_config)
+      active_tools = agent.connection_module.resolve_active_tools(
+          capabilities_config
+      )
+      self.assertIn(types.BuiltinTools.RUN_COMMAND, active_tools)
+      policies = kwargs.get("policies")
+      self.assertTrue(any(isinstance(p, policy.AutoPolicy) for p in policies))
 
 
 if __name__ == "__main__":

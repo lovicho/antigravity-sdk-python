@@ -621,20 +621,33 @@ class BuiltinToolsTest(parameterized.TestCase):
       ),
       ("start_subagent", types.BuiltinTools.START_SUBAGENT, "start_subagent"),
       ("generate_image", types.BuiltinTools.GENERATE_IMAGE, "generate_image"),
+      ("schedule", types.BuiltinTools.SCHEDULE, "schedule"),
       ("finish", types.BuiltinTools.FINISH, "finish"),
   )
   def test_enum_values(self, enum_member, expected_value):
     """Verifies each enum member has the expected string value."""
     self.assertEqual(enum_member, expected_value)
 
-  def test_read_only_covers_all_tools(self):
-    """Verifies read_only + write tools = full enum.
+  def test_deprecated_returns_legacy_search_tools(self):
+    """Verifies deprecated() returns LIST_DIR, SEARCH_DIR, and FIND_FILE."""
+    self.assertEqual(
+        types.BuiltinTools.deprecated(),
+        [
+            types.BuiltinTools.LIST_DIR,
+            types.BuiltinTools.SEARCH_DIR,
+            types.BuiltinTools.FIND_FILE,
+        ],
+    )
 
-    If a new BuiltinTools member is added without updating either read_only()
-    or this test's write_tools set, the test will fail, forcing the developer
+  def test_read_only_covers_all_tools(self):
+    """Verifies read_only + deprecated + write tools = full enum.
+
+    If a new BuiltinTools member is added without updating either read_only(),
+    deprecated(), or this test's sets, the test will fail, forcing the developer
     to categorize the new tool.
     """
     read_only = set(types.BuiltinTools.read_only())
+    deprecated_tools = set(types.BuiltinTools.deprecated())
     write_tools = {
         types.BuiltinTools.CREATE_FILE,
         types.BuiltinTools.EDIT_FILE,
@@ -645,10 +658,14 @@ class BuiltinToolsTest(parameterized.TestCase):
         types.BuiltinTools.SEARCH_WEB,
     }
     self.assertEqual(
-        read_only | write_tools,
+        read_only | deprecated_tools | write_tools,
         set(types.BuiltinTools),
         "A new BuiltinTools member was added but not categorized in"
-        " read_only() or this test's write_tools set.",
+        " read_only(), deprecated(), or write_tools.",
+    )
+    self.assertFalse(
+        read_only & deprecated_tools,
+        "read_only must not include deprecated tools.",
     )
     self.assertFalse(
         read_only & write_tools,
@@ -656,21 +673,26 @@ class BuiltinToolsTest(parameterized.TestCase):
     )
 
   def test_nondestructive_covers_all_tools(self):
-    """Verifies nondestructive + destructive tools = full enum.
+    """Verifies nondestructive + deprecated + destructive tools = full enum.
 
     If a new BuiltinTools member is added without updating either
-    nondestructive() or this test's destructive_tools set, the test will fail,
+    nondestructive(), deprecated(), or this test's sets, the test will fail,
     forcing the developer to categorize the new tool.
     """
     nondestructive = set(types.BuiltinTools.nondestructive())
+    deprecated_tools = set(types.BuiltinTools.deprecated())
     destructive_tools = {
         types.BuiltinTools.RUN_COMMAND,
     }
     self.assertEqual(
-        nondestructive | destructive_tools,
+        nondestructive | deprecated_tools | destructive_tools,
         set(types.BuiltinTools),
         "A new BuiltinTools member was added but not categorized in"
-        " nondestructive() or this test's destructive_tools set.",
+        " nondestructive(), deprecated(), or destructive_tools.",
+    )
+    self.assertFalse(
+        nondestructive & deprecated_tools,
+        "nondestructive must not include deprecated tools.",
     )
     self.assertFalse(
         nondestructive & destructive_tools,
@@ -690,27 +712,30 @@ class BuiltinToolsTest(parameterized.TestCase):
     """Verifies that none() returns an empty list."""
     self.assertEqual(types.BuiltinTools.none(), [])
 
-  def test_minimal_returns_six_minimal_tools(self):
-    """Verifies that minimal() returns exactly the 6 core software engineering tools."""
+  def test_minimal_returns_four_minimal_tools(self):
+    """Verifies that minimal() returns the 4 core software engineering tools."""
     expected = [
         types.BuiltinTools.RUN_COMMAND,
         types.BuiltinTools.VIEW_FILE,
         types.BuiltinTools.CREATE_FILE,
         types.BuiltinTools.EDIT_FILE,
-        types.BuiltinTools.LIST_DIR,
-        types.BuiltinTools.SEARCH_DIR,
     ]
     self.assertEqual(types.BuiltinTools.minimal(), expected)
 
-  def test_default_excludes_ask_question(self):
-    """Verifies that default() returns all tools except ASK_QUESTION."""
-    expected = set(types.BuiltinTools) - {types.BuiltinTools.ASK_QUESTION}
+  def test_default_excludes_ask_question_and_deprecated_tools(self):
+    """Verifies that default() excludes ASK_QUESTION, LIST_DIR, SEARCH_DIR, and FIND_FILE."""
+    excluded = {
+        types.BuiltinTools.ASK_QUESTION,
+        types.BuiltinTools.LIST_DIR,
+        types.BuiltinTools.SEARCH_DIR,
+        types.BuiltinTools.FIND_FILE,
+    }
+    expected = set(types.BuiltinTools) - excluded
     self.assertEqual(set(types.BuiltinTools.default()), expected)
-    self.assertNotIn(
-        types.BuiltinTools.ASK_QUESTION, types.BuiltinTools.default()
-    )
+    for tool in excluded:
+      self.assertNotIn(tool, types.BuiltinTools.default())
     self.assertLen(
-        types.BuiltinTools.default(), len(types.BuiltinTools) - 1
+        types.BuiltinTools.default(), len(types.BuiltinTools) - len(excluded)
     )
 
 
@@ -777,20 +802,36 @@ class CapabilitiesConfigTest(unittest.TestCase):
           disabled_tools=[types.BuiltinTools.RUN_COMMAND],
       )
 
+  def test_default_instantiation_emits_no_deprecation_warning(self):
+    """Verifies default CapabilitiesConfig() emits no DeprecationWarning."""
+    with warnings.catch_warnings(record=True) as w:
+      warnings.simplefilter("always")
+      config = types.CapabilitiesConfig()
+      explicit_none_config = types.CapabilitiesConfig(compaction_threshold=None)
+      compaction_warnings = [
+          item
+          for item in w
+          if issubclass(item.category, DeprecationWarning)
+          and "compaction_threshold" in str(item.message)
+      ]
+      self.assertEqual(compaction_warnings, [])
+    self.assertIsNone(config._get_explicit_compaction_threshold())
+    self.assertIsNone(explicit_none_config._get_explicit_compaction_threshold())
+
   def test_compaction_threshold_explicit(self):
     """Verifies that compaction_threshold accepts an integer and emits DeprecationWarning."""
     with warnings.catch_warnings(record=True) as w:
       warnings.simplefilter("always")
       config = types.CapabilitiesConfig(compaction_threshold=50000)
+      init_warnings = [
+          item
+          for item in w
+          if issubclass(item.category, DeprecationWarning)
+          and "CapabilitiesConfig.compaction_threshold is deprecated"
+          in str(item.message)
+      ]
+      self.assertEqual(len(init_warnings), 1)
       self.assertEqual(config.compaction_threshold, 50000)
-      self.assertTrue(
-          any(
-              issubclass(item.category, DeprecationWarning)
-              and "CapabilitiesConfig.compaction_threshold is deprecated"
-              in str(item.message)
-              for item in w
-          )
-      )
 
   def test_ask_question_warning_when_not_interactive(self):
     """Verifies warning when ASK_QUESTION is enabled and not interactive."""
@@ -2136,6 +2177,23 @@ class SubagentConfigTest(unittest.TestCase):
 
     with self.assertRaises(pydantic.ValidationError):
       types.SubagentConfig(**{"description": "helpful agent"})  # Missing name
+
+  def test_model_configuration(self):
+    sub_str = types.SubagentConfig(
+        name="flash_helper",
+        description="helpful agent",
+        model="gemini-2.5-flash",
+    )
+    self.assertEqual(sub_str.model, "gemini-2.5-flash")
+
+    # Subagents pin a model name only; a ModelTarget could carry an endpoint
+    # that localharness cannot honor, so it is rejected outright.
+    with self.assertRaises(pydantic.ValidationError):
+      types.SubagentConfig(
+          name="pro_helper",
+          description="helpful agent",
+          model=types.ModelTarget(name="gemini-2.5-pro"),
+      )
 
 
 class UsageMetadataTest(unittest.TestCase):

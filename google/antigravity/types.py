@@ -304,6 +304,10 @@ class SubagentConfig(pydantic.BaseModel):
       None, defaults to read-only tools.
     tools: Optional list of additional custom tools (callable functions or
       string names) to enable for this subagent.
+    model: Optional model name for this subagent. When specified, forces the
+      subagent to run under the given model instead of inheriting the parent
+      agent's model. Unlike the agent-level `model`, this accepts a name only:
+      subagents always run against the agent-level endpoint.
   """
 
   name: str
@@ -313,6 +317,7 @@ class SubagentConfig(pydantic.BaseModel):
   tools: list[Callable[..., Any] | str] | None = pydantic.Field(
       default_factory=list
   )
+  model: str | None = None
 
 
 class BuiltinTools(str, enum.Enum):
@@ -331,6 +336,7 @@ class BuiltinTools(str, enum.Enum):
     GENERATE_IMAGE: Generate or edit images.
     SEARCH_WEB: Search the web.
     READ_URL_CONTENT: Read content from a URL.
+    SCHEDULE: Schedule a one-shot timer or recurring cron job.
     FINISH: Finish the conversation and return structured output.
   """
 
@@ -346,21 +352,22 @@ class BuiltinTools(str, enum.Enum):
   GENERATE_IMAGE = "generate_image"
   SEARCH_WEB = "search_web"
   READ_URL_CONTENT = "read_url_content"
+  SCHEDULE = "schedule"
   FINISH = "finish"
 
   @classmethod
   def read_only(cls) -> list["BuiltinTools"]:
     """Returns tools that only read state (no writes, deletes, or commands).
 
+    Excludes LIST_DIR, SEARCH_DIR, and FIND_FILE, which are disabled by default.
+
     Returns:
-        A list of read-only BuiltinTools.
+        A list of default read-only BuiltinTools.
     """
     return [
-        cls.LIST_DIR,
-        cls.SEARCH_DIR,
-        cls.FIND_FILE,
         cls.VIEW_FILE,
         cls.READ_URL_CONTENT,
+        cls.SCHEDULE,
         cls.FINISH,
     ]
 
@@ -368,13 +375,12 @@ class BuiltinTools(str, enum.Enum):
   def nondestructive(cls) -> list["BuiltinTools"]:
     """Returns tools that cannot delete content.
 
+    Excludes LIST_DIR, SEARCH_DIR, and FIND_FILE, which are disabled by default.
+
     Returns:
-        A list of non-destructive BuiltinTools.
+        A list of default non-destructive BuiltinTools.
     """
     return [
-        cls.LIST_DIR,
-        cls.SEARCH_DIR,
-        cls.FIND_FILE,
         cls.VIEW_FILE,
         cls.CREATE_FILE,
         cls.EDIT_FILE,
@@ -383,6 +389,7 @@ class BuiltinTools(str, enum.Enum):
         cls.GENERATE_IMAGE,
         cls.SEARCH_WEB,
         cls.READ_URL_CONTENT,
+        cls.SCHEDULE,
         cls.FINISH,
     ]
 
@@ -424,8 +431,7 @@ class BuiltinTools(str, enum.Enum):
   def minimal(cls) -> list["BuiltinTools"]:
     """Returns the minimal set of software engineering tools.
 
-    Includes run_command, view_file, create_file, edit_file, list_directory, and
-    search_directory.
+    Includes run_command, view_file, create_file, and edit_file.
 
     Returns:
         A list of minimal BuiltinTools.
@@ -435,20 +441,38 @@ class BuiltinTools(str, enum.Enum):
         cls.VIEW_FILE,
         cls.CREATE_FILE,
         cls.EDIT_FILE,
+    ]
+
+  @classmethod
+  def deprecated(cls) -> list["BuiltinTools"]:
+    """Returns deprecated/legacy builtin tools that are disabled by default.
+
+    Includes LIST_DIR, SEARCH_DIR, and FIND_FILE, which are excluded from
+    default tool collections and only enabled when explicitly requested via
+    `enabled_tools`.
+
+    Returns:
+        A list of deprecated BuiltinTools.
+    """
+    return [
         cls.LIST_DIR,
         cls.SEARCH_DIR,
+        cls.FIND_FILE,
     ]
 
   @classmethod
   def default(cls) -> list["BuiltinTools"]:
     """Returns the default set of builtin tools for autonomous agents.
 
-    Excludes ASK_QUESTION because autonomous agents cannot prompt the user.
+    Excludes ASK_QUESTION (because autonomous agents cannot prompt the user) as
+    well as deprecated tools (LIST_DIR, SEARCH_DIR, and FIND_FILE, which are off
+    by default).
 
     Returns:
         A list of default BuiltinTools.
     """
-    return [t for t in cls if t != cls.ASK_QUESTION]
+    excluded = {cls.ASK_QUESTION, *cls.deprecated()}
+    return [t for t in cls if t not in excluded]
 
 
 class CapabilitiesConfig(pydantic.BaseModel):
@@ -483,16 +507,17 @@ class CapabilitiesConfig(pydantic.BaseModel):
       overhead for small-context models. Defaults to AgentBehavior.AUTONOMOUS.
     enabled_tools: Explicit allowlist of builtin tools to enable. Mutually
       exclusive with disabled_tools. When None, the harness defaults are used
-      (all tools enabled except ASK_QUESTION). Disabled tools are removed
-      from the model's context, saving tokens and preventing the model from
-      even considering them.
+      (all tools enabled except ASK_QUESTION, SEARCH_DIR, and FIND_FILE).
+      Disabled tools are removed from the model's context, saving tokens and
+      preventing the model from even considering them.
     disabled_tools: Explicit denylist of builtin tools to disable. Mutually
       exclusive with enabled_tools. When specified, the given tools are
-      subtracted from default() (which already excludes ASK_QUESTION).
-      When None, all default tools are enabled. Disabled tools are removed
-      from the model's context, saving tokens and preventing the model from
-      even considering them. Note that to enable ASK_QUESTION, it must be
-      explicitly included in enabled_tools.
+      subtracted from default() (which already excludes ASK_QUESTION,
+      SEARCH_DIR, and FIND_FILE). When None, all default tools are enabled.
+      Disabled tools are removed from the model's context, saving tokens and
+      preventing the model from even considering them. Note that to enable
+      ASK_QUESTION, SEARCH_DIR, or FIND_FILE, they must be explicitly included
+      in enabled_tools.
     compaction_threshold: (Deprecated) Configure
       CompactionConfig(token_threshold=...) directly on AgentConfig instead.
     finish_tool_schema_json: Optional JSON schema string for the finish tool.
@@ -590,9 +615,15 @@ class CapabilitiesConfig(pydantic.BaseModel):
       )
     return self
 
+  def _get_explicit_compaction_threshold(self) -> int | None:
+    """Returns `compaction_threshold` if explicitly configured, bypassing its deprecated descriptor."""
+    if "compaction_threshold" not in self.model_fields_set:
+      return None
+    return self.__dict__.get("compaction_threshold")
+
   @pydantic.model_validator(mode="after")
   def _warn_deprecated_compaction_fields(self) -> "CapabilitiesConfig":
-    if self.compaction_threshold is not None:
+    if self._get_explicit_compaction_threshold() is not None:
       warnings.warn(
           "CapabilitiesConfig.compaction_threshold is deprecated. Configure"
           " CompactionConfig(token_threshold=...) directly on"

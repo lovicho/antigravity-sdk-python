@@ -15,6 +15,7 @@
 """Validates default implementations in the Connection abstract base class."""
 
 import unittest
+import warnings
 import pydantic
 from google.antigravity import types
 from google.antigravity.connections import connection
@@ -376,6 +377,201 @@ class AgentConfigTest(unittest.TestCase):
     self.assertEqual(presets["capabilities"].compaction_threshold, 3000)
     self.assertNotIn("compaction_config", presets)
 
+  def test_eval_method_returns_subclass_instance_with_presets(self):
+    class ConcreteConfig(connection.AgentConfig):
+      models: list[types.ModelTarget] = pydantic.Field(
+          default_factory=lambda: [
+              types.ModelTarget(
+                  name="gemini-3-flash-preview",
+                  endpoint=types.GeminiAPIEndpoint(),
+              )
+          ]
+      )
+
+      def create_strategy(self, *, tool_runner, hook_runner):
+        return None
+
+    config = ConcreteConfig(
+        system_instructions="test prompt",
+    ).eval()
+    self.assertIsInstance(config, ConcreteConfig)
+    self.assertEqual(config.system_instructions, "test prompt")
+    self.assertFalse(config.capabilities.enable_subagents)
+    self.assertIsNotNone(config.capabilities.run_command_config)
+    self.assertTrue(config.capabilities.run_command_config.enable_daemons)
+    self.assertEqual(
+        config.capabilities.disabled_tools,
+        [types.BuiltinTools.GENERATE_IMAGE],
+    )
+    self.assertIsNone(config.capabilities.enabled_tools)
+    self.assertEqual(config.policies, [policy.allow_all()])
+    self.assertEqual(config.retry_config, types.RetryConfig.benchmark())
+    self.assertEqual(
+        config.models[0].endpoint.options.thinking_level,
+        types.ThinkingLevel.HIGH,
+    )
+
+  def test_eval_method_preserves_explicit_overrides(self):
+    class ConcreteConfig(connection.AgentConfig):
+      models: list[types.ModelTarget] = pydantic.Field(
+          default_factory=lambda: [
+              types.ModelTarget(
+                  name="gemini-3-flash-preview",
+                  endpoint=types.GeminiAPIEndpoint(),
+              )
+          ]
+      )
+
+      def create_strategy(self, *, tool_runner, hook_runner):
+        return None
+
+    custom_policy = policy.Policy(
+        name="custom", tool="run_command", decision=policy.Decision.DENY
+    )
+    custom_retry = types.RetryConfig(
+        api_retry=types.ModelAPIRetryConfig(max_retries=3)
+    )
+    config = ConcreteConfig(
+        policies=[custom_policy],
+        retry_config=custom_retry,
+        capabilities=types.CapabilitiesConfig(
+            enable_subagents=True,
+            disabled_tools=[types.BuiltinTools.SEARCH_WEB],
+            run_command_config=types.RunCommandConfig(
+                enable_daemons=False,
+                timeout_seconds=120.0,
+            ),
+        ),
+    ).eval()
+    self.assertEqual(config.policies, [custom_policy])
+    self.assertEqual(config.retry_config, custom_retry)
+    self.assertTrue(config.capabilities.enable_subagents)
+    self.assertIsNotNone(config.capabilities.run_command_config)
+    self.assertFalse(config.capabilities.run_command_config.enable_daemons)
+    self.assertEqual(
+        config.capabilities.run_command_config.timeout_seconds, 120.0
+    )
+    self.assertEqual(
+        config.capabilities.disabled_tools,
+        [types.BuiltinTools.SEARCH_WEB],
+    )
+
+  def test_eval_method_with_enabled_tools_drops_disabled_tools(self):
+    class ConcreteConfig(connection.AgentConfig):
+      models: list[types.ModelTarget] = pydantic.Field(
+          default_factory=lambda: [
+              types.ModelTarget(
+                  name="gemini-3-flash-preview",
+                  endpoint=types.GeminiAPIEndpoint(),
+              )
+          ]
+      )
+
+      def create_strategy(self, *, tool_runner, hook_runner):
+        return None
+
+    config = ConcreteConfig(
+        capabilities=types.CapabilitiesConfig(
+            enabled_tools=[types.BuiltinTools.VIEW_FILE],
+        ),
+    ).eval()
+    self.assertEqual(
+        config.capabilities.enabled_tools, [types.BuiltinTools.VIEW_FILE]
+    )
+    self.assertIsNone(config.capabilities.disabled_tools)
+    self.assertFalse(config.capabilities.enable_subagents)
+
+  def test_eval_raises_when_models_empty_or_missing_text_target(self):
+    class NoModelsConfig(connection.AgentConfig):
+
+      def create_strategy(self, *, tool_runner, hook_runner):
+        return None
+
+    with self.assertRaisesRegex(
+        ValueError,
+        "Cannot apply thinking_level in eval\\(\\) on NoModelsConfig",
+    ):
+      NoModelsConfig().eval()
+
+    # Passing thinking_level=None on a config without models succeeds.
+    no_models_cfg = NoModelsConfig().eval(thinking_level=None)
+    self.assertFalse(no_models_cfg.capabilities.enable_subagents)
+
+    class ModelsConfig(connection.AgentConfig):
+      models: list[types.ModelTarget] | None = None
+
+      def create_strategy(self, *, tool_runner, hook_runner):
+        return None
+
+    with self.assertRaisesRegex(
+        ValueError, "only supported on configs with Gemini or Vertex"
+    ):
+      ModelsConfig(models=[]).eval()
+
+    image_only = types.ModelTarget(
+        name="imagen",
+        types=[types.ModelType.IMAGE],
+        endpoint=types.GeminiAPIEndpoint(),
+    )
+    with self.assertRaisesRegex(
+        ValueError, "no ModelType.TEXT target found in models"
+    ):
+      ModelsConfig(models=[image_only]).eval()
+
+    # Passing thinking_level=None skips thinking_level application and succeeds.
+    cfg = ModelsConfig(models=[image_only]).eval(thinking_level=None)
+    self.assertEqual(len(cfg.models), 1)
+    self.assertIsNone(cfg.models[0].endpoint.options)
+
+  def test_eval_raises_when_text_target_has_none_endpoint(self):
+    class ModelsConfig(connection.AgentConfig):
+      models: list[types.ModelTarget] | None = None
+
+      def create_strategy(self, *, tool_runner, hook_runner):
+        return None
+
+    with self.assertRaisesRegex(
+        ValueError,
+        "endpoint must be a GeminiAPIEndpoint or VertexEndpoint, got NoneType",
+    ):
+      ModelsConfig(
+          models=[types.ModelTarget(name="text-no-endpoint", endpoint=None)]
+      ).eval()
+
+  def test_eval_raises_when_text_target_already_sets_thinking_level(self):
+    class ModelsConfig(connection.AgentConfig):
+      models: list[types.ModelTarget] | None = None
+
+      def create_strategy(self, *, tool_runner, hook_runner):
+        return None
+
+    preconfigured = types.ModelTarget(
+        name="preconfigured-model",
+        endpoint=types.GeminiAPIEndpoint(
+            options=types.GeminiModelOptions(
+                thinking_level=types.ThinkingLevel.LOW
+            )
+        ),
+    )
+    with self.assertRaisesRegex(
+        ValueError, "already sets thinking_level=.*pass it to .eval"
+    ):
+      ModelsConfig(models=[preconfigured]).eval()
+
+    with self.assertRaisesRegex(
+        ValueError, "already sets thinking_level=.*pass it to .eval"
+    ):
+      ModelsConfig(models=[preconfigured]).eval(
+          thinking_level=types.ThinkingLevel.MEDIUM
+      )
+
+    # Passing thinking_level=None preserves the ModelTarget's thinking_level.
+    preserved = ModelsConfig(models=[preconfigured]).eval(thinking_level=None)
+    self.assertEqual(
+        preserved.models[0].endpoint.options.thinking_level,
+        types.ThinkingLevel.LOW,
+    )
+
 
 class ResolveActiveToolsTest(unittest.TestCase):
   """Tests for resolve_active_tools helper."""
@@ -428,6 +624,51 @@ class ResolveActiveToolsTest(unittest.TestCase):
     self.assertEqual(
         connection.resolve_active_tools(subagent_cfg), expected
     )
+
+  def test_default_agent_config_no_deprecation_warning(self):
+    class ConcreteConfig(connection.AgentConfig):
+
+      def create_strategy(self, *, tool_runner, hook_runner):
+        return None
+
+    with warnings.catch_warnings(record=True) as w:
+      warnings.simplefilter("always")
+      cfg = ConcreteConfig()
+      effective = cfg._get_effective_compaction_config()
+      compaction_warnings = [
+          item
+          for item in w
+          if issubclass(item.category, DeprecationWarning)
+          and "compaction_threshold" in str(item.message)
+      ]
+      self.assertEqual(compaction_warnings, [])
+      self.assertIsNone(effective)
+
+  def test_get_effective_compaction_config_legacy_threshold_warns_once(self):
+    class ConcreteConfig(connection.AgentConfig):
+
+      def create_strategy(self, *, tool_runner, hook_runner):
+        return None
+
+    with warnings.catch_warnings():
+      warnings.simplefilter("ignore", DeprecationWarning)
+      cfg = ConcreteConfig(
+          capabilities=types.CapabilitiesConfig(compaction_threshold=50000)
+      )
+
+    with warnings.catch_warnings(record=True) as w:
+      warnings.simplefilter("always")
+      effective = cfg._get_effective_compaction_config()
+      compaction_warnings = [
+          item
+          for item in w
+          if issubclass(item.category, DeprecationWarning)
+          and "CapabilitiesConfig.compaction_threshold is deprecated"
+          in str(item.message)
+      ]
+      self.assertEqual(len(compaction_warnings), 1)
+      self.assertIsNotNone(effective)
+      self.assertEqual(effective.token_threshold, 50000)
 
 
 if __name__ == "__main__":
