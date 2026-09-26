@@ -5442,6 +5442,10 @@ class LocalAgentConfigTest(absltest.TestCase):
         harness_config.policy_config.rules[0].decision,
         localharness_pb2.POLICY_DECISION_ALLOW,
     )
+    self.assertEqual(
+        harness_config.policy_config.workspace_containment,
+        localharness_pb2.PolicyConfig.WORKSPACE_CONTAINMENT_DISABLED,
+    )
 
   def test_eval_method_with_overrides(self):
     custom_retry = types.RetryConfig(
@@ -6411,8 +6415,17 @@ class LocalAgentConfigEvalE2ETest(unittest.IsolatedAsyncioTestCase):
       self.assertNotIn("send_message", declared_tools)
       self.assertIn("run_command", declared_tools)
       self.assertIsNotNone(run_command_decl)
+      harness_config = strategy._build_harness_config()
       self.assertTrue(
-          strategy._build_harness_config().harness_side_tools.run_command.enable_daemon_commands
+          harness_config.harness_side_tools.run_command.enable_daemon_commands
+      )
+      self.assertEqual(
+          harness_config.policy_config.workspace_containment,
+          localharness_pb2.PolicyConfig.WORKSPACE_CONTAINMENT_DISABLED,
+      )
+      self.assertEqual(
+          harness_config.workspaces[0].filesystem_workspace.directory,
+          workspace_dir,
       )
       self.assertIn("IsDaemon", json.dumps(run_command_decl))
       self.assertIn("view_file", declared_tools)
@@ -6728,6 +6741,83 @@ class LocalAgentConfigEvalE2ETest(unittest.IsolatedAsyncioTestCase):
         openai_eval_none, local_openai_connection_config.LocalOpenAIAgentConfig
     )
     self.assertFalse(openai_eval_none.capabilities.enable_subagents)
+
+  def test_all_local_configs_forward_shared_strategy_fields(self):
+    """Verifies that all BaseLocalAgentConfig subclasses forward shared strategy fields."""
+    def sample_tool(x: str) -> str:
+      """Sample tool."""
+      return x
+
+    custom_policies = [policy.deny("run_command"), policy.deny("create_file")]
+    budget = types.BudgetConfig()
+
+    class _FakeLiteRTStrategy(local_connection.LocalConnectionStrategy):
+
+      def __init__(self, *, model_path: str, **kwargs):
+        self.model_path = model_path
+        for k in (
+            "backend",
+            "enable_speculative_decoding",
+            "cache_dir",
+            "audio_backend",
+            "vision_backend",
+            "port",
+            "download_if_missing",
+        ):
+          kwargs.pop(k, None)
+        super().__init__(**kwargs)
+
+    fake_litert_mod = mock.MagicMock()
+    fake_litert_mod.LiteRTConnectionStrategy = _FakeLiteRTStrategy
+
+    with mock.patch.dict(
+        "sys.modules",
+        {
+            "google.antigravity.connections.local.litert_connection": (
+                fake_litert_mod
+            )
+        },
+    ):
+      configs = [
+          local_connection_config.LocalAgentConfig(
+              model="gemini-2.5-flash",
+              policies=custom_policies,
+              tools=[sample_tool],
+              budget_config=budget,
+              conversation_id="c" * 32,
+              session_continuation_mode=types.SessionContinuationMode.RESUME,
+          ),
+          local_openai_connection_config.LocalOpenAIAgentConfig(
+              base_url="http://localhost:11434/v1",
+              model="llama3.1",
+              policies=custom_policies,
+              tools=[sample_tool],
+              budget_config=budget,
+              conversation_id="c" * 32,
+              session_continuation_mode=types.SessionContinuationMode.RESUME,
+          ),
+          litert_connection_config.LiteRTAgentConfig(
+              model_path="/tmp/model.litertlm",
+              policies=custom_policies,
+              tools=[sample_tool],
+              budget_config=budget,
+              conversation_id="c" * 32,
+              session_continuation_mode=types.SessionContinuationMode.RESUME,
+          ),
+      ]
+      for cfg in configs:
+        with self.subTest(config_cls=type(cfg).__name__):
+          strategy = cfg.create_strategy(
+              tool_runner=mock.MagicMock(),
+              hook_runner=mock.MagicMock(),
+          )
+          self.assertEqual(strategy._policies, custom_policies)
+          self.assertEqual(strategy._tools, [sample_tool])
+          self.assertEqual(strategy._budget_config, budget)
+          self.assertEqual(
+              strategy._session_continuation_mode,
+              types.SessionContinuationMode.RESUME,
+          )
 
 
 if __name__ == "__main__":

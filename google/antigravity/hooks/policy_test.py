@@ -664,6 +664,22 @@ class DenyReasonTest(unittest.IsolatedAsyncioTestCase):
     result = await hook.run(ctx, _make_tool_call("run_command"))
     self.assertIn("run_command", result.message)
 
+  async def test_custom_reason_in_deny_policy(self):
+    """When a policy has a custom reason, it is used as the deny message."""
+    hook = policy.enforce([
+        policy.deny(
+            "run_command",
+            name="block-cmd",
+            reason="Custom security policy: shell execution forbidden.",
+        ),
+    ])
+    ctx = hooks.HookContext()
+    result = await hook.run(ctx, _make_tool_call("run_command"))
+    self.assertFalse(result.allow)
+    self.assertEqual(
+        result.message, "Custom security policy: shell execution forbidden."
+    )
+
 
 class IntegrationWithHookRunnerTest(unittest.IsolatedAsyncioTestCase):
   """Verifies the policy hook integrates with HookRunner dispatch."""
@@ -1129,6 +1145,32 @@ class ToPolicyConfigProtoTest(absltest.TestCase):
     self.assertIn("rule_3", dynamic_policy_map)  # index 3 = ask_user("d", ...)
     self.assertNotIn("rule_0", dynamic_policy_map)
     self.assertNotIn("rule_2", dynamic_policy_map)
+
+  def test_allow_all_disables_workspace_containment(self):
+    """allow_all() without workspace_only() disables built-in containment."""
+    config, _ = policy._to_policy_config_proto([policy.allow_all()])
+    self.assertEqual(
+        config.workspace_containment,
+        localharness_pb2.PolicyConfig.WORKSPACE_CONTAINMENT_DISABLED,
+    )
+
+  def test_allow_all_with_workspace_only_keeps_workspace_containment(self):
+    """allow_all() combined with workspace_only() keeps built-in containment."""
+    config, _ = policy._to_policy_config_proto(
+        [policy.allow_all(), policy.workspace_only(["/tmp/ws"])]
+    )
+    self.assertEqual(
+        config.workspace_containment,
+        localharness_pb2.PolicyConfig.WORKSPACE_CONTAINMENT_UNSPECIFIED,
+    )
+
+  def test_confirm_run_command_keeps_workspace_containment(self):
+    """confirm_run_command() keeps built-in workspace containment."""
+    config, _ = policy._to_policy_config_proto(policy.confirm_run_command())
+    self.assertEqual(
+        config.workspace_containment,
+        localharness_pb2.PolicyConfig.WORKSPACE_CONTAINMENT_UNSPECIFIED,
+    )
 
 
 class ExecuteAskUserTest(unittest.IsolatedAsyncioTestCase):
