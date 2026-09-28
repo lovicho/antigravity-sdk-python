@@ -548,6 +548,7 @@ message TrajectoryStateUpdate {
   int32 depth = 7;
   .antigravity.localharness.TrajectoryStateUpdate.State state = 3;
   string error = 4;
+  string error_code = 8;
   .antigravity.localharness.TrajectoryStateUpdate.StopReason stop_reason = 5;
 }
 message TrajectoryUsageEntry {
