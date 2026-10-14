@@ -18,6 +18,7 @@ package genai;
 
 import "google/antigravity/proto/content.proto";
 import "google/antigravity/proto/elicitation.proto";
+import "google/antigravity/proto/user_steps.proto";
 import "google/antigravity/proto/genai_json_annotations.proto";
 
 message StepList {
@@ -37,11 +38,13 @@ message Step {
   oneof type {
     option (gaos.parsing.subtype_source) = true;
 
+    .genai.ContentStep content = 12;
     .genai.ThoughtStep thought = 3;
     .genai.ToolCallStep tool_call = 4;
     .genai.ToolResultStep tool_result = 5;
     .genai.ElicitationCallStep elicitation_call = 13;
     .genai.ElicitationResultStep elicitation_result = 14;
+    .genai.CompactionStep compaction = 11;
     .genai.UserInputStep user_input = 1;
     .genai.ModelOutputStep model_output = 2;
     .genai.LegacyTextContent text = 6;
@@ -52,6 +55,10 @@ message Step {
   }
   string description = 16;
 }
+message ContentStep {
+  string role = 1;
+  repeated .genai.Content content = 2;
+}
 message ThoughtStep {
   bytes signature = 1;
   repeated .genai.Content summary = 2 [
@@ -59,6 +66,9 @@ message ThoughtStep {
     (gaos.parsing.json_discriminator_values) = "image",
     (gaos.parsing.sub_content_name) = "ThoughtContent"
   ];
+}
+message CompactionStep {
+  bytes signature = 1;
 }
 message ToolCallStep {
   oneof type {
@@ -271,6 +281,7 @@ message UserInputStep {
     .genai.ContentList content_list = 2;
     string content_string = 3;
   }
+  repeated .genai.UserInputContent input_content = 5;
 }
 message ModelOutputStep {
   repeated .genai.Content content = 1;

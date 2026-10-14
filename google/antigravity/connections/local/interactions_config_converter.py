@@ -286,12 +286,12 @@ def _translate_allowed_subagents(
 
   if cfg is not None:
     subagent_enabled = getattr(cfg, "enable_subagents", True) and (
-        types.BuiltinTools.START_SUBAGENT in active_tools
+        types.BuiltinTools.INVOKE_SUBAGENT in active_tools
     )
     max_depth = getattr(cfg, "max_subagent_depth", None)
     allowed_names = list(cfg.allowed_subagents or [])
   elif not is_subagent:
-    subagent_enabled = types.BuiltinTools.START_SUBAGENT in active_tools
+    subagent_enabled = types.BuiltinTools.INVOKE_SUBAGENT in active_tools
 
   if not subagent_enabled:
     allowed_dict: dict[str, Any] = {"disabled": {}}
@@ -363,17 +363,14 @@ def _translate_custom_subagent(
     tool_runner: t_runner.ToolRunner | None = None,
 ) -> dict[str, Any]:
   """Translates an SDK SubagentConfig to an AntigravitySubagentsConfig.CustomAgent dict."""
-  if subagent.model is not None:
-    raise types.AntigravityValidationError(
-        f"Subagent '{subagent.name}' sets 'model', which is not supported by"
-        " InteractionsAgentConfig."
-    )
   capabilities = subagent.capabilities or types.SubagentCapabilities(
       enabled_tools=types.BuiltinTools.read_only(),
   )
   sa_dict: dict[str, Any] = {"name": subagent.name}
   if subagent.description:
     sa_dict["description"] = subagent.description
+  if subagent.model is not None:
+    sa_dict["model"] = {"name": subagent.model}
   _translate_system_instructions(subagent.system_instructions, sa_dict)
 
   resolved_subagent_tools: list[dict[str, Any]] = []
@@ -831,29 +828,34 @@ def _slash_command_name(sc: types.SlashCommand) -> str:
   return sc.name.value if hasattr(sc.name, "value") else str(sc.name)
 
 
+def _primitive_to_input_content_dict(
+    item: types.ContentPrimitive,
+) -> dict[str, Any]:
+  """Converts an SDK primitive into a GAOS UserInputContent dict."""
+  if isinstance(item, types.SlashCommand):
+    return {"type": "slash_command", "name": _slash_command_name(item)}
+  return _primitive_to_content_dict(item)
+
+
 def content_to_user_input_event(content: types.Content) -> dict[str, Any]:
   """Converts SDK Content into a GAOS ExternalClientEvent (InputEvent)."""
-  if isinstance(content, types.SlashCommand):
-    return {
-        "event_type": "input",
-        "slash_command": {"name": _slash_command_name(content)},
-    }
-
   items = (
       [content]
       if isinstance(content, str) or not isinstance(content, Sequence)
       else list(content)
   )
-  if len(items) == 1 and isinstance(items[0], types.SlashCommand):
+  if not any(isinstance(item, types.SlashCommand) for item in items):
     return {
         "event_type": "input",
-        "slash_command": {"name": _slash_command_name(items[0])},
+        "content": [_primitive_to_content_dict(item) for item in items],
     }
-
-  content_list = [_primitive_to_content_dict(item) for item in items]
+  # Slash commands can only be expressed in input_content, where they may
+  # be interleaved with other content.
   return {
       "event_type": "input",
-      "content": content_list,
+      "input_content": [
+          _primitive_to_input_content_dict(item) for item in items
+      ],
   }
 
 

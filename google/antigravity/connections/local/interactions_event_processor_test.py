@@ -15,6 +15,7 @@
 """Unit tests for interactions_event_processor."""
 
 import asyncio
+import base64
 from typing import Any
 import unittest
 
@@ -23,6 +24,7 @@ from absl.testing import absltest
 from google.antigravity import types
 from google.antigravity.connections.local import event_processor
 from google.antigravity.connections.local import interactions_event_processor
+from google.antigravity.connections.local import local_connection_config
 from google.antigravity.hooks import hook_runner
 from google.antigravity.hooks import hooks
 from google.antigravity.tools import tool_runner
@@ -329,10 +331,7 @@ class InteractionsEventProcessorTest(unittest.IsolatedAsyncioTestCase):
             "empty_result": {},
         },
     )
-    compaction_step = proc.step_queue.get_nowait()
-    self.assertEqual(compaction_step.type, types.StepType.COMPACTION)
-    self.assertEqual(compaction_step.content, "Compacted summary")
-    self.assertEqual(compaction_step.id, "root-1:5")
+    self.assertTrue(proc.step_queue.empty())
 
     # 7. Stop
     await proc.process_event({
@@ -668,6 +667,211 @@ class InteractionsEventProcessorTest(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(resp_chart["call_id"], "call-chart-1")
     self.assertFalse(resp_chart["is_error"])
     self.assertEqual(resp_chart["result"], {"result": None})
+
+  async def test_compaction_step_stream(self):
+    proc = interactions_event_processor.InteractionsEventProcessor(
+        send_json_event_fn=self._send_json_event,
+        root_interaction_id="conv-1",
+    )
+
+    await proc.process_event({
+        "event_type": "step.start",
+        "index": 3,
+        "step": {
+            "type": "compaction",
+            "description": "Context compaction",
+        },
+    })
+    step_active = proc.step_queue.get_nowait()
+    self.assertEqual(step_active.type, types.StepType.COMPACTION)
+    self.assertEqual(step_active.status, types.StepStatus.ACTIVE)
+    self.assertEqual(step_active.content, "Context compaction")
+
+    await proc.process_event({
+        "event_type": "step.stop",
+        "index": 3,
+    })
+    step_done = proc.step_queue.get_nowait()
+    self.assertEqual(step_done.type, types.StepType.COMPACTION)
+    self.assertEqual(step_done.status, types.StepStatus.DONE)
+
+    # Sub-trajectory compaction step with default description
+    await proc.process_event({
+        "event_type": "step.start",
+        "sub_interaction_id": "sub-conv-1",
+        "index": 1,
+        "step": {"type": "compaction"},
+    })
+    sub_active = proc.step_queue.get_nowait()
+    self.assertEqual(sub_active.type, types.StepType.COMPACTION)
+    self.assertEqual(sub_active.trajectory_id, "sub-conv-1")
+    self.assertEqual(sub_active.status, types.StepStatus.ACTIVE)
+    self.assertEqual(sub_active.content, "Context compaction")
+
+    await proc.process_event({
+        "event_type": "step.stop",
+        "sub_interaction_id": "sub-conv-1",
+        "index": 1,
+    })
+    sub_done = proc.step_queue.get_nowait()
+    self.assertEqual(sub_done.type, types.StepType.COMPACTION)
+    self.assertEqual(sub_done.trajectory_id, "sub-conv-1")
+    self.assertEqual(sub_done.status, types.StepStatus.DONE)
+    self.assertTrue(proc.step_queue.empty())
+
+  async def test_invoke_subagent_step_maps_to_start_subagent(self):
+    proc = interactions_event_processor.InteractionsEventProcessor(
+        send_json_event_fn=self._send_json_event,
+        root_interaction_id="conv-1",
+    )
+    invoke_subagent_wire_name = (
+        local_connection_config.BUILTIN_TOOL_PROTO_FIELDS[
+            types.BuiltinTools.START_SUBAGENT
+        ]
+    )
+
+    await proc.process_event({
+        "event_type": "step.start",
+        "index": 1,
+        "step": {
+            "type": "function_call",
+            "id": "call-sub-1",
+            "name": invoke_subagent_wire_name,
+            "description": "Invoking subagent",
+            "arguments": {"TypeName": "self", "Prompt": "do work"},
+        },
+    })
+    await proc.process_event({"event_type": "step.stop", "index": 1})
+
+    step_call = proc.step_queue.get_nowait()
+    self.assertEqual(step_call.type, types.StepType.TOOL_CALL)
+    self.assertEqual(step_call.status, types.StepStatus.ACTIVE)
+    self.assertEqual(len(step_call.tool_calls), 1)
+    self.assertEqual(
+        step_call.tool_calls[0].name, types.BuiltinTools.START_SUBAGENT.value
+    )
+    self.assertEqual(
+        step_call.tool_calls[0].args,
+        {"TypeName": "self", "Prompt": "do work"},
+    )
+
+    await proc.process_event({
+        "event_type": "step.start",
+        "index": 2,
+        "step": {
+            "type": "function_result",
+            "call_id": "call-sub-1",
+            "name": invoke_subagent_wire_name,
+            "is_error": False,
+            "result": "sub-conv-1",
+        },
+    })
+    await proc.process_event({"event_type": "step.stop", "index": 2})
+
+    step_res = proc.step_queue.get_nowait()
+    self.assertEqual(step_res.type, types.StepType.TOOL_CALL)
+    self.assertEqual(step_res.status, types.StepStatus.DONE)
+    self.assertEqual(len(step_res.tool_calls), 1)
+    self.assertEqual(
+        step_res.tool_calls[0].name, types.BuiltinTools.START_SUBAGENT.value
+    )
+
+
+class UserInputStepDictToContentTest(absltest.TestCase):
+
+  def test_input_content_with_interleaved_slash_command(self):
+    got = interactions_event_processor._user_input_step_dict_to_content({
+        "type": "user_input",
+        "input_content": [
+            {"type": "text", "text": "Please"},
+            {"type": "slash_command", "name": "plan"},
+            {"type": "text", "text": "write a script"},
+        ],
+    })
+    self.assertEqual(
+        got,
+        [
+            "Please",
+            types.SlashCommand(name=types.BuiltinSlashCommandName.PLAN),
+            "write a script",
+        ],
+    )
+
+  def test_input_content_single_slash_command(self):
+    got = interactions_event_processor._user_input_step_dict_to_content({
+        "type": "user_input",
+        "input_content": [{"type": "slash_command", "name": "plan"}],
+    })
+    self.assertEqual(
+        got, types.SlashCommand(name=types.BuiltinSlashCommandName.PLAN)
+    )
+
+  def test_input_content_unknown_slash_command_only(self):
+    got = interactions_event_processor._user_input_step_dict_to_content({
+        "type": "user_input",
+        "input_content": [{"type": "slash_command", "name": "no-such-cmd"}],
+    })
+    self.assertEqual(got, "")
+
+  def test_input_content_unknown_slash_command_is_dropped(self):
+    got = interactions_event_processor._user_input_step_dict_to_content({
+        "type": "user_input",
+        "input_content": [
+            {"type": "text", "text": "Please"},
+            {"type": "slash_command", "name": "no-such-cmd"},
+            {"type": "text", "text": "write a script"},
+        ],
+    })
+    self.assertEqual(got, ["Please", "write a script"])
+
+  def test_input_content_media(self):
+    for item_type, mime_type, expected_class in (
+        ("image", "image/png", types.Image),
+        ("audio", "audio/mpeg", types.Audio),
+        ("video", "video/mp4", types.Video),
+        ("document", "application/pdf", types.Document),
+    ):
+      with self.subTest(item_type):
+        got = interactions_event_processor._user_input_step_dict_to_content({
+            "type": "user_input",
+            "input_content": [
+                {"type": "slash_command", "name": "plan"},
+                {
+                    "type": item_type,
+                    "mime_type": mime_type,
+                    "data": base64.b64encode(b"media bytes").decode("ascii"),
+                },
+            ],
+        })
+        self.assertIsInstance(got, list)
+        self.assertLen(got, 2)
+        self.assertEqual(
+            got[0],
+            types.SlashCommand(name=types.BuiltinSlashCommandName.PLAN),
+        )
+        self.assertIsInstance(got[1], expected_class)
+        self.assertEqual(got[1].mime_type, mime_type)
+        self.assertEqual(got[1].data, b"media bytes")
+
+  def test_input_content_unsupported_media_is_dropped(self):
+    got = interactions_event_processor._user_input_step_dict_to_content({
+        "type": "user_input",
+        "input_content": [
+            {"type": "text", "text": "hello"},
+            {
+                "type": "image",
+                "mime_type": "application/x-unsupported-custom",
+                "data": base64.b64encode(b"media bytes").decode("ascii"),
+            },
+        ],
+    })
+    self.assertEqual(got, "hello")
+
+  def test_content_string(self):
+    got = interactions_event_processor._user_input_step_dict_to_content(
+        {"type": "user_input", "content": "hello"}
+    )
+    self.assertEqual(got, "hello")
 
 
 if __name__ == "__main__":

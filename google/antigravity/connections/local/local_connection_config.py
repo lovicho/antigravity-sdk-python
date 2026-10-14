@@ -19,8 +19,6 @@ import os
 import pathlib
 import tempfile
 from typing import Any, Callable, Sequence
-import urllib.parse
-import urllib.request
 
 import pydantic
 
@@ -45,7 +43,7 @@ BUILTIN_TOOL_PROTO_FIELDS: dict[types.BuiltinTools, str] = {
     types.BuiltinTools.RUN_COMMAND: "run_command",
     types.BuiltinTools.SEARCH_DIR: "search_directory",
     types.BuiltinTools.VIEW_FILE: "view_file",
-    types.BuiltinTools.START_SUBAGENT: "invoke_subagent",
+    types.BuiltinTools.INVOKE_SUBAGENT: "invoke_subagent",
     types.BuiltinTools.RUN_WORKFLOW: "run_workflow",
     types.BuiltinTools.GENERATE_IMAGE: "generate_image",
     types.BuiltinTools.SEARCH_WEB: "search_web",
@@ -53,10 +51,12 @@ BUILTIN_TOOL_PROTO_FIELDS: dict[types.BuiltinTools, str] = {
     types.BuiltinTools.FINISH: "finish",
 }
 
-# Reverse map from canonical StepUpdate proto field name to SDK public
-# BuiltinTools value.
+# Reverse map from canonical StepUpdate proto field name to SDK tool name
+# (including harness-internal actions like skill_lookup that are not exposed
+# on the public BuiltinTools enum).
 PROTO_FIELD_TO_SDK_NAME: dict[str, str] = {
-    v: k.value for k, v in BUILTIN_TOOL_PROTO_FIELDS.items()
+    **{v: k.value for k, v in BUILTIN_TOOL_PROTO_FIELDS.items()},
+    "skill_lookup": "skill_lookup",
 }
 
 # Argument keys in tool call JSON payloads that carry wire-format URIs
@@ -71,64 +71,10 @@ WIRE_PATH_ARGUMENT_KEYS: frozenset[str] = frozenset({
     "ScriptPath",
 })
 
-
-def normalize_wire_path(path: str) -> str:
-  """Translates wire-format URIs to clean absolute filesystem paths.
-
-  Paths arrive as file:/// or cns:// URIs over the wire protocol.
-  This converts them to platform-native absolute paths that user code expects.
-  """
-  parsed = urllib.parse.urlparse(path)
-  if parsed.scheme == "file":
-    # urlparse("file:///abs/path").path == "/abs/path"
-    # url2pathname converts URL path to platform-native path
-    return urllib.request.url2pathname(parsed.path)
-  if parsed.scheme == "cns":
-    # urlparse("cns://el-d/home/user/...").netloc == "el-d"
-    # urlparse("cns://el-d/home/user/...").path == "/home/user/..."
-    # Convert to the canonical /cns/<cell>/... absolute path format.
-    return "/cns/" + parsed.netloc + parsed.path
-  return path
-
-
-def normalize_workspace_path(path: str | os.PathLike[str]) -> str:
-  """Normalizes wire URIs, expands user home ~, and resolves relative paths."""
-  path_str = os.fspath(path)
-  if not path_str:
-    return ""
-  normalized = normalize_wire_path(path_str)
-  if normalized.startswith("/cns/"):
-    return normalized
-  parsed = urllib.parse.urlparse(normalized)
-  if not parsed.scheme or parsed.scheme == "file":
-    return str(pathlib.Path(normalized).expanduser().resolve())
-  return normalized
-
-
-def normalize_workspace_paths(
-    workspaces: (
-        Sequence[str | os.PathLike[str]] | str | os.PathLike[str] | None
-    ),
-    *,
-    default_to_cwd: bool = False,
-) -> list[str]:
-  """Coerces single/sequence workspace paths and normalizes each entry."""
-  if workspaces is None:
-    return [os.getcwd()] if default_to_cwd else []
-  if isinstance(workspaces, (str, os.PathLike)):
-    return [normalize_workspace_path(workspaces)]
-  if isinstance(workspaces, (list, tuple, Sequence)) and not isinstance(
-      workspaces, (str, bytes)
-  ):
-    return [normalize_workspace_path(ws) for ws in workspaces]
-  raise ValueError(
-      f"workspaces must be a sequence of paths, got {type(workspaces).__name__}"
-  )
-
-
-def make_step_id(trajectory_id: str, step_index: int) -> str:
-  """Creates a unique step identifier from trajectory ID and step index."""
-  return f"{trajectory_id}:{step_index}" if trajectory_id else str(step_index)
+normalize_wire_path = connection.normalize_wire_path
+normalize_workspace_path = connection.normalize_workspace_path
+normalize_workspace_paths = connection.normalize_workspace_paths
+make_step_id = connection.make_step_id
 
 
 class BaseLocalAgentConfig(connection.AgentConfig):

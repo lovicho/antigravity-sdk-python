@@ -349,16 +349,19 @@ class InteractionsConfigConverterTest(absltest.TestCase):
           ]
       )
 
-    with self.assertRaises(types.AntigravityValidationError):
-      interactions_config_converter.build_create_interaction_event(
-          subagents=[
-              types.SubagentConfig(
-                  name="s_model",
-                  description="Model override unsupported",
-                  model="gemini-2.5-flash",
-              )
-          ]
-      )
+    ev_model = interactions_config_converter.build_create_interaction_event(
+        subagents=[
+            types.SubagentConfig(
+                name="s_model",
+                description="Pinned model subagent",
+                model="gemini-2.5-flash",
+            )
+        ]
+    )
+    sa_model = ev_model["agent_config"]["subagents_config"]["custom_subagents"][
+        0
+    ]
+    self.assertEqual(sa_model["model"], {"name": "gemini-2.5-flash"})
 
   def test_create_interaction_agent_config_fields(self):
     hr = hook_runner.HookRunner(
@@ -620,7 +623,24 @@ class InteractionsConfigConverterTest(absltest.TestCase):
         ev_sc,
         {
             "event_type": "input",
-            "slash_command": {"name": "plan"},
+            "input_content": [{"type": "slash_command", "name": "plan"}],
+        },
+    )
+
+    ev_sc_text = interactions_config_converter.content_to_user_input_event([
+        "Please",
+        types.SlashCommand(name=types.BuiltinSlashCommandName.PLAN),
+        "write a script",
+    ])
+    self.assertEqual(
+        ev_sc_text,
+        {
+            "event_type": "input",
+            "input_content": [
+                {"type": "text", "text": "Please"},
+                {"type": "slash_command", "name": "plan"},
+                {"type": "text", "text": "write a script"},
+            ],
         },
     )
 

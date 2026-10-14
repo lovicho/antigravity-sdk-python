@@ -25,7 +25,6 @@ from google.antigravity.connections.local import event_processor
 from google.antigravity.connections.local import interactions_config_converter
 from google.antigravity.connections.local import interactions_step_assembler
 from google.antigravity.connections.local import struct_converter
-from google.antigravity.connections.local.local_connection_config import make_step_id
 from google.antigravity.connections.local.local_connection_config import normalize_wire_path
 from google.antigravity.connections.local.local_connection_config import PROTO_FIELD_TO_SDK_NAME
 from google.antigravity.connections.local.local_connection_config import WIRE_PATH_ARGUMENT_KEYS
@@ -44,48 +43,59 @@ _STOP_REASON_JSON_MAP: dict[str, types.StopReason] = {
 }
 
 
+def _content_items_to_content(items: list[Any]) -> types.Content:
+  """Converts a list of GAOS Content / UserInputContent dicts into SDK Content."""
+  content_list: list[types.ContentPrimitive] = []
+  for item in items:
+    if not isinstance(item, dict):
+      continue
+    item_type = item.get("type")
+    if item_type == "text":
+      content_list.append(str(item.get("text", "")))
+    elif item_type == "slash_command":
+      try:
+        content_list.append(
+            types.SlashCommand(
+                name=types.BuiltinSlashCommandName(str(item.get("name", "")))
+            )
+        )
+      except ValueError:
+        pass
+    elif item_type in ("image", "audio", "video", "document"):
+      raw_b64 = item.get("data", "")
+      data_bytes = (
+          base64.b64decode(raw_b64) if isinstance(raw_b64, str) else b""
+      )
+      try:
+        content_list.append(
+            types.from_bytes(
+                data=data_bytes,
+                mime_type=str(item.get("mime_type", "")),
+            )
+        )
+      except ValueError:
+        pass
+  if not content_list:
+    return ""
+  if len(content_list) == 1:
+    return content_list[0]
+  return content_list
+
+
 def _user_input_step_dict_to_content(ui_dict: dict[str, Any]) -> types.Content:
   """Converts a GAOS UserInputStep dict directly into SDK types.Content."""
+  input_content = ui_dict.get("input_content")
+  if isinstance(input_content, list) and input_content:
+    return _content_items_to_content(input_content)
   content = ui_dict.get("content")
   if isinstance(content, str):
     return content
   if isinstance(content, dict):
-    if "name" in content and "type" not in content:
-      try:
-        sc_name = types.BuiltinSlashCommandName(str(content["name"]))
-        return types.SlashCommand(name=sc_name)
-      except ValueError:
-        return ""
     if content.get("type") == "text":
       return str(content.get("text", ""))
     return ""
   if isinstance(content, list):
-    content_list: list[types.ContentPrimitive] = []
-    for item in content:
-      if not isinstance(item, dict):
-        continue
-      item_type = item.get("type")
-      if item_type == "text":
-        content_list.append(str(item.get("text", "")))
-      elif item_type in ("image", "audio", "video", "document"):
-        raw_b64 = item.get("data", "")
-        data_bytes = (
-            base64.b64decode(raw_b64) if isinstance(raw_b64, str) else b""
-        )
-        try:
-          content_list.append(
-              types.from_bytes(
-                  data=data_bytes,
-                  mime_type=str(item.get("mime_type", "")),
-              )
-          )
-        except ValueError:
-          pass
-    if not content_list:
-      return ""
-    if len(content_list) == 1:
-      return content_list[0]
-    return content_list
+    return _content_items_to_content(content)
   return ""
 
 
@@ -178,20 +188,7 @@ class InteractionsEventProcessor(event_processor.BaseLocalEventProcessor):
     if event_type == "step.stop":
       res = self._step_assembler.handle_step_stop(event)
       if res.step_usage is not None:
-        self._cumulative_usage = self._cumulative_usage + res.step_usage
-        traj_id = (
-            res.trajectory_id
-            or self._step_assembler.root_interaction_id
-            or self.main_trajectory_id
-            or ""
-        )
-        if traj_id:
-          prev = self._trajectory_usages.get(traj_id)
-          self._trajectory_usages[traj_id] = (
-              (prev + res.step_usage)
-              if prev is not None
-              else res.step_usage.model_copy()
-          )
+        self._record_step_usage(res.step_usage, res.trajectory_id)
       if res.step is not None:
         await self._emit_step(
             res.step,
@@ -200,9 +197,38 @@ class InteractionsEventProcessor(event_processor.BaseLocalEventProcessor):
         )
       return
 
+    if event_type == "usage_update":
+      usage_payload = (
+          event["usage_update"]
+          if isinstance(event.get("usage_update"), dict)
+          else event
+      )
+      step_usage = interactions_step_assembler.parse_interaction_usage(
+          usage_payload
+      )
+      if step_usage is not None:
+        sub_id = str(event.get("sub_interaction_id") or "")
+        self._record_step_usage(step_usage, sub_id)
+      return
+
     if event_type == "state_update":
       await self._handle_state_update(event)
       return
+
+  def _record_step_usage(
+      self, step_usage: types.UsageMetadata, trajectory_id: str = ""
+  ) -> None:
+    """Accumulates per-step UsageMetadata into cumulative and trajectory totals."""
+    self._cumulative_usage = self._cumulative_usage + step_usage
+    traj_id = (
+        trajectory_id
+        or self._step_assembler.root_interaction_id
+        or self.main_trajectory_id
+        or ""
+    )
+    if traj_id:
+      prev = self._trajectory_usages.get(traj_id, types.UsageMetadata())
+      self._trajectory_usages[traj_id] = prev + step_usage
 
   def _build_compaction_step(
       self, event: dict[str, Any]
@@ -215,7 +241,7 @@ class InteractionsEventProcessor(event_processor.BaseLocalEventProcessor):
     step_idx = int(oca.get("step_index", 0))
     summary = str(oca.get("summary", ""))
     return event_processor.LocalConnectionStep(
-        id=make_step_id(traj_id, step_idx),
+        id=f"{traj_id}:{step_idx}" if traj_id else str(step_idx),
         step_index=step_idx,
         trajectory_id=traj_id,
         type=types.StepType.COMPACTION,
@@ -227,12 +253,6 @@ class InteractionsEventProcessor(event_processor.BaseLocalEventProcessor):
 
   async def _handle_call_hook_request(self, event: dict[str, Any]) -> None:
     """Handles a GAOS call_hook_request event directly against HookRunner."""
-    if str(event.get("type", "")) == "on_compaction":
-      compaction_step = self._build_compaction_step(event)
-      await self._emit_step(
-          compaction_step, dispatch_pre=True, dispatch_post=True
-      )
-
     self._run_in_background(self._dispatch_hook_request(event))
 
   async def _dispatch_hook_request(self, event: dict[str, Any]) -> None:
@@ -328,9 +348,7 @@ class InteractionsEventProcessor(event_processor.BaseLocalEventProcessor):
         server_name = str(pta["server_name"])
       if pta.get("call_id"):
         call_id = str(pta["call_id"])
-      traj_id = str(pta.get("interaction_id") or pta.get("trajectory_id") or "")
-      if traj_id or "step_index" in pta:
-        step_id = make_step_id(traj_id, int(pta.get("step_index", 0)))
+        step_id = call_id
       for key in WIRE_PATH_ARGUMENT_KEYS:
         val = args.get(key)
         if isinstance(val, str) and val:
@@ -376,20 +394,17 @@ class InteractionsEventProcessor(event_processor.BaseLocalEventProcessor):
     call_id: str | None = None
     step_id: str | None = None
     result_val: Any = None
-    error_str = ""
     pta = event.get("post_tool_args")
     if isinstance(pta, dict):
       raw_tool_name = str(pta.get("tool_name", ""))
       tool_name = PROTO_FIELD_TO_SDK_NAME.get(raw_tool_name, raw_tool_name)
       server_name = str(pta["server_name"]) if pta.get("server_name") else None
-      call_id = str(pta["call_id"]) if pta.get("call_id") else None
-      traj_id = str(pta.get("interaction_id") or pta.get("trajectory_id") or "")
-      if traj_id or "step_index" in pta:
-        step_id = make_step_id(traj_id, int(pta.get("step_index", 0)))
+      if pta.get("call_id"):
+        call_id = str(pta["call_id"])
+        step_id = call_id
       raw_result = str(pta.get("result", ""))
-      error_str = str(pta.get("error", ""))
-      result_val = raw_result if not error_str else None
-      if not error_str and raw_result:
+      result_val = raw_result
+      if raw_result:
         extracted = event_processor._extract_tool_result(  # pylint: disable=protected-access
             tool_name, raw_result
         )
@@ -402,7 +417,6 @@ class InteractionsEventProcessor(event_processor.BaseLocalEventProcessor):
         step_id=step_id,
         server_name=server_name,
         result=result_val,
-        error=error_str or None,
     )
     turn_ctx = self._get_turn_context()
     op_ctx = hooks.OperationContext(turn_ctx)
@@ -425,10 +439,9 @@ class InteractionsEventProcessor(event_processor.BaseLocalEventProcessor):
       raw_tool_name = str(ote.get("tool_name", ""))
       tool_name = PROTO_FIELD_TO_SDK_NAME.get(raw_tool_name, raw_tool_name)
       server_name = str(ote["server_name"]) if ote.get("server_name") else None
-      call_id = str(ote["call_id"]) if ote.get("call_id") else None
-      traj_id = str(ote.get("interaction_id") or ote.get("trajectory_id") or "")
-      if traj_id or "step_index" in ote:
-        step_id = make_step_id(traj_id, int(ote.get("step_index", 0)))
+      if ote.get("call_id"):
+        call_id = str(ote["call_id"])
+        step_id = call_id
 
     error = types.ToolExecutionError(
         error_message, tool_name, server_name, call_id=call_id, step_id=step_id

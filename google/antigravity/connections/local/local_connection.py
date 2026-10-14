@@ -137,6 +137,8 @@ def build_gemini_options_proto(
         proto.service_tier = str(options.service_tier.value)
       else:
         proto.service_tier = str(options.service_tier)
+    if options.max_output_tokens is not None:
+      proto.max_output_tokens = options.max_output_tokens
   return proto
 
 
@@ -1040,7 +1042,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
 
     if isinstance(cfg, types.CapabilitiesConfig):
       subagent_enabled = cfg.enable_subagents and (
-          types.BuiltinTools.START_SUBAGENT in active_tools
+          types.BuiltinTools.INVOKE_SUBAGENT in active_tools
       )
       run_workflow_enabled = cfg.enable_subagents and (
           types.BuiltinTools.RUN_WORKFLOW in active_tools
@@ -1048,7 +1050,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
       max_depth = cfg.max_subagent_depth
       allowed_subagents = cfg.allowed_subagents or []
     elif isinstance(cfg, types.SubagentCapabilities):
-      subagent_enabled = types.BuiltinTools.START_SUBAGENT in active_tools
+      subagent_enabled = types.BuiltinTools.INVOKE_SUBAGENT in active_tools
       run_workflow_enabled = types.BuiltinTools.RUN_WORKFLOW in active_tools
       allowed_subagents = cfg.allowed_subagents or []
 
@@ -1370,6 +1372,11 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
       trunc_proto = build_tool_output_truncation_proto(truncation_config)
       if trunc_proto is not None:
         harness_config.tool_output_truncation.CopyFrom(trunc_proto)
+
+    if self._capabilities_config.mcp_max_output_bytes is not None:
+      harness_config.mcp_max_output_bytes = (
+          self._capabilities_config.mcp_max_output_bytes
+      )
 
     if self._policies:
       policy_config, self._dynamic_policy_map = policy._to_policy_config_proto(

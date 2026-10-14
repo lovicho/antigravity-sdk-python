@@ -2570,7 +2570,7 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
         name="researcher",
         description="Does research",
         capabilities=types.SubagentCapabilities(
-            enabled_tools=[types.BuiltinTools.START_SUBAGENT],
+            enabled_tools=[types.BuiltinTools.INVOKE_SUBAGENT],
             allowed_subagents=["fact_checker"],
         ),
     )
@@ -2918,6 +2918,64 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
         config.models[0].vertex_endpoint.options.service_tier, "priority"
     )
 
+  def test_models_max_output_tokens_set(self):
+    """Verifies that max_output_tokens on ModelTarget maps to the proto field."""
+    strategy = self._make_strategy(
+        models=[
+            types.ModelTarget(
+                name=models_lib.DEFAULT_MODEL,
+                types=[types.ModelType.TEXT],
+                endpoint=types.GeminiAPIEndpoint(
+                    options=types.GeminiModelOptions(
+                        max_output_tokens=262144,
+                    ),
+                ),
+            )
+        ]
+    )
+    config = strategy._build_harness_config()
+    self.assertEqual(
+        config.models[0].gemini_api_endpoint.options.max_output_tokens, 262144
+    )
+
+  def test_models_max_output_tokens_none_omitted(self):
+    """Verifies that max_output_tokens=None leaves the proto field at its default."""
+    strategy = self._make_strategy(
+        models=[
+            types.ModelTarget(
+                name=models_lib.DEFAULT_MODEL,
+                types=[types.ModelType.TEXT],
+                endpoint=types.GeminiAPIEndpoint(
+                    options=types.GeminiModelOptions(max_output_tokens=None),
+                ),
+            )
+        ]
+    )
+    config = strategy._build_harness_config()
+    self.assertFalse(config.models[0].gemini_api_endpoint.HasField("options"))
+
+  def test_vertex_endpoint_max_output_tokens_set(self):
+    """Verifies that max_output_tokens on VertexEndpoint maps to the proto field."""
+    strategy = self._make_strategy(
+        models=[
+            types.ModelTarget(
+                name=models_lib.DEFAULT_MODEL,
+                types=[types.ModelType.TEXT],
+                endpoint=types.VertexEndpoint(
+                    project="test-project",
+                    location="us-central1",
+                    options=types.GeminiModelOptions(
+                        max_output_tokens=262144,
+                    ),
+                ),
+            )
+        ]
+    )
+    config = strategy._build_harness_config()
+    self.assertEqual(
+        config.models[0].vertex_endpoint.options.max_output_tokens, 262144
+    )
+
   def test_vertex_config_propagates(self):
     """Verifies that Vertex configuration fields propagate to proto."""
     models = [
@@ -3077,7 +3135,7 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
           testcase_name="via_disabled_tools",
           capabilities_config=types.CapabilitiesConfig(
               enable_subagents=True,
-              disabled_tools=[types.BuiltinTools.START_SUBAGENT],
+              disabled_tools=[types.BuiltinTools.INVOKE_SUBAGENT],
           ),
       ),
       dict(
@@ -4565,7 +4623,7 @@ class LocalConnectionSubagentHookTest(unittest.IsolatedAsyncioTestCase):
   """Tests for subagent hook dispatch via tool hooks.
 
   Subagent invocations are treated as tool calls with the name
-  START_SUBAGENT. Pre- and post-tool-call hooks receive the subagent
+  INVOKE_SUBAGENT. Pre- and post-tool-call hooks receive the subagent
   data using standard tool hook dispatch.
   """
 
@@ -5719,7 +5777,7 @@ class LocalAgentConfigTest(absltest.TestCase):
         name="researcher",
         description="researcher",
         capabilities=types.SubagentCapabilities(
-            enabled_tools=[types.BuiltinTools.START_SUBAGENT],
+            enabled_tools=[types.BuiltinTools.INVOKE_SUBAGENT],
             allowed_subagents=["ghost_agent"],
         ),
     )
@@ -5746,6 +5804,7 @@ class LocalAgentConfigTest(absltest.TestCase):
     config = local_connection_config.LocalAgentConfig(
         system_instructions="test",
         mcp_servers=[stdio_cfg, sse_cfg],
+        capabilities=types.CapabilitiesConfig(mcp_max_output_bytes=65536),
         api_key="fake",
     )
 
@@ -5763,6 +5822,8 @@ class LocalAgentConfigTest(absltest.TestCase):
 
     harness_pb = strategy._build_harness_config()
 
+    self.assertTrue(harness_pb.HasField("mcp_max_output_bytes"))
+    self.assertEqual(harness_pb.mcp_max_output_bytes, 65536)
     self.assertLen(harness_pb.mcp_servers, 2)
 
     stdio_pb = harness_pb.mcp_servers[0]
@@ -6367,14 +6428,14 @@ class LocalConnectionSubagentsTest(unittest.IsolatedAsyncioTestCase):
     ):
       strategy._build_harness_config()
 
-  def test_subagent_with_start_subagent_enables_nested_delegation(self):
-    """Verifies subagents with START_SUBAGENT get subagents.enabled=True."""
+  def test_subagent_with_invoke_subagent_enables_nested_delegation(self):
+    """Verifies subagents with INVOKE_SUBAGENT get subagents.enabled=True."""
     subagent = types.SubagentConfig(
         name="nested_helper",
         description="A subagent that can spawn subagents",
         system_instructions="Spawn subagents.",
         capabilities=types.SubagentCapabilities(
-            enabled_tools=[types.BuiltinTools.START_SUBAGENT],
+            enabled_tools=[types.BuiltinTools.INVOKE_SUBAGENT],
         ),
     )
 

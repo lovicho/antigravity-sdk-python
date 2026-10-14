@@ -116,6 +116,7 @@ message HarnessConfig {
   .antigravity.localharness.CompactionConfig compaction_config = 24;
   .antigravity.localharness.SkillsConfig skills_config = 27;
   .antigravity.localharness.RulesConfig rules_config = 28;
+  int32 mcp_max_output_bytes = 29;
   extensions 1000 to 1999;
   extensions 2000 to max;
 }
@@ -146,6 +147,7 @@ message FilesystemWorkspace {
 message GeminiModelOptions {
   string thinking_level = 1;
   string service_tier = 2;
+  int32 max_output_tokens = 3;
 }
 message GeminiAPIEndpoint {
   string base_url = 1;
@@ -895,4 +897,5 @@ message CompactionConfig {
   uint32 checkpoint_interval_tokens = 2;
   uint32 max_context_tokens = 3;
   string summary_prompt_override = 4;
+  bool use_model_reported_token_count = 5;
 }

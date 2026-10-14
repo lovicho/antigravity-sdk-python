@@ -62,6 +62,34 @@ def _get_type_hints(target: Any) -> dict[str, Any]:
 
 
 @functools.lru_cache(maxsize=512)
+def _cached_callable_signature_and_hints(
+    target: Any,
+) -> tuple[inspect.Signature | None, dict[str, Any]]:
+  """Inspects and returns a signature and type hints tuple, cached."""
+  try:
+    sig = inspect.signature(target)
+  except (ValueError, TypeError):
+    sig = None
+  hints = _get_type_hints(target)
+  return sig, hints
+
+
+def _get_callable_signature_and_hints(
+    target: Any,
+) -> tuple[inspect.Signature | None, dict[str, Any]]:
+  """Returns the signature and type hints for a callable, caching when hashable."""
+  try:
+    return _cached_callable_signature_and_hints(target)
+  except TypeError:
+    try:
+      sig = inspect.signature(target)
+    except (ValueError, TypeError):
+      sig = None
+    hints = _get_type_hints(target)
+    return sig, hints
+
+
+@functools.lru_cache(maxsize=512)
 def _cached_type_adapter(ann: Any) -> pydantic.TypeAdapter[Any] | None:
   """Returns a cached Pydantic TypeAdapter for the given annotation, if valid."""
   try:
@@ -87,16 +115,7 @@ def _is_tool_context_ast_node(node: ast.AST) -> bool:
   if isinstance(node, ast.Name):
     return node.id == "ToolContext"
   if isinstance(node, ast.Attribute):
-    return node.attr == "ToolContext" and (
-        (
-            isinstance(node.value, ast.Name)
-            and node.value.id in ("tool_context", "tool_context_module")
-        )
-        or (
-            isinstance(node.value, ast.Attribute)
-            and node.value.attr == "tool_context"
-        )
-    )
+    return node.attr == "ToolContext"
   if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
     return _is_tool_context_ast_node(node.left) or _is_tool_context_ast_node(
         node.right
@@ -162,7 +181,7 @@ def _find_context_param(fn: Callable[..., Any]) -> str | None:
   target = fn
   while isinstance(target, ToolWithSchema):
     target = target.fn
-  hints = _get_type_hints(target)
+  sig, hints = _get_callable_signature_and_hints(target)
 
   for name, ann in hints.items():
     if name == "return":
@@ -171,16 +190,13 @@ def _find_context_param(fn: Callable[..., Any]) -> str | None:
       return name
 
   # Fallback to direct inspection of signature parameter annotations
-  try:
-    sig = inspect.signature(target)
+  if sig is not None:
     for name, param in sig.parameters.items():
       ann = param.annotation
       if ann is inspect.Parameter.empty:
         continue
       if _is_tool_context_annotation(ann):
         return name
-  except (ValueError, TypeError):
-    pass
 
   return None
 
@@ -396,15 +412,16 @@ class ToolRunner:
       self, fn: Callable[..., Any], kwargs: dict[str, Any]
   ) -> dict[str, Any]:
     """Coerces keyword arguments to match function type annotations using pydantic."""
+    if not kwargs:
+      return kwargs
+
     target = fn
     while isinstance(target, ToolWithSchema):
       target = target.fn
-    try:
-      sig = inspect.signature(target)
-    except (ValueError, TypeError):
-      return kwargs
 
-    hints = _get_type_hints(target)
+    sig, hints = _get_callable_signature_and_hints(target)
+    if sig is None:
+      return kwargs
 
     coerced = {}
     for name, param in sig.parameters.items():
