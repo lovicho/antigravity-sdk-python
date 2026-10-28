@@ -40,12 +40,12 @@ import websockets
 from google.antigravity.proto import localharness_pb2
 from google.antigravity import models as models_lib
 from google.antigravity import types
+from google.antigravity.connections import struct_converter
 from google.antigravity.connections.local import event_processor
 from google.antigravity.connections.local import litert_connection_config
 from google.antigravity.connections.local import local_connection
 from google.antigravity.connections.local import local_connection_config
 from google.antigravity.connections.local import local_openai_connection_config
-from google.antigravity.connections.local import struct_converter
 from google.antigravity.connections.local import test_utils
 from google.antigravity.hooks import hook_runner
 from google.antigravity.hooks import hooks as hooks_base
@@ -2156,12 +2156,16 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
     """Verifies that CustomSystemInstructions sets custom on the proto."""
     strategy = self._make_strategy(
         system_instructions=types.CustomSystemInstructions(
-            text="Override everything."
+            text="Override everything.",
+            title="my_title",
         )
     )
     config = strategy._build_harness_config()
     self.assertEqual(
         config.system_instructions.custom.part[0].text, "Override everything."
+    )
+    self.assertEqual(
+        config.system_instructions.custom.part[0].title, "my_title"
     )
 
   def test_system_instructions_model_templated(self):

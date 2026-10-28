@@ -161,6 +161,9 @@ class CustomSystemInstructions(pydantic.BaseModel):
   """
 
   text: str
+  # Optional prompt-section title; renders the text under <title> tags
+  # instead of the generic <System>.
+  title: str | None = None
 
 
 class TemplatedSystemInstructions(pydantic.BaseModel):
@@ -2044,7 +2047,7 @@ def _read_file_safely(path: str | pathlib.Path) -> bytes:
       PermissionError: If the file is not readable.
       OSError: For other filesystem errors.
   """
-  file_path = pathlib.Path(path)
+  file_path = pathlib.Path(path).expanduser()
   try:
     return file_path.read_bytes()
   except FileNotFoundError as exc:
@@ -2076,7 +2079,7 @@ def _read_file_and_guess_mime(
   Raises:
       ValueError: If the MIME type cannot be guessed.
   """
-  file_path = pathlib.Path(path)
+  file_path = pathlib.Path(path).expanduser()
   data = _read_file_safely(file_path)
   mime_guess, _ = mimetypes.guess_type(file_path)
   if not mime_guess:
@@ -2099,11 +2102,12 @@ class _BaseMedia(pydantic.BaseModel):
   @classmethod
   def _validate_mime_type(cls, v: str) -> str:
     """Validates that the MIME type is supported for this media type."""
+    normalized = v.strip().lower()
     if cls is _BaseMedia:
-      return v
-    if v not in cls._SUPPORTED_MIMES:
+      return normalized
+    if normalized not in cls._SUPPORTED_MIMES:
       raise ValueError(f"Unsupported {cls.__name__} MIME type: '{v}'")
-    return v
+    return normalized
 
   @classmethod
   def from_file(
@@ -2231,7 +2235,8 @@ def from_bytes(
   Raises:
       ValueError: If the MIME type is unsupported.
   """
-  media_cls = _MIME_TO_MEDIA_CLASS.get(mime_type)
+  normalized_mime = mime_type.strip().lower()
+  media_cls = _MIME_TO_MEDIA_CLASS.get(normalized_mime)
   if media_cls is None:
     raise ValueError(
         f"Unsupported MIME type: '{mime_type}'. "
@@ -2239,5 +2244,5 @@ def from_bytes(
     )
   return cast(
       Image | Document | Audio | Video,
-      media_cls(data=data, mime_type=mime_type, description=description),
+      media_cls(data=data, mime_type=normalized_mime, description=description),
   )
