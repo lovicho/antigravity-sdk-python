@@ -16,6 +16,7 @@ edition = "2023";
 
 package genai;
 
+import "google/antigravity/proto/agent_tools.proto";
 import "google/antigravity/proto/content.proto";
 import "google/antigravity/proto/elicitation.proto";
 import "google/antigravity/proto/user_steps.proto";
@@ -46,6 +47,7 @@ message Step {
     .genai.ElicitationCallStep elicitation_call = 13;
     .genai.ElicitationResultStep elicitation_result = 14;
     .genai.CompactionStep compaction = 11;
+    .genai.HarnessMessageStep harness_message = 29;
     .genai.UserInputStep user_input = 1;
     .genai.ModelOutputStep model_output = 2;
     .genai.LegacyTextContent text = 6;
@@ -83,6 +85,7 @@ message ToolCallStep {
     .genai.GoogleSearchCallStep google_search_call = 7;
     .genai.FileSearchCallStep file_search_call = 8;
     .genai.GoogleMapsCallStep google_maps_call = 9;
+    .genai.ToolSearchCallStep tool_search_call = 11;
     .genai.FindFileCallStep find_file_call = 12;
     .genai.ListDirectoryCallStep list_directory_call = 13;
     .genai.SearchDirectoryCallStep search_directory_call = 14;
@@ -91,12 +94,20 @@ message ToolCallStep {
     .genai.GenerateImageCallStep generate_image_call = 17;
     .genai.ProcessingCallStep processing_call = 18;
     .genai.SkillLookupCallStep skill_lookup_call = 19;
+    .genai.ExperimentalToolCallStep experimental_tool_call = 25;
+    .genai.ManageTaskCallStep manage_task_call = 26;
+    .genai.FinishCallStep finish_call = 27;
+    .genai.AgentToolCallStep agent_tool_call = 28;
   }
 }
 message ToolResultStep {
+  message BackgroundTask {
+    string task_id = 1;
+  }
   string call_id = 1;
   bytes signature = 2;
   string error = 20;
+  .genai.ToolResultStep.BackgroundTask background = 22;
   oneof type {
     option (gaos.parsing.subtype_source) = true;
 
@@ -107,6 +118,7 @@ message ToolResultStep {
     .genai.McpServerToolResultStep mcp_server_tool_result = 7;
     .genai.FileSearchResultStep file_search_result = 8;
     .genai.GoogleMapsResultStep google_maps_result = 9;
+    .genai.ToolSearchResultStep tool_search_result = 11;
     .genai.FindFileResultStep find_file_result = 12;
     .genai.ListDirectoryResultStep list_directory_result = 13;
     .genai.SearchDirectoryResultStep search_directory_result = 14;
@@ -115,6 +127,10 @@ message ToolResultStep {
     .genai.GenerateImageResultStep generate_image_result = 16;
     .genai.ProcessingResultStep processing_result = 17;
     .genai.SkillLookupResultStep skill_lookup_result = 19;
+    .genai.ExperimentalToolResultStep experimental_tool_result = 25;
+    .genai.ManageTaskResultStep manage_task_result = 26;
+    .genai.FinishResultStep finish_result = 27;
+    .genai.AgentToolResultStep agent_tool_result = 28;
   }
 }
 message FunctionCallStep {
@@ -133,6 +149,7 @@ message CodeExecutionCallStep {
     string code = 2;
   }
   .genai.CodeExecutionCallStep.CodeExecutionCallStepArguments arguments = 1;
+  string working_directory = 2;
 }
 message UrlContextCallStep {
   message UrlContextCallStepArguments {
@@ -159,6 +176,18 @@ message GoogleMapsCallStep {
   }
   .genai.GoogleMapsCallStep.GoogleMapsCallStepArguments arguments = 1;
 }
+message ToolSearchCallStep {
+  message ToolSearchCallStepArguments {
+    repeated string function_names = 1;
+  }
+  .genai.ToolSearchCallStep.ToolSearchCallStepArguments arguments = 1;
+}
+message ToolSearchResultStep {
+  repeated .genai.Function result = 1 [
+    (gaos.parsing.json_discriminator) = "type",
+    (gaos.parsing.json_discriminator_value) = "function"
+  ];
+}
 message ProcessingCallStep {}
 message ProcessingResultStep {}
 message FunctionResultStep {
@@ -175,7 +204,14 @@ message FunctionResultStep {
   ];
 }
 message CodeExecutionResultStep {
-  string result = 1;
+  oneof output {
+    option (gaos.parsing.is_union) = true;
+    option (gaos.parsing.is_required) = true;
+    option (gaos.parsing.union_name) = "result";
+
+    string result = 1;
+    .genai.ContentList content = 5;
+  }
   bool is_error = 2;
   int32 exit_code = 3;
 }
@@ -242,6 +278,7 @@ message LegacyImageContent {
     string uri = 3;
   }
   .genai.MediaResolution resolution = 4;
+  string name = 16;
 }
 message LegacyAudioContent {
   .genai.AudioContent.MimeType mime_type = 1
@@ -254,6 +291,13 @@ message LegacyAudioContent {
   int32 rate = 4;
   int32 channels = 5;
   int32 sample_rate = 6;
+  oneof processing {
+    option (gaos.parsing.is_union) = true;
+
+    .genai.AudioContent.Processing processing_type = 17;
+    .genai.AudioContent.MediaProcessing processing_config = 18;
+  }
+  string name = 16;
 }
 message LegacyDocumentContent {
   .genai.DocumentContent.MimeType mime_type = 1
@@ -263,6 +307,14 @@ message LegacyDocumentContent {
     bytes data = 2;
     string uri = 3;
   }
+  .genai.MediaResolution resolution = 17;
+  oneof processing {
+    option (gaos.parsing.is_union) = true;
+
+    .genai.DocumentContent.Processing processing_type = 18;
+    .genai.DocumentContent.MediaProcessing processing_config = 19;
+  }
+  string name = 16;
 }
 message LegacyVideoContent {
   .genai.VideoContent.MimeType mime_type = 1
@@ -328,6 +380,9 @@ message ViewFileCallStep {
 }
 message ViewFileResultStep {
   string error_message = 1;
+  int32 start_line = 2;
+  int32 end_line = 3;
+  int32 total_lines = 4;
 }
 message EditFileCallStep {
   string file_path = 1;
@@ -372,3 +427,54 @@ message SkillLookupResultStep {
   repeated string resolved_skill_names = 1;
   string error_message = 2;
 }
+message ExperimentalToolCallStep {
+  string name = 1;
+  bytes internal_data = 2;
+}
+message ExperimentalToolResultStep {
+  string name = 1;
+  bytes internal_data = 2;
+}
+message ManageTaskCallStep {
+  enum Action {
+    ACTION_UNSPECIFIED = 0;
+    ACTION_LIST = 1;
+    ACTION_STATUS = 2;
+    ACTION_SEND_INPUT = 3;
+    ACTION_KILL = 4;
+  }
+  .genai.ManageTaskCallStep.Action action = 1;
+  string task_id = 2;
+  string input = 3;
+}
+message ManageTaskResultStep {
+  message Task {
+    string task_id = 1;
+    .genai.ManageTaskResultStep.Status status = 2;
+  }
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    STATUS_RUNNING = 1;
+    STATUS_COMPLETED = 2;
+    STATUS_FAILED = 3;
+    STATUS_CANCELLED = 4;
+  }
+  repeated .genai.ManageTaskResultStep.Task tasks = 1;
+}
+message HarnessMessageStep {
+  message ToolOrigin {
+    string call_id = 1;
+  }
+  message InteractionOrigin {
+    string interaction_id = 1;
+  }
+  oneof origin {
+    .genai.HarnessMessageStep.ToolOrigin tool = 1;
+    .genai.HarnessMessageStep.InteractionOrigin interaction = 2;
+  }
+  repeated .genai.Content content = 3;
+}
+message FinishCallStep {
+  .genai.Struct arguments = 1;
+}
+message FinishResultStep {}

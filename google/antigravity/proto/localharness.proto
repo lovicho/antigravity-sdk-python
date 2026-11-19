@@ -37,6 +37,14 @@ enum AgentBehavior {
   AGENT_BEHAVIOR_INTERACTIVE = 2;
   AGENT_BEHAVIOR_MINIMAL = 3;
 }
+enum ThinkingEffort {
+  THINKING_EFFORT_UNSPECIFIED = 0;
+  THINKING_EFFORT_MINIMAL = 1;
+  THINKING_EFFORT_LOW = 2;
+  THINKING_EFFORT_MEDIUM = 3;
+  THINKING_EFFORT_HIGH = 4;
+  THINKING_EFFORT_MAX = 5;
+}
 enum ModelType {
   MODEL_TYPE_UNSPECIFIED = 0;
   MODEL_TYPE_TEXT = 1;
@@ -73,7 +81,6 @@ message InputConfig {
   string bind_address = 3 [default = "localhost"];
   .antigravity.localharness.ClientInfo client_info = 4;
   map<string, string> env = 5;
-  bool use_interactions_api = 6;
 }
 message InitializeConversationEvent {
   .antigravity.localharness.HarnessConfig config = 1;
@@ -913,10 +920,16 @@ message BudgetConfig {
   .antigravity.localharness.BudgetConfig.BudgetScope scope = 6;
 }
 message CompactionConfig {
+  message StepCompaction {
+    int32 max_inline_frames = 1;
+    int64 media_byte_threshold = 2;
+    string note_line_prefix = 3;
+  }
   uint32 token_threshold = 1;
   uint32 checkpoint_interval_tokens = 2;
   uint32 max_context_tokens = 3;
   string summary_prompt_override = 4;
   bool use_model_reported_token_count = 5;
   bool include_last_user_message = 6;
+  .antigravity.localharness.CompactionConfig.StepCompaction step_compaction = 7;
 }

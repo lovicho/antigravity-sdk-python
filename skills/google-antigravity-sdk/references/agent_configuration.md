@@ -10,7 +10,7 @@ Google Antigravity SDK agents.
 
 ### Default Model
 
-Google Antigravity SDK's default model is `gemini-3.8-flash`.
+Google Antigravity SDK's default model is `gemini-4-hydrogen`.
 
 ### Default Image Generation Model
 
@@ -43,7 +43,7 @@ Here are small code snippets demonstrating advanced configurations using
 from google.antigravity import Agent, LocalAgentConfig
 
 config = LocalAgentConfig(
-    model="gemini-3.8-flash",
+    model="gemini-4-hydrogen",
 )
 async with Agent(config=config) as agent:
     # Use the agent
@@ -78,6 +78,25 @@ async with Agent(config=config) as agent:
 
 > [!NOTE]
 > `agent_behavior` defaults to `AgentBehavior.AUTONOMOUS`. If you enable interactive tools such as `BuiltinTools.ASK_QUESTION` without setting `agent_behavior=AgentBehavior.INTERACTIVE`, a validation warning will be logged.
+
+### Thinking Level (`ThinkingLevel`)
+
+Configure reasoning effort via `GeminiModelOptions(thinking_level=...)` using `types.ThinkingLevel` (`MINIMAL`, `LOW`, `MEDIUM`, `HIGH`, `EXTRA_HIGH`):
+
+```python
+from google.antigravity import LocalAgentConfig, types
+
+config = LocalAgentConfig(
+    model=types.ModelTarget(
+        name="gemini-4-hydrogen",
+        endpoint=types.GeminiAPIEndpoint(
+            options=types.GeminiModelOptions(
+                thinking_level=types.ThinkingLevel.EXTRA_HIGH,
+            ),
+        ),
+    ),
+)
+```
 
 ### Nested Subagents & Depth Controls (`max_subagent_depth`, `allowed_subagents`)
 
@@ -149,21 +168,27 @@ only the `api_key` and `vertex=True` are required.
 
 ### Prioritized Inference (`service_tier="priority"`)
 
-To enable Gemini Prioritized Inference, manually construct a `GeminiAPIEndpoint`
-or `VertexEndpoint` with `GeminiModelOptions`:
+To enable Gemini Prioritized Inference, construct a `GeminiAPIEndpoint` or
+`VertexEndpoint` with `GeminiModelOptions` and pass it via `ModelTarget`:
 
 ```python
 from google.antigravity import (
     Agent,
     GeminiAPIEndpoint,
     LocalAgentConfig,
+    ModelTarget,
     types,
 )
 
-# Configure priority inference by manually constructing an endpoint.
+# Configure priority inference by attaching an endpoint to a ModelTarget.
 options = types.GeminiModelOptions(service_tier=types.ServiceTier.PRIORITY)
 endpoint = GeminiAPIEndpoint(options=options)
-config = LocalAgentConfig(endpoint=endpoint)
+config = LocalAgentConfig(
+    model=ModelTarget(
+        name="gemini-4-hydrogen",
+        endpoint=endpoint,
+    ),
+)
 
 async with Agent(config=config) as agent:
   response = await agent.chat("Explain quantum computing in one sentence.")

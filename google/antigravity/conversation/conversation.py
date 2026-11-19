@@ -33,6 +33,26 @@ from google.antigravity.connections import connection as connection_lib
 _DEFAULT_MAX_HISTORY_SIZE = 10_000
 
 
+def _is_root_compaction(step: types.Step) -> bool:
+  """Returns True when a step marks a completed root-conversation compaction."""
+  # Subagent steps (depth > 0) are multiplexed into the same stream; compacting
+  # a subagent's isolated context does not compact the root conversation.
+  return (
+      step.type == types.StepType.COMPACTION
+      and step.status == types.StepStatus.DONE
+      and step.depth == 0
+  )
+
+
+def _is_root_finish(step: types.Step) -> bool:
+  """Returns True when a step is a root-conversation FINISH step."""
+  return (
+      step.type == types.StepType.FINISH
+      and step.depth == 0
+      and not step.parent_trajectory_id
+  )
+
+
 class Conversation:
   """Stateful session wrapping a single conversation with the agent.
 
@@ -63,9 +83,13 @@ class Conversation:
     self._compaction_indices: list[int] = []
     self._max_history_size = max_history_size
     self._turn_start_usage: types.UsageMetadata | None = None
+    self._last_turn_structured_output: Any | None = None
+    self._active_response: types.ChatResponse | None = None
     for step in history or []:
       self._steps.append(step)
-      if step.type == types.StepType.COMPACTION:
+      if _is_root_finish(step):
+        self._last_turn_structured_output = step.structured_output
+      if _is_root_compaction(step):
         self._compaction_indices.append(len(self._steps) - 1)
     self._enforce_max_history()
 
@@ -107,18 +131,34 @@ class Conversation:
       prompt: The user message to send.
       **kwargs: Strategy-specific options.
     """
-    if self._connection.is_idle is False:
+    if (
+        self._active_response is not None
+        and not self._active_response._is_done  # pylint: disable=protected-access
+    ):
+      try:
+        await self._active_response.resolve()
+      except (
+          RuntimeError,
+          types.AntigravityCancelledError,
+          types.AntigravityExecutionError,
+      ):
+        await self._connection.wait_for_idle()
+    elif not self._connection.is_idle:
       try:
         async for _ in self.receive_steps():
           pass
-      except RuntimeError:
-        # Catches the async generator "already running" error from
-        # Python's runtime.  Intentionally broad: any RuntimeError here
-        # means we cannot drain, so falling back to wait_for_idle() is
-        # safe since the active iterator is already preserving steps.
+      except (
+          RuntimeError,
+          types.AntigravityCancelledError,
+          types.AntigravityExecutionError,
+      ):
+        # Catches the async generator "already running" error from Python's
+        # runtime or prior-turn cancellation/execution errors. Falling back to
+        # wait_for_idle() ensures the backend is ready for the next turn.
         await self._connection.wait_for_idle()
     self._turn_start_indices.append(len(self._steps))
     self._turn_start_usage = self._connection.cumulative_usage.model_copy()
+    self._last_turn_structured_output = None
     await self._connection.send(prompt, **kwargs)
 
   async def receive_steps(self) -> AsyncIterator[types.Step]:
@@ -135,7 +175,9 @@ class Conversation:
     """
     async for step in self._connection.receive_steps():
       self._steps.append(step)
-      if step.type == types.StepType.COMPACTION:
+      if _is_root_finish(step):
+        self._last_turn_structured_output = step.structured_output
+      if _is_root_compaction(step):
         self._compaction_indices.append(len(self._steps) - 1)
       self._enforce_max_history()
       yield step
@@ -183,15 +225,12 @@ class Conversation:
             yield call
 
   def get_last_structured_output(self) -> Any | None:
-    """Extracts the structured output payload from the most recent FINISH step.
+    """Extracts the structured output payload from the most recent turn.
 
     Returns:
       The parsed JSON structured output object, or None if not found.
     """
-    for step in reversed(self._steps):
-      if step.type == types.StepType.FINISH:
-        return step.structured_output
-    return None
+    return self._last_turn_structured_output
 
   async def chat(
       self, prompt: types.Content | None = None, **kwargs: Any
@@ -209,7 +248,10 @@ class Conversation:
       A lazy streaming ChatResponse object wrapping the chunk generator.
     """
     await self.send(prompt, **kwargs)
-    return types.ChatResponse(self.receive_chunks(), conversation=self)
+    self._active_response = types.ChatResponse(
+        self.receive_chunks(), conversation=self
+    )
+    return self._active_response
 
   # ---------------------------------------------------------------------------
   # History and state
@@ -258,6 +300,7 @@ class Conversation:
     self._turn_start_indices.clear()
     self._compaction_indices.clear()
     self._turn_start_usage = None
+    self._last_turn_structured_output = None
 
   def _enforce_max_history(self) -> None:
     """Trims history to max_history_size if a limit is set."""

@@ -18,6 +18,7 @@ import asyncio
 import collections
 import importlib.metadata
 import importlib.resources
+import io
 import json
 import logging
 import os
@@ -29,7 +30,7 @@ import struct
 import subprocess
 import sys
 import threading
-from typing import Any, AsyncIterator, Callable, Sequence, cast
+from typing import Any, AsyncIterator, Callable, Mapping, Sequence, cast
 
 from google.protobuf import json_format
 from typing_extensions import override
@@ -53,7 +54,7 @@ CLOSE_SENTINEL = event_processor.CLOSE_SENTINEL
 # tests fast.
 _PROCESS_WAIT_TIMEOUT_SECONDS = 3 * 60
 _MAX_WEBSOCKET_CONNECT_RETRIES = 5
-
+_GEMINI_BASE_URL_ENV_VAR = "GOOGLE_GEMINI_BASE_URL"
 
 _SESSION_CONTINUATION_MODE_MAP = {
     types.SessionContinuationMode.RESUME: localharness_pb2.HarnessConfig.RESUME,
@@ -215,10 +216,33 @@ def build_tool_output_truncation_proto(
   return proto
 
 
+def _resolve_gemini_base_url(
+    endpoint: types.GeminiAPIEndpoint,
+    env: Mapping[str, str] | None = None,
+) -> str:
+  """Resolves the effective base URL for a Gemini API endpoint."""
+  if endpoint.base_url:
+    return endpoint.base_url
+  if env is not None:
+    return env.get(_GEMINI_BASE_URL_ENV_VAR, "")
+  return ""
+
+
 def build_models_proto(
     models: list[types.ModelTarget],
+    env: Mapping[str, str] | None = None,
 ) -> list[localharness_pb2.ModelConfig]:
-  """Builds a list of ModelConfig protos from a ModelConfig list."""
+  """Builds a list of ModelConfig protos from a ModelConfig list.
+
+  Args:
+    models: Model targets to convert.
+    env: Optional resolved environment mapping used to populate empty
+      GeminiAPIEndpoint.base_url fields from GOOGLE_GEMINI_BASE_URL. When None,
+      environment variables are not consulted.
+
+  Returns:
+    A list of localharness_pb2.ModelConfig protos matching ``models``.
+  """
   protos = []
   for m in models:
     proto = localharness_pb2.ModelConfig(
@@ -227,7 +251,7 @@ def build_models_proto(
     )
     if isinstance(m.endpoint, types.GeminiAPIEndpoint):
       api_endpoint_proto = localharness_pb2.GeminiAPIEndpoint(
-          base_url=m.endpoint.base_url or "",
+          base_url=_resolve_gemini_base_url(m.endpoint, env),
           http_headers=m.endpoint.http_headers or {},
           api_key=m.endpoint.api_key or "",
       )
@@ -555,8 +579,10 @@ class LocalConnection(connection.Connection):
           line = raw_line.decode("utf-8", errors="replace").rstrip()
           self._stderr_lines.append(line)
           logging.info("harness stderr: %s", line)
-      except ValueError:
+      except (OSError, ValueError):
         pass  # Stream closed.
+      finally:
+        _close_pipe(stderr_stream)
 
     t = threading.Thread(target=_drain, daemon=True, name="harness-stderr")
     t.start()
@@ -572,16 +598,17 @@ class LocalConnection(connection.Connection):
     """Tears down the harness connection in a careful order."""
     self._disconnecting = True
     hook_error = None
-
-    # Dispatch session end hook before tearing down via Go localharness RPC.
-    if self._hook_runner and self._hook_runner.on_session_end_hooks:
-      try:
-        await self._send_session_end_request()
-        await self._processor.session_end_done.wait()
-      except Exception as e:  # pylint: disable=broad-except
-        hook_error = e
+    process_cleaned_up = False
 
     try:
+      # Dispatch session end hook before tearing down via Go localharness RPC.
+      if self._hook_runner and self._hook_runner.on_session_end_hooks:
+        try:
+          await self._send_session_end_request()
+          await self._processor.session_end_done.wait()
+        except Exception as e:  # pylint: disable=broad-except
+          hook_error = e
+
       # Cancel and await background tasks in the processor
       await self._processor.cancel_background_tasks()
 
@@ -594,12 +621,12 @@ class LocalConnection(connection.Connection):
       # Close the WebSocket first.
       try:
         await asyncio.wait_for(self._ws.close(), timeout=0.5)
-      except asyncio.TimeoutError:
+      except (asyncio.TimeoutError, OSError, websockets.WebSocketException):
         pass
 
       # Close stdin to signal the Go main loop to exit.
       if self._process and self._process.stdin:
-        self._process.stdin.close()
+        _close_pipe(self._process.stdin)
 
       # Wait for the process to exit, escalating if needed.
       if self._process:
@@ -611,10 +638,21 @@ class LocalConnection(connection.Connection):
             self._process.wait(timeout=1)
           except subprocess.TimeoutExpired:
             self._process.kill()
-            self._process.wait(timeout=1)
+            try:
+              self._process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+              pass
 
         if self._stderr_thread:
           self._stderr_thread.join(timeout=1.0)
+
+        _close_pipe(self._process.stdout)
+        # Closing a BufferedReader blocks while another thread is inside
+        # readline(), so leave stderr to the daemon reader thread if it is
+        # still alive (e.g. a grandchild process still holds the write end).
+        if not self._is_stderr_reader_alive():
+          _close_pipe(self._process.stderr)
+        process_cleaned_up = True
 
         returncode = self._process.poll()
         if returncode is None:
@@ -626,8 +664,28 @@ class LocalConnection(connection.Connection):
               f"\nHarness stderr:\n{stderr_tail}"
           )
     finally:
-      if hook_error is not None:
-        raise hook_error
+      for task in list(
+          self._processor._background_tasks  # pylint: disable=protected-access
+      ):
+        task.cancel()
+      if not self._reader_task.done():
+        # The task cannot be awaited safely here because this coroutine may
+        # itself be cancelled; requesting cancellation is best-effort.
+        self._reader_task.cancel()
+      _close_ws_transport(self._ws)
+      if self._process and not process_cleaned_up:
+        _kill_and_reap_process(self._process, close_stderr=False)
+        if self._stderr_thread:
+          self._stderr_thread.join(timeout=0.2)
+        if not self._is_stderr_reader_alive():
+          _close_pipe(self._process.stderr)
+
+    if hook_error is not None:
+      raise hook_error
+
+  def _is_stderr_reader_alive(self) -> bool:
+    """Returns True if the background stderr reader thread is still running."""
+    return bool(self._stderr_thread and self._stderr_thread.is_alive())
 
   async def cancel(self) -> None:
     """Cancels the current turn."""
@@ -905,6 +963,71 @@ def to_system_instructions_proto(
       appended.appended_sections.add(title=sec.title, content=sec.content)
     proto.appended.CopyFrom(appended)
   return proto
+
+
+def _close_pipe(pipe: Any) -> None:
+  """Best-effort closes a subprocess stdio pipe without raising OSError."""
+  if pipe is not None:
+    try:
+      pipe.close()
+    except OSError:
+      pass
+
+
+def _close_ws_transport(ws: Any) -> None:
+  """Synchronously closes a WebSocket's underlying asyncio transport."""
+  transport = getattr(ws, "transport", None)
+  if isinstance(transport, asyncio.BaseTransport):
+    try:
+      transport.close()
+    except (OSError, RuntimeError):
+      pass
+
+
+def _read_and_close_stderr(
+    process: subprocess.Popen[bytes], *, timeout: float = 0.2
+) -> str:
+  """Reads available stderr with a bounded timeout and closes the pipe."""
+  stderr_stream = process.stderr
+  if stderr_stream is None:
+    return ""
+  chunks: list[bytes] = []
+
+  def _drain() -> None:
+    try:
+      if isinstance(stderr_stream, io.BufferedReader):
+        while chunk := stderr_stream.read1(4096):
+          chunks.append(chunk)
+      else:
+        data = stderr_stream.read()
+        if isinstance(data, bytes):
+          chunks.append(data)
+    except (OSError, ValueError):
+      pass
+    finally:
+      _close_pipe(stderr_stream)
+
+  reader = threading.Thread(
+      target=_drain, daemon=True, name="harness-stderr-cleanup"
+  )
+  reader.start()
+  reader.join(timeout=timeout)
+  return b"".join(list(chunks)).decode("utf-8", errors="replace")
+
+
+def _kill_and_reap_process(
+    process: subprocess.Popen[bytes], *, close_stderr: bool = True
+) -> None:
+  """Closes stdio pipes, kills, and best-effort reaps a subprocess."""
+  _close_pipe(process.stdin)
+  _close_pipe(process.stdout)
+  process.kill()
+  try:
+    process.wait(timeout=1)
+  except subprocess.TimeoutExpired:
+    pass
+  if close_stderr:
+    _close_pipe(process.stderr)
 
 
 class LocalConnectionStrategy(connection.ConnectionStrategy):
@@ -1281,7 +1404,13 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
 
     models_protos = []
     if self._models:
-      models_protos = build_models_proto(self._models)
+      harness_env: Mapping[str, str] = os.environ
+      if self._env:
+        harness_env = {
+            **os.environ,
+            **{str(k): str(v) for k, v in self._env.items()},
+        }
+      models_protos = build_models_proto(self._models, env=harness_env)
     workspace_protos = [
         localharness_pb2.Workspace(
             filesystem_workspace=localharness_pb2.FilesystemWorkspace(
@@ -1467,7 +1596,22 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
   async def _connect_websocket(
       self, port: int, api_key: str, process: subprocess.Popen[bytes]
   ) -> tuple[Any, str]:
-    """Attempts to connect to the local harness WebSocket with backoff."""
+    """Attempts to connect to the local harness WebSocket with backoff.
+
+    Args:
+      port: The local port the harness WebSocket server listens on.
+      api_key: The per-session key sent in the x-goog-api-key header.
+      process: The spawned localharness subprocess, passed so subclasses and
+        wrappers can track or inspect it while establishing the connection.
+
+    Returns:
+      A tuple of the connected WebSocket and the URL it connected to.
+
+    Raises:
+      RuntimeError: If every connection attempt fails. The caller owns
+        subprocess cleanup.
+    """
+    del process  # Unused; _spawn_harness_and_connect_ws owns cleanup.
     for attempt in range(_MAX_WEBSOCKET_CONNECT_RETRIES):
       for host in ("localhost", "127.0.0.1"):
         ws_url = f"ws://{host}:{port}/"
@@ -1482,17 +1626,13 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
           last_exception = e
       await asyncio.sleep(0.1 * (2**attempt))
 
-    process.kill()
-    stderr = ""
-    if process.stderr is not None:
-      stderr = process.stderr.read().decode("utf-8")
     raise RuntimeError(
         f"Failed to connect to WebSocket at {ws_url} after"
-        f" {_MAX_WEBSOCKET_CONNECT_RETRIES} attempts. Stderr: {stderr}"
+        f" {_MAX_WEBSOCKET_CONNECT_RETRIES} attempts."
     ) from last_exception
 
   async def _spawn_harness_and_connect_ws(
-      self, *, use_interactions_api: bool = False
+      self,
   ) -> tuple[subprocess.Popen[bytes], Any, str]:
     """Spawns the localharness process, exchanges stdio config, and connects WS."""
     sdk_version = _get_sdk_version()
@@ -1511,8 +1651,6 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
         client_info=client_info_proto,
         env=env_map,
     )
-    if use_interactions_api:
-      input_config.use_interactions_api = True
 
     merged_env = {**os.environ, **env_map} if self._env is not None else None
 
@@ -1524,30 +1662,59 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
         env=merged_env,
     )
 
-    serialized = input_config.SerializeToString()
-    assert process.stdin is not None
-    assert process.stdout is not None
-    assert process.stderr is not None
-    # Note for humans: Pack length as 4-byte uint (little-endian)
-    process.stdin.write(struct.pack("<I", len(serialized)) + serialized)
-    process.stdin.flush()
-    raw_len = process.stdout.read(4)
-    if not raw_len:
-      stderr_output = process.stderr.read().decode("utf-8")
-      raise RuntimeError(
-          f"Failed to read length from stdout. Stderr: {stderr_output}"
+    try:
+      serialized = input_config.SerializeToString()
+      assert process.stdin is not None
+      assert process.stdout is not None
+      assert process.stderr is not None
+      # Note for humans: Pack length as 4-byte uint (little-endian)
+      process.stdin.write(struct.pack("<I", len(serialized)) + serialized)
+      process.stdin.flush()
+      raw_len = process.stdout.read(4)
+      if not raw_len:
+        raise RuntimeError("Failed to read length from stdout.")
+      length = struct.unpack("<I", raw_len)[0]
+      output_config = localharness_pb2.OutputConfig()
+      output_config.ParseFromString(process.stdout.read(length))
+      # Retry the WebSocket connection with backoff. The harness process may
+      # need a moment to start listening after writing its OutputConfig. We try
+      # localhost first and fall back to 127.0.0.1, as some environments may not
+      # resolve localhost.
+      ws, ws_url = await self._connect_websocket(
+          output_config.port, output_config.api_key, process
       )
-    length = struct.unpack("<I", raw_len)[0]
-    output_config = localharness_pb2.OutputConfig()
-    output_config.ParseFromString(process.stdout.read(length))
-    # Retry the WebSocket connection with backoff. The harness process may
-    # need a moment to start listening after writing its OutputConfig. We try
-    # localhost first and fall back to 127.0.0.1, as some environments may not
-    # resolve localhost.
-    ws, ws_url = await self._connect_websocket(
-        output_config.port, output_config.api_key, process
-    )
-    return process, ws, ws_url
+      return process, ws, ws_url
+    except Exception as e:
+      _kill_and_reap_process(process, close_stderr=False)
+      stderr_output = _read_and_close_stderr(process)
+      if "Stderr:" in str(e):
+        raise
+      raise RuntimeError(f"{e} Stderr: {stderr_output}") from (e.__cause__ or e)
+    except BaseException:
+      _kill_and_reap_process(process)
+      raise
+
+  async def _cleanup_failed_handshake(
+      self,
+      process: subprocess.Popen[bytes],
+      ws: Any,
+      *,
+      read_stderr: bool = False,
+  ) -> str:
+    """Terminates subprocess, closes pipes/WS, and optionally reads stderr."""
+    stderr_output = ""
+    try:
+      _kill_and_reap_process(process, close_stderr=not read_stderr)
+      if read_stderr:
+        stderr_output = _read_and_close_stderr(process)
+    finally:
+      try:
+        await asyncio.wait_for(ws.close(), timeout=0.5)
+      except Exception:  # pylint: disable=broad-exception-caught
+        pass
+      finally:
+        _close_ws_transport(ws)
+    return stderr_output
 
   async def __aenter__(self) -> None:
     """Starts the backend."""
@@ -1580,12 +1747,16 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
             harness_config.harness_side_tools.run_command, sandbox_status
         )
     except Exception as e:
-      process.kill()
-      stderr_output = process.stderr.read().decode("utf-8")
+      stderr_output = await self._cleanup_failed_handshake(
+          process, ws, read_stderr=True
+      )
       raise RuntimeError(
           f"Failed to initialize conversation at {ws_url}. Stderr:"
           f" {stderr_output}"
       ) from e
+    except BaseException:
+      await self._cleanup_failed_handshake(process, ws)
+      raise
     self._connection = LocalConnection(
         process=process,
         ws=ws,
@@ -1604,5 +1775,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
   async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
     """Tears down the backend and releases all resources."""
     if hasattr(self, "_connection") and self._connection:
-      await self._connection.disconnect()
-      self._connection = None
+      try:
+        await self._connection.disconnect()
+      finally:
+        self._connection = None
